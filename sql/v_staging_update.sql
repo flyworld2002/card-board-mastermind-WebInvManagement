@@ -10,7 +10,14 @@
 -- and new columns are only appended.
 -- ============================================================
 
-CREATE OR REPLACE VIEW v_staging AS
+-- Note: column order changes from the original view (staging_id is now
+-- first), so CREATE OR REPLACE VIEW is not usable here -- Postgres
+-- rejects reordering/renaming existing columns that way. Drop and
+-- recreate instead.
+
+DROP VIEW IF EXISTS v_staging;
+
+CREATE VIEW v_staging AS
 SELECT
     s.id AS staging_id,
     s.source,
