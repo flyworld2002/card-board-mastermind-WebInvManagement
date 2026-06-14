@@ -269,6 +269,31 @@ function renderExpandedRow(container, row) {
     td.style.background = 'var(--bg-secondary)';
     td.style.padding = '16px';
 
+    // Processed/skipped rows are read-only -- editing or pushing again
+    // would not propagate to inventory and could confuse the user.
+    if (row.status === 'processed' || row.status === 'skipped') {
+        const label = row.status === 'processed'
+            ? 'This row has already been pushed to inventory.'
+            : 'This row was skipped.';
+
+        td.innerHTML = `
+            <div class="expanded-row" data-staging-id="${row.staging_id}">
+                <p style="color:var(--text-secondary); margin:0 0 12px;">${label}</p>
+                <div style="display:flex; gap:16px; flex-wrap:wrap; color:var(--text-secondary); font-size:13px;">
+                    <span>Condition: ${escapeHtml(row.condition || '-')}</span>
+                    <span>Quantity: ${row.quantity ?? '-'}</span>
+                    <span>Foil type: ${escapeHtml(row.foil_type || '-')}</span>
+                    <span>Foil pattern: ${escapeHtml(row.foil_pattern || '-')}</span>
+                    <span>Price: ${formatPrice(row.cost_per_card)}</span>
+                </div>
+                ${row.notes ? `<p style="color:var(--text-secondary); font-size:13px; margin-top:8px;">Notes: ${escapeHtml(row.notes)}</p>` : ''}
+            </div>
+        `;
+
+        tr.appendChild(td);
+        return tr;
+    }
+
     td.innerHTML = `
         <div class="expanded-row" data-staging-id="${row.staging_id}">
             <div style="display:flex; gap:16px; flex-wrap:wrap; margin-bottom:12px;">
@@ -302,7 +327,7 @@ function renderExpandedRow(container, row) {
 
             <div style="display:flex; gap:8px; margin-top:12px;">
                 <button class="btn save-btn">Save changes</button>
-                <button class="btn btn-primary push-btn" ${row.match_status !== 'matched' ? 'disabled' : ''}>
+                <button class="btn btn-primary push-btn" ${(row.match_status !== 'matched' || row.status === 'processed') ? 'disabled' : ''}>
                     Push to inventory
                 </button>
                 <button class="btn skip-btn">Skip</button>
