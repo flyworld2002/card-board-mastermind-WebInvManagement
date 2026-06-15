@@ -82,10 +82,8 @@ async function loadSets() {
 }
 
 /**
- * Load counts for all filter options, respecting current filters.
- * For each filter field, query staging grouped by that field,
- * applying all OTHER active filters. Counts update dynamically as
- * filters change, showing what's available given current selections.
+ * Load counts for all filter options by fetching rows and grouping client-side.
+ * Much simpler than trying to use grouped queries.
  */
 async function loadFilterCounts() {
     const f = state.filters;
@@ -97,87 +95,46 @@ async function loadFilterCounts() {
         set_name: {},
     };
 
-    // Helper: build a base query with all filters EXCEPT the one being grouped
-    const buildBaseQuery = (excludeField) => {
-        let q = supabase.from('v_staging').select('*');
+    // Build base query with all filters
+    let q = supabase.from('v_staging').select('source,status,match_status,import_batch,set_name,matched_set_name');
 
-        if (excludeField !== 'source' && f.source !== 'all') {
-            q = q.eq('source', f.source);
-        }
-        if (excludeField !== 'status' && f.status !== 'all') {
-            q = q.eq('status', f.status);
-        }
-        if (excludeField !== 'match_status' && f.match_status !== 'all') {
-            q = q.eq('match_status', f.match_status);
-        }
-        if (excludeField !== 'import_batch' && f.import_batch !== 'all') {
-            q = q.eq('import_batch', f.import_batch);
-        }
-        if (excludeField !== 'set_name' && f.set_name !== 'all') {
-            // For set filtering, we check matched_set_name first, then fall back to set_name.
-            // Use a simpler approach: filter by matched_set_name, then client-side filter set_name if needed.
-            // For now, just match matched_set_name to avoid complex .or() syntax issues.
-            q = q.eq('matched_set_name', f.set_name);
-        }
-        if (f.search.trim()) {
-            q = q.ilike('card_name', `%${f.search.trim()}%`);
-        }
-        return q;
-    };
+    if (f.source !== 'all') q = q.eq('source', f.source);
+    if (f.status !== 'all') q = q.eq('status', f.status);
+    if (f.match_status !== 'all') q = q.eq('match_status', f.match_status);
+    if (f.import_batch !== 'all') q = q.eq('import_batch', f.import_batch);
+    if (f.set_name !== 'all') q = q.eq('matched_set_name', f.set_name);
+    if (f.search.trim()) q = q.ilike('card_name', `%${f.search.trim()}%`);
 
-    // Load source counts
-    let { data: sourceData } = await buildBaseQuery('source').select('source');
-    if (sourceData) {
-        const counts = {};
-        sourceData.forEach(row => {
-            const src = row.source || 'unknown';
-            counts[src] = (counts[src] || 0) + 1;
-        });
-        state.counts.source = counts;
+    const { data, error } = await q;
+
+    if (error) {
+        console.error('loadFilterCounts error:', error);
+        return;
     }
 
-    // Load status counts
-    let { data: statusData } = await buildBaseQuery('status').select('status');
-    if (statusData) {
-        const counts = {};
-        statusData.forEach(row => {
-            const status = row.status || 'unknown';
-            counts[status] = (counts[status] || 0) + 1;
-        });
-        state.counts.status = counts;
-    }
+    if (!data) return;
 
-    // Load match_status counts
-    let { data: matchData } = await buildBaseQuery('match_status').select('match_status');
-    if (matchData) {
-        const counts = {};
-        matchData.forEach(row => {
-            const status = row.match_status || 'unknown';
-            counts[status] = (counts[status] || 0) + 1;
-        });
-        state.counts.match_status = counts;
-    }
+    // Group client-side
+    for (const row of data) {
+        // Source
+        const src = row.source || 'unknown';
+        state.counts.source[src] = (state.counts.source[src] || 0) + 1;
 
-    // Load import_batch counts
-    let { data: batchData } = await buildBaseQuery('import_batch').select('import_batch');
-    if (batchData) {
-        const counts = {};
-        batchData.forEach(row => {
-            const batch = row.import_batch || 'unknown';
-            counts[batch] = (counts[batch] || 0) + 1;
-        });
-        state.counts.import_batch = counts;
-    }
+        // Status
+        const status = row.status || 'unknown';
+        state.counts.status[status] = (state.counts.status[status] || 0) + 1;
 
-    // Load set_name counts (use COALESCE logic)
-    let { data: setData } = await buildBaseQuery('set_name').select('set_name,matched_set_name');
-    if (setData) {
-        const counts = {};
-        setData.forEach(row => {
-            const setName = row.matched_set_name || row.set_name || 'unknown';
-            counts[setName] = (counts[setName] || 0) + 1;
-        });
-        state.counts.set_name = counts;
+        // Match status
+        const match = row.match_status || 'unknown';
+        state.counts.match_status[match] = (state.counts.match_status[match] || 0) + 1;
+
+        // Import batch
+        const batch = row.import_batch || 'unknown';
+        state.counts.import_batch[batch] = (state.counts.import_batch[batch] || 0) + 1;
+
+        // Set name (prefer matched_set_name)
+        const setName = row.matched_set_name || row.set_name || 'unknown';
+        state.counts.set_name[setName] = (state.counts.set_name[setName] || 0) + 1;
     }
 }
 
