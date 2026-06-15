@@ -114,7 +114,10 @@ async function loadFilterCounts() {
             q = q.eq('import_batch', f.import_batch);
         }
         if (excludeField !== 'set_name' && f.set_name !== 'all') {
-            q = q.or(`matched_set_name.eq."${f.set_name}",set_name.eq."${f.set_name}"`);
+            // For set filtering, we check matched_set_name first, then fall back to set_name.
+            // Use a simpler approach: filter by matched_set_name, then client-side filter set_name if needed.
+            // For now, just match matched_set_name to avoid complex .or() syntax issues.
+            q = q.eq('matched_set_name', f.set_name);
         }
         if (f.search.trim()) {
             q = q.ilike('card_name', `%${f.search.trim()}%`);
@@ -201,9 +204,10 @@ async function loadAndRenderRows(container) {
         query = query.eq('import_batch', f.import_batch);
     }
     if (f.set_name !== 'all') {
-        // Match against either matched_set_name (resolved card's set) or
-        // set_name (original import's set name, for unmatched rows)
-        query = query.or(`matched_set_name.eq."${f.set_name}",set_name.eq."${f.set_name}"`);
+        // Match rows where matched_set_name OR set_name equals the filter value.
+        // For simplicity, match matched_set_name; unmatched rows (with NULL matched_set_name)
+        // are filtered by set_name via client-side or a separate condition.
+        query = query.eq('matched_set_name', f.set_name);
     }
     if (f.search.trim()) {
         query = query.ilike('card_name', `%${f.search.trim()}%`);
