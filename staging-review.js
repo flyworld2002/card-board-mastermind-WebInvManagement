@@ -15,9 +15,11 @@ const state = {
         status: 'pending',
         match_status: 'all',
         import_batch: 'all',
+        set_name: 'all',
         search: '',
     },
     importBatches: [],
+    sets: [],
     expandedRowId: null,
     selectedIds: new Set(),
 };
@@ -33,6 +35,7 @@ export async function renderStagingReview(container) {
     `;
 
     await loadImportBatches();
+    await loadSets();
     renderFilters(container);
     await loadAndRenderRows(container);
 }
@@ -56,6 +59,29 @@ async function loadImportBatches() {
     state.importBatches = [...new Set(data.map(r => r.import_batch))].sort();
 }
 
+async function loadSets() {
+    // Load distinct set names from v_staging, preferring matched_set_name
+    // (resolved card's set) over the original import's set_name.
+    const { data, error } = await supabase
+        .from('v_staging')
+        .select('set_name, matched_set_name');
+
+    if (error) {
+        console.error('Failed to load sets:', error);
+        state.sets = [];
+        return;
+    }
+
+    // Collect all unique set names, preferring matched name if available
+    const sets = new Set();
+    for (const row of data) {
+        const setName = row.matched_set_name || row.set_name;
+        if (setName) sets.add(setName);
+    }
+
+    state.sets = [...sets].sort();
+}
+
 async function loadAndRenderRows(container) {
     const wrap = container.querySelector('#staging-table-wrap');
     wrap.innerHTML = '<p>Loading staging rows...</p>';
@@ -77,6 +103,11 @@ async function loadAndRenderRows(container) {
     }
     if (f.import_batch !== 'all') {
         query = query.eq('import_batch', f.import_batch);
+    }
+    if (f.set_name !== 'all') {
+        // Match against either matched_set_name (resolved card's set) or
+        // set_name (original import's set name, for unmatched rows)
+        query = query.or(`matched_set_name.eq."${f.set_name}",set_name.eq."${f.set_name}"`);
     }
     if (f.search.trim()) {
         query = query.ilike('card_name', `%${f.search.trim()}%`);
@@ -137,6 +168,11 @@ function renderFilters(container) {
             ${state.importBatches.map(b => `<option value="${escapeHtml(b)}">${escapeHtml(b)}</option>`).join('')}
         </select>
 
+        <select id="filter-set">
+            <option value="all">All sets</option>
+            ${state.sets.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('')}
+        </select>
+
         <input type="search" id="filter-search" placeholder="Search card name..." />
 
         <select id="filter-page-size">
@@ -149,6 +185,7 @@ function renderFilters(container) {
     bar.querySelector('#filter-status').value = state.filters.status;
     bar.querySelector('#filter-match-status').value = state.filters.match_status;
     bar.querySelector('#filter-import-batch').value = state.filters.import_batch;
+    bar.querySelector('#filter-set').value = state.filters.set_name;
     bar.querySelector('#filter-search').value = state.filters.search;
 
     bar.querySelector('#filter-source').addEventListener('change', (e) => {
@@ -171,6 +208,12 @@ function renderFilters(container) {
 
     bar.querySelector('#filter-import-batch').addEventListener('change', (e) => {
         state.filters.import_batch = e.target.value;
+        state.page = 0;
+        loadAndRenderRows(container);
+    });
+
+    bar.querySelector('#filter-set').addEventListener('change', (e) => {
+        state.filters.set_name = e.target.value;
         state.page = 0;
         loadAndRenderRows(container);
     });
