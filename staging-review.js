@@ -12,7 +12,7 @@ const state = {
     rows: [],
     filters: {
         source: 'all',
-        status: 'pending',
+        status: 'all',
         match_status: 'all',
         import_batch: 'all',
         set_name: 'all',
