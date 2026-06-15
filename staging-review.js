@@ -19,6 +19,7 @@ const state = {
     },
     importBatches: [],
     expandedRowId: null,
+    selectedIds: new Set(),
 };
 
 export async function renderStagingReview(container) {
@@ -204,10 +205,30 @@ function renderTable(container) {
         return;
     }
 
+    // Only matched + non-processed rows are selectable for batch push
+    const selectableRows = state.rows.filter(r => r.match_status === 'matched' && r.status !== 'processed');
+    const selectedOnPage = selectableRows.filter(r => state.selectedIds.has(r.staging_id));
+    const allSelected = selectableRows.length > 0 && selectedOnPage.length === selectableRows.length;
+
     wrap.innerHTML = `
+        <div class="batch-actions-bar" style="display:flex; align-items:center; gap:12px; margin-bottom:8px; min-height:32px;">
+            <span style="font-size:13px; color:var(--text-secondary);">
+                ${state.selectedIds.size} selected
+            </span>
+            <button class="btn btn-primary batch-push-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
+                Push selected to inventory
+            </button>
+            <button class="btn batch-clear-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
+                Clear selection
+            </button>
+            <div class="batch-progress" style="font-size:13px;"></div>
+        </div>
         <table>
             <thead>
                 <tr>
+                    <th style="width:24px;">
+                        <input type="checkbox" id="select-all-checkbox" ${allSelected ? 'checked' : ''} ${selectableRows.length === 0 ? 'disabled' : ''} />
+                    </th>
                     <th style="width:24px;"></th>
                     <th>Card name</th>
                     <th>Set</th>
@@ -232,32 +253,70 @@ function renderTable(container) {
             tbody.appendChild(renderExpandedRow(container, row));
         }
     }
+
+    // Select-all checkbox
+    wrap.querySelector('#select-all-checkbox')?.addEventListener('change', (e) => {
+        if (e.target.checked) {
+            selectableRows.forEach(r => state.selectedIds.add(r.staging_id));
+        } else {
+            selectableRows.forEach(r => state.selectedIds.delete(r.staging_id));
+        }
+        renderTable(container);
+    });
+
+    // Clear selection
+    wrap.querySelector('.batch-clear-btn')?.addEventListener('click', () => {
+        state.selectedIds.clear();
+        renderTable(container);
+    });
+
+    // Batch push
+    wrap.querySelector('.batch-push-btn')?.addEventListener('click', () => batchPushSelected(container));
 }
 
 function renderRow(container, row) {
     const tr = document.createElement('tr');
     tr.dataset.stagingId = row.staging_id;
-    tr.style.cursor = 'pointer';
 
     const foil = [row.foil_pattern, row.foil_type].filter(Boolean).join(' / ') || '-';
     const matchBadge = `<span class="badge badge-${row.match_status || 'not_found'}">${row.match_status || 'not_found'}</span>`;
+    const selectable = row.match_status === 'matched' && row.status !== 'processed';
+    const checked = state.selectedIds.has(row.staging_id);
 
     tr.innerHTML = `
-        <td>${state.expandedRowId === row.staging_id ? '&#9660;' : '&#9656;'}</td>
-        <td>${escapeHtml(row.card_name || '')}</td>
-        <td>${escapeHtml(row.set_name || row.matched_set_name || '-')}</td>
-        <td>${escapeHtml(row.condition || '-')}</td>
-        <td>${escapeHtml(foil)}</td>
-        <td>${row.quantity ?? '-'}</td>
-        <td>${formatPrice(row.cost_per_card)}</td>
-        <td>${matchBadge}</td>
-        <td>${escapeHtml(row.status || '-')}</td>
+        <td>
+            <input type="checkbox" class="row-select-checkbox" ${selectable ? '' : 'disabled'} ${checked ? 'checked' : ''} />
+        </td>
+        <td style="cursor:pointer;">${state.expandedRowId === row.staging_id ? '&#9660;' : '&#9656;'}</td>
+        <td style="cursor:pointer;">${escapeHtml(row.card_name || '')}</td>
+        <td style="cursor:pointer;">${escapeHtml(row.set_name || row.matched_set_name || '-')}</td>
+        <td style="cursor:pointer;">${escapeHtml(row.condition || '-')}</td>
+        <td style="cursor:pointer;">${escapeHtml(foil)}</td>
+        <td style="cursor:pointer;">${row.quantity ?? '-'}</td>
+        <td style="cursor:pointer;">${formatPrice(row.cost_per_card)}</td>
+        <td style="cursor:pointer;">${matchBadge}</td>
+        <td style="cursor:pointer;">${escapeHtml(row.status || '-')}</td>
     `;
 
-    tr.addEventListener('click', () => {
-        state.expandedRowId = state.expandedRowId === row.staging_id ? null : row.staging_id;
+    // Checkbox toggling shouldn't expand/collapse the row
+    const checkboxTd = tr.querySelector('td:first-child');
+    checkboxTd.addEventListener('click', (e) => e.stopPropagation());
+    tr.querySelector('.row-select-checkbox').addEventListener('change', (e) => {
+        if (e.target.checked) {
+            state.selectedIds.add(row.staging_id);
+        } else {
+            state.selectedIds.delete(row.staging_id);
+        }
         renderTable(container);
     });
+
+    // Remaining cells expand/collapse
+    for (const td of tr.querySelectorAll('td:not(:first-child)')) {
+        td.addEventListener('click', () => {
+            state.expandedRowId = state.expandedRowId === row.staging_id ? null : row.staging_id;
+            renderTable(container);
+        });
+    }
 
     return tr;
 }
@@ -273,12 +332,12 @@ function renderExpandedRow(container, row) {
     td.style.background = 'var(--bg-secondary)';
     td.style.padding = '16px';
 
-    // Processed/skipped rows are read-only -- editing or pushing again
-    // would not propagate to inventory and could confuse the user.
-    if (row.status === 'processed' || row.status === 'skipped') {
-        const label = row.status === 'processed'
-            ? 'This row has already been pushed to inventory.'
-            : 'This row was skipped.';
+    // Processed rows are read-only -- editing or pushing again would not
+    // propagate to inventory (already pushed) and could confuse the user.
+    // Skipped rows remain fully editable/re-pushable, since the user may
+    // resolve the match and want to push them after all.
+    if (row.status === 'processed') {
+        const label = 'This row has already been pushed to inventory.';
 
         td.innerHTML = `
             <div class="expanded-row" data-staging-id="${row.staging_id}">
@@ -557,17 +616,30 @@ async function resolveStagingMatch(container, td, row, option) {
     renderTable(container);
 }
 
+/**
+ * Calls the push_staging_row_to_inventory RPC for a single staging row.
+ * Returns { success: true } or { success: false, error: string }.
+ */
+async function pushStagingRowRpc(stagingId) {
+    const { error } = await supabase.rpc('push_staging_row_to_inventory', {
+        p_staging_id: stagingId,
+    });
+
+    if (error) {
+        return { success: false, error: error.message };
+    }
+    return { success: true };
+}
+
 async function pushRowToInventory(container, td, row) {
     const btn = td.querySelector('.push-btn');
     btn.disabled = true;
     btn.textContent = 'Pushing...';
 
-    const { data, error } = await supabase.rpc('push_staging_row_to_inventory', {
-        p_staging_id: row.staging_id,
-    });
+    const result = await pushStagingRowRpc(row.staging_id);
 
-    if (error) {
-        showRowMessage(td, 'Push failed: ' + error.message, 'danger');
+    if (!result.success) {
+        showRowMessage(td, 'Push failed: ' + result.error, 'danger');
         btn.disabled = false;
         btn.textContent = 'Push to inventory';
         return;
@@ -579,6 +651,57 @@ async function pushRowToInventory(container, td, row) {
     setTimeout(async () => {
         advanceToNextRow(container, row.staging_id);
     }, 400);
+}
+
+/**
+ * Pushes all currently-selected staging rows to inventory, one at a time,
+ * showing progress as it goes. Stops on first error but reports how many
+ * succeeded before the failure.
+ */
+async function batchPushSelected(container) {
+    const wrap = container.querySelector('#staging-table-wrap');
+    const progressEl = wrap.querySelector('.batch-progress');
+    const pushBtn = wrap.querySelector('.batch-push-btn');
+    const clearBtn = wrap.querySelector('.batch-clear-btn');
+
+    const ids = [...state.selectedIds];
+    if (ids.length === 0) return;
+
+    pushBtn.disabled = true;
+    clearBtn.disabled = true;
+
+    let succeeded = 0;
+    let failed = 0;
+    let firstError = null;
+
+    for (let i = 0; i < ids.length; i++) {
+        progressEl.textContent = `Pushing ${i + 1} of ${ids.length}...`;
+
+        const result = await pushStagingRowRpc(ids[i]);
+
+        if (result.success) {
+            succeeded++;
+            state.selectedIds.delete(ids[i]);
+        } else {
+            failed++;
+            if (!firstError) firstError = result.error;
+            // Stop on first error -- remaining rows are left selected
+            // so the user can retry or investigate.
+            break;
+        }
+    }
+
+    if (failed > 0) {
+        progressEl.innerHTML = `<span style="color:var(--danger)">
+            Pushed ${succeeded} of ${ids.length}. Stopped on error: ${escapeHtml(firstError)}
+        </span>`;
+    } else {
+        progressEl.innerHTML = `<span style="color:var(--success)">
+            Pushed ${succeeded} row${succeeded === 1 ? '' : 's'} to inventory.
+        </span>`;
+    }
+
+    await loadAndRenderRows(container);
 }
 
 async function skipRow(container, td, row) {
