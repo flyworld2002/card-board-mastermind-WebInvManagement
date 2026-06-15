@@ -20,6 +20,9 @@ const state = {
     },
     importBatches: [],
     sets: [],
+    counts: {
+        // Structure: { source: { ebay: 10, tcgplayer: 5 }, status: { pending: 102, processed: 9600 }, ... }
+    },
     expandedRowId: null,
     selectedIds: new Set(),
 };
@@ -36,6 +39,7 @@ export async function renderStagingReview(container) {
 
     await loadImportBatches();
     await loadSets();
+    await loadFilterCounts();
     renderFilters(container);
     await loadAndRenderRows(container);
 }
@@ -75,6 +79,103 @@ async function loadSets() {
     }
 
     state.sets = data.map(r => r.name);
+}
+
+/**
+ * Load counts for all filter options, respecting current filters.
+ * For each filter field, query staging grouped by that field,
+ * applying all OTHER active filters. Counts update dynamically as
+ * filters change, showing what's available given current selections.
+ */
+async function loadFilterCounts() {
+    const f = state.filters;
+    state.counts = {
+        source: {},
+        status: {},
+        match_status: {},
+        import_batch: {},
+        set_name: {},
+    };
+
+    // Helper: build a base query with all filters EXCEPT the one being grouped
+    const buildBaseQuery = (excludeField) => {
+        let q = supabase.from('v_staging').select('*');
+
+        if (excludeField !== 'source' && f.source !== 'all') {
+            q = q.eq('source', f.source);
+        }
+        if (excludeField !== 'status' && f.status !== 'all') {
+            q = q.eq('status', f.status);
+        }
+        if (excludeField !== 'match_status' && f.match_status !== 'all') {
+            q = q.eq('match_status', f.match_status);
+        }
+        if (excludeField !== 'import_batch' && f.import_batch !== 'all') {
+            q = q.eq('import_batch', f.import_batch);
+        }
+        if (excludeField !== 'set_name' && f.set_name !== 'all') {
+            q = q.or(`matched_set_name.eq."${f.set_name}",set_name.eq."${f.set_name}"`);
+        }
+        if (f.search.trim()) {
+            q = q.ilike('card_name', `%${f.search.trim()}%`);
+        }
+        return q;
+    };
+
+    // Load source counts
+    let { data: sourceData } = await buildBaseQuery('source').select('source');
+    if (sourceData) {
+        const counts = {};
+        sourceData.forEach(row => {
+            const src = row.source || 'unknown';
+            counts[src] = (counts[src] || 0) + 1;
+        });
+        state.counts.source = counts;
+    }
+
+    // Load status counts
+    let { data: statusData } = await buildBaseQuery('status').select('status');
+    if (statusData) {
+        const counts = {};
+        statusData.forEach(row => {
+            const status = row.status || 'unknown';
+            counts[status] = (counts[status] || 0) + 1;
+        });
+        state.counts.status = counts;
+    }
+
+    // Load match_status counts
+    let { data: matchData } = await buildBaseQuery('match_status').select('match_status');
+    if (matchData) {
+        const counts = {};
+        matchData.forEach(row => {
+            const status = row.match_status || 'unknown';
+            counts[status] = (counts[status] || 0) + 1;
+        });
+        state.counts.match_status = counts;
+    }
+
+    // Load import_batch counts
+    let { data: batchData } = await buildBaseQuery('import_batch').select('import_batch');
+    if (batchData) {
+        const counts = {};
+        batchData.forEach(row => {
+            const batch = row.import_batch || 'unknown';
+            counts[batch] = (counts[batch] || 0) + 1;
+        });
+        state.counts.import_batch = counts;
+    }
+
+    // Load set_name counts (use COALESCE logic)
+    let { data: setData } = await buildBaseQuery('set_name').select('set_name,matched_set_name');
+    if (setData) {
+        const counts = {};
+        setData.forEach(row => {
+            const setName = row.matched_set_name || row.set_name || 'unknown';
+            counts[setName] = (counts[setName] || 0) + 1;
+        });
+        state.counts.set_name = counts;
+    }
 }
 
 async function loadAndRenderRows(container) {
@@ -136,36 +237,47 @@ async function loadAndRenderRows(container) {
 
 function renderFilters(container) {
     const bar = container.querySelector('#filters-bar');
+    const c = state.counts;
+
+    // Helper to generate options with counts
+    const makeOptions = (field, data) => {
+        const options = [`<option value="all">All ${field}s</option>`];
+        for (const [key, count] of Object.entries(data).sort()) {
+            options.push(`<option value="${escapeHtml(key)}">${escapeHtml(key)} (${count})</option>`);
+        }
+        return options.join('');
+    };
 
     bar.innerHTML = `
         <select id="filter-source">
             <option value="all">All sources</option>
-            <option value="ebay">eBay</option>
-            <option value="tcgplayer">TCGPlayer</option>
+            ${Object.entries(c.source || {}).map(([src, count]) => `<option value="${escapeHtml(src)}">${escapeHtml(src)} (${count})</option>`).join('')}
         </select>
 
         <select id="filter-status">
             <option value="all">All statuses</option>
-            <option value="pending" selected>Pending</option>
-            <option value="processed">Processed</option>
-            <option value="skipped">Skipped</option>
+            ${Object.entries(c.status || {}).map(([status, count]) => `<option value="${escapeHtml(status)}">${escapeHtml(status)} (${count})</option>`).join('')}
         </select>
 
         <select id="filter-match-status">
             <option value="all">All match statuses</option>
-            <option value="matched">Matched</option>
-            <option value="ambiguous">Ambiguous</option>
-            <option value="not_found">Not found</option>
+            ${Object.entries(c.match_status || {}).map(([status, count]) => `<option value="${escapeHtml(status)}">${escapeHtml(status)} (${count})</option>`).join('')}
         </select>
 
         <select id="filter-import-batch">
-            <option value="all">All batches</option>
-            ${state.importBatches.map(b => `<option value="${escapeHtml(b)}">${escapeHtml(b)}</option>`).join('')}
+            <option value="all">All batches (${state.totalCount})</option>
+            ${(state.importBatches || []).map(b => {
+                const count = (c.import_batch || {})[b] || 0;
+                return `<option value="${escapeHtml(b)}">${escapeHtml(b)} (${count})</option>`;
+            }).join('')}
         </select>
 
         <select id="filter-set">
             <option value="all">All sets</option>
-            ${state.sets.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('')}
+            ${(state.sets || []).map(s => {
+                const count = (c.set_name || {})[s] || 0;
+                return count > 0 ? `<option value="${escapeHtml(s)}">${escapeHtml(s)} (${count})</option>` : '';
+            }).filter(Boolean).join('')}
         </select>
 
         <input type="search" id="filter-search" placeholder="Search card name..." />
@@ -183,34 +295,44 @@ function renderFilters(container) {
     bar.querySelector('#filter-set').value = state.filters.set_name;
     bar.querySelector('#filter-search').value = state.filters.search;
 
-    bar.querySelector('#filter-source').addEventListener('change', (e) => {
+    bar.querySelector('#filter-source').addEventListener('change', async (e) => {
         state.filters.source = e.target.value;
         state.page = 0;
-        loadAndRenderRows(container);
+        await loadFilterCounts();
+        renderFilters(container);
+        await loadAndRenderRows(container);
     });
 
-    bar.querySelector('#filter-status').addEventListener('change', (e) => {
+    bar.querySelector('#filter-status').addEventListener('change', async (e) => {
         state.filters.status = e.target.value;
         state.page = 0;
-        loadAndRenderRows(container);
+        await loadFilterCounts();
+        renderFilters(container);
+        await loadAndRenderRows(container);
     });
 
-    bar.querySelector('#filter-match-status').addEventListener('change', (e) => {
+    bar.querySelector('#filter-match-status').addEventListener('change', async (e) => {
         state.filters.match_status = e.target.value;
         state.page = 0;
-        loadAndRenderRows(container);
+        await loadFilterCounts();
+        renderFilters(container);
+        await loadAndRenderRows(container);
     });
 
-    bar.querySelector('#filter-import-batch').addEventListener('change', (e) => {
+    bar.querySelector('#filter-import-batch').addEventListener('change', async (e) => {
         state.filters.import_batch = e.target.value;
         state.page = 0;
-        loadAndRenderRows(container);
+        await loadFilterCounts();
+        renderFilters(container);
+        await loadAndRenderRows(container);
     });
 
-    bar.querySelector('#filter-set').addEventListener('change', (e) => {
+    bar.querySelector('#filter-set').addEventListener('change', async (e) => {
         state.filters.set_name = e.target.value;
         state.page = 0;
-        loadAndRenderRows(container);
+        await loadFilterCounts();
+        renderFilters(container);
+        await loadAndRenderRows(container);
     });
 
     bar.querySelector('#filter-page-size').addEventListener('change', (e) => {
@@ -219,10 +341,12 @@ function renderFilters(container) {
         loadAndRenderRows(container);
     });
 
-    bar.querySelector('#filter-search').addEventListener('input', debounce((e) => {
+    bar.querySelector('#filter-search').addEventListener('input', debounce(async (e) => {
         state.filters.search = e.target.value;
         state.page = 0;
-        loadAndRenderRows(container);
+        await loadFilterCounts();
+        renderFilters(container);
+        await loadAndRenderRows(container);
     }, 400));
 }
 
