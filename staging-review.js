@@ -60,11 +60,13 @@ async function loadImportBatches() {
 }
 
 async function loadSets() {
-    // Load distinct set names from v_staging, preferring matched_set_name
-    // (resolved card's set) over the original import's set_name.
+    // Load all sets from card_sets table — the complete catalog.
+    // Filtering staging by a set with no staging rows just returns empty,
+    // which is fine and keeps the dropdown comprehensive and data-driven.
     const { data, error } = await supabase
-        .from('v_staging')
-        .select('set_name, matched_set_name');
+        .from('card_sets')
+        .select('name')
+        .order('name', { ascending: true });
 
     if (error) {
         console.error('Failed to load sets:', error);
@@ -72,14 +74,7 @@ async function loadSets() {
         return;
     }
 
-    // Collect all unique set names, preferring matched name if available
-    const sets = new Set();
-    for (const row of data) {
-        const setName = row.matched_set_name || row.set_name;
-        if (setName) sets.add(setName);
-    }
-
-    state.sets = [...sets].sort();
+    state.sets = data.map(r => r.name);
 }
 
 async function loadAndRenderRows(container) {
