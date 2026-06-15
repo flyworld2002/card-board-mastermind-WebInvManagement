@@ -120,7 +120,6 @@ function renderFilters(container) {
         <select id="filter-status">
             <option value="all">All statuses</option>
             <option value="pending" selected>Pending</option>
-            <option value="approved">Approved</option>
             <option value="processed">Processed</option>
             <option value="skipped">Skipped</option>
         </select>
@@ -196,7 +195,12 @@ function renderTable(container) {
     const wrap = container.querySelector('#staging-table-wrap');
 
     if (state.rows.length === 0) {
-        wrap.innerHTML = '<p>No staging rows match the current filters.</p>';
+        wrap.innerHTML = `
+            <p>No staging rows match the current filters.</p>
+            <p style="color:var(--text-secondary); font-size:13px;">
+                Try adjusting the status, match status, or source filters above.
+            </p>
+        `;
         return;
     }
 
