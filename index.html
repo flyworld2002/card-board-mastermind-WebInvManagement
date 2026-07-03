@@ -48,6 +48,14 @@
             margin-bottom: 8px;
         }
 
+        nav.sidebar .nav-group-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--text-secondary);
+            padding: 16px 16px 6px;
+        }
+
         nav.sidebar a {
             display: block;
             padding: 10px 16px;
@@ -182,12 +190,12 @@
                 <div class="app-shell">
                     <nav class="sidebar">
                         <div class="brand">Card-Board-MasterMind</div>
+                        <div class="nav-group-label">Workflow</div>
                         <a href="#dashboard" data-page="dashboard">Dashboard</a>
                         <a href="#staging" data-page="staging">Staging Review</a>
                         <a href="#inventory" data-page="inventory">Inventory</a>
-                        <a href="#catalog" data-page="catalog">Card Catalog</a>
-                        <a href="#sets" data-page="sets">Sets</a>
-                        <a href="#pricing" data-page="pricing">Pricing</a>
+                        <a href="#catalog" data-page="catalog">Catalog</a>
+                        <a href="#configuration" data-page="configuration">Configuration</a>
                         <a href="#" id="signout-link" style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px;">Sign out</a>
                     </nav>
                     <main id="page-content">
@@ -209,8 +217,10 @@
             const hash = window.location.hash.replace('#', '') || 'dashboard';
             const content = document.getElementById('page-content');
 
+            const configKeys = ['configuration', 'sets', 'card-games', 'pricing-rules', 'listing-templates'];
             document.querySelectorAll('nav.sidebar a[data-page]').forEach(a => {
-                a.classList.toggle('active', a.dataset.page === hash);
+                const isConfigActive = a.dataset.page === 'configuration' && configKeys.includes(hash);
+                a.classList.toggle('active', a.dataset.page === hash || isConfigActive);
             });
 
             content.innerHTML = '<p>Loading...</p>';
@@ -218,17 +228,31 @@
             try {
                 switch (hash) {
                     case 'staging': {
-                        const { renderStagingReview } = await import('./staging-review.js');
+                        const { renderStagingReview } = await import(`./staging-review.js?v=${Date.now()}`);
                         await renderStagingReview(content);
                         break;
                     }
                     case 'dashboard':
-                    case 'inventory':
-                    case 'catalog':
-                    case 'sets':
-                    case 'pricing':
-                        content.innerHTML = `<p>${hash} page coming soon.</p>`;
+                    case 'inventory': {
+                        const { renderInventory } = await import(`./inventory.js?v=${Date.now()}`);
+                        await renderInventory(content);
                         break;
+                    }
+                    case 'catalog': {
+                        const { renderCatalog } = await import(`./catalog.js?v=${Date.now()}`);
+                        await renderCatalog(content);
+                        break;
+                    }
+                    case 'configuration':
+                    case 'sets':
+                    case 'card-games':
+                    case 'pricing-rules':
+                    case 'listing-templates': {
+                        const { renderConfiguration } = await import(`./configuration.js?v=${Date.now()}`);
+                        const subKey = hash === 'configuration' ? 'sets' : hash;
+                        await renderConfiguration(content, subKey);
+                        break;
+                    }
                     default:
                         content.innerHTML = '<p>Page not found.</p>';
                 }

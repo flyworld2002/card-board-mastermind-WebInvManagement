@@ -21,7 +21,10 @@ const state = {
     importBatches: [],
     sets: [],
     counts: {
-        // Structure: { source: { ebay: 10, tcgplayer: 5 }, status: { pending: 102, processed: 9600 }, ... }
+        // Filtered counts — used for numbers in parens when filters active
+    },
+    allCounts: {
+        // Full unfiltered counts — used for dropdown option lists
     },
     expandedRowId: null,
     selectedIds: new Set(),
@@ -49,10 +52,8 @@ export async function renderStagingReview(container) {
 // ----------------------------------------------------------------
 
 async function loadImportBatches() {
-    const { data, error } = await supabase
-        .from('staging')
-        .select('import_batch')
-        .not('import_batch', 'is', null);
+    // Get distinct batches from staging counts RPC (avoids row limit)
+    const { data, error } = await supabase.rpc('get_staging_counts');
 
     if (error) {
         console.error('Failed to load import batches:', error);
@@ -60,7 +61,8 @@ async function loadImportBatches() {
         return;
     }
 
-    state.importBatches = [...new Set(data.map(r => r.import_batch))].sort();
+    const batches = data?.import_batch || {};
+    state.importBatches = Object.keys(batches).filter(Boolean).sort();
 }
 
 async function loadSets() {
@@ -86,7 +88,6 @@ async function loadSets() {
  * Much simpler than trying to use grouped queries.
  */
 async function loadFilterCounts() {
-    const f = state.filters;
     state.counts = {
         source: {},
         status: {},
@@ -94,47 +95,54 @@ async function loadFilterCounts() {
         import_batch: {},
         set_name: {},
     };
+    state.allCounts = {
+        source: {},
+        status: {},
+        match_status: {},
+        import_batch: {},
+        set_name: {},
+    };
 
-    // Build base query with all filters
-    let q = supabase.from('v_staging').select('source,status,match_status,import_batch,set_name,matched_set_name');
+    const f = state.filters;
+    const hasFilter = f.source !== 'all' || f.status !== 'all' ||
+                      f.match_status !== 'all' || f.import_batch !== 'all' ||
+                      f.set_name !== 'all' || f.search.trim();
 
-    if (f.source !== 'all') q = q.eq('source', f.source);
-    if (f.status !== 'all') q = q.eq('status', f.status);
-    if (f.match_status !== 'all') q = q.eq('match_status', f.match_status);
-    if (f.import_batch !== 'all') q = q.eq('import_batch', f.import_batch);
-    if (f.set_name !== 'all') q = q.eq('matched_set_name', f.set_name);
-    if (f.search.trim()) q = q.ilike('card_name', `%${f.search.trim()}%`);
+    // Always get full unfiltered counts for dropdown options
+    const { data: allData, error: allError } = await supabase.rpc('get_staging_counts');
+    if (allError) { console.error('loadFilterCounts error:', allError); return; }
+    if (!allData) return;
 
-    const { data, error } = await q;
+    state.allCounts.source       = allData.source       || {};
+    state.allCounts.status       = allData.status       || {};
+    state.allCounts.match_status = allData.match_status || {};
+    state.allCounts.import_batch = allData.import_batch || {};
+    state.allCounts.set_name     = allData.set_name     || {};
 
-    if (error) {
-        console.error('loadFilterCounts error:', error);
-        return;
-    }
+    // Also update importBatches from full counts
+    state.importBatches = Object.keys(state.allCounts.import_batch).filter(Boolean).sort();
 
-    if (!data) return;
-
-    // Group client-side
-    for (const row of data) {
-        // Source
-        const src = row.source || 'unknown';
-        state.counts.source[src] = (state.counts.source[src] || 0) + 1;
-
-        // Status
-        const status = row.status || 'unknown';
-        state.counts.status[status] = (state.counts.status[status] || 0) + 1;
-
-        // Match status
-        const match = row.match_status || 'unknown';
-        state.counts.match_status[match] = (state.counts.match_status[match] || 0) + 1;
-
-        // Import batch
-        const batch = row.import_batch || 'unknown';
-        state.counts.import_batch[batch] = (state.counts.import_batch[batch] || 0) + 1;
-
-        // Set name (prefer matched_set_name)
-        const setName = row.matched_set_name || row.set_name || 'unknown';
-        state.counts.set_name[setName] = (state.counts.set_name[setName] || 0) + 1;
+    if (hasFilter) {
+        // Get filtered counts to show in parens
+        const params = {
+            p_source:       f.source       !== 'all' ? f.source       : null,
+            p_status:       f.status       !== 'all' ? f.status       : null,
+            p_match_status: f.match_status !== 'all' ? f.match_status : null,
+            p_import_batch: f.import_batch !== 'all' ? f.import_batch : null,
+            p_set_name:     f.set_name     !== 'all' ? f.set_name     : null,
+            p_search:       f.search.trim() || null,
+        };
+        const { data, error } = await supabase.rpc('get_staging_counts', params);
+        if (!error && data) {
+            state.counts.source       = data.source       || {};
+            state.counts.status       = data.status       || {};
+            state.counts.match_status = data.match_status || {};
+            state.counts.import_batch = data.import_batch || {};
+            state.counts.set_name     = data.set_name     || {};
+        }
+    } else {
+        // No filters — filtered counts = all counts
+        state.counts = { ...state.allCounts };
     }
 }
 
@@ -161,10 +169,7 @@ async function loadAndRenderRows(container) {
         query = query.eq('import_batch', f.import_batch);
     }
     if (f.set_name !== 'all') {
-        // Match rows where matched_set_name OR set_name equals the filter value.
-        // For simplicity, match matched_set_name; unmatched rows (with NULL matched_set_name)
-        // are filtered by set_name via client-side or a separate condition.
-        query = query.eq('matched_set_name', f.set_name);
+        query = query.or(`matched_set_name.eq.${f.set_name},set_name.eq.${f.set_name}`);
     }
     if (f.search.trim()) {
         query = query.ilike('card_name', `%${f.search.trim()}%`);
@@ -212,36 +217,57 @@ function renderFilters(container) {
     bar.innerHTML = `
         <select id="filter-source">
             <option value="all">All sources</option>
-            ${Object.entries(c.source || {}).map(([src, count]) => `<option value="${escapeHtml(src)}">${escapeHtml(src)} (${count})</option>`).join('')}
+            ${Object.keys(state.allCounts.source || {}).sort().map(src => {
+                const n = (c.source || {})[src] || 0;
+                const isSelected = src === state.filters.source;
+                if (n === 0 && !isSelected) return '';
+                return `<option value="${escapeHtml(src)}">${escapeHtml(src)} (${n})</option>`;
+            }).filter(Boolean).join('')}
         </select>
 
         <select id="filter-status">
             <option value="all">All statuses</option>
-            ${Object.entries(c.status || {}).map(([status, count]) => `<option value="${escapeHtml(status)}">${escapeHtml(status)} (${count})</option>`).join('')}
+            ${Object.keys(state.allCounts.status || {}).sort().map(status => {
+                const n = (c.status || {})[status] || 0;
+                const isSelected = status === state.filters.status;
+                if (n === 0 && !isSelected) return '';
+                return `<option value="${escapeHtml(status)}">${escapeHtml(status)} (${n})</option>`;
+            }).filter(Boolean).join('')}
         </select>
 
         <select id="filter-match-status">
             <option value="all">All match statuses</option>
-            ${Object.entries(c.match_status || {}).map(([status, count]) => `<option value="${escapeHtml(status)}">${escapeHtml(status)} (${count})</option>`).join('')}
+            ${Object.keys(state.allCounts.match_status || {}).sort().map(status => {
+                const n = (c.match_status || {})[status] || 0;
+                const isSelected = status === state.filters.match_status;
+                if (n === 0 && !isSelected) return '';
+                return `<option value="${escapeHtml(status)}">${escapeHtml(status)} (${n})</option>`;
+            }).filter(Boolean).join('')}
         </select>
 
         <select id="filter-import-batch">
-            <option value="all">All batches (${state.totalCount})</option>
+            <option value="all">All batches (${Object.values(c.import_batch || {}).reduce((a, b) => a + b, 0)})</option>
             ${(state.importBatches || []).map(b => {
                 const count = (c.import_batch || {})[b] || 0;
+                const isSelected = b === state.filters.import_batch;
+                if (count === 0 && !isSelected) return '';
                 return `<option value="${escapeHtml(b)}">${escapeHtml(b)} (${count})</option>`;
-            }).join('')}
+            }).filter(Boolean).join('')}
         </select>
 
         <select id="filter-set">
             <option value="all">All sets</option>
-            ${(state.sets || []).map(s => {
+            ${Object.keys(state.allCounts.set_name || {}).filter(Boolean).sort().map(s => {
                 const count = (c.set_name || {})[s] || 0;
-                return count > 0 ? `<option value="${escapeHtml(s)}">${escapeHtml(s)} (${count})</option>` : '';
+                const isSelected = s === state.filters.set_name;
+                if (count === 0 && !isSelected) return '';
+                return `<option value="${escapeHtml(s)}">${escapeHtml(s)} (${count})</option>`;
             }).filter(Boolean).join('')}
         </select>
 
         <input type="search" id="filter-search" placeholder="Search card name..." />
+        <button id="reset-filters" class="btn" style="white-space:nowrap;">Reset filters</button>
+        <button id="new-local-purchase-btn" class="btn btn-primary" style="white-space:nowrap;">+ New Local Purchase</button>
 
         <select id="filter-page-size">
             ${PAGE_SIZES.map(s => `<option value="${s}" ${s === state.pageSize ? 'selected' : ''}>${s} per page</option>`).join('')}
@@ -309,6 +335,18 @@ function renderFilters(container) {
         renderFilters(container);
         await loadAndRenderRows(container);
     }, 400));
+
+    bar.querySelector('#new-local-purchase-btn').addEventListener('click', () => {
+        openNewLocalPurchaseModal(container);
+    });
+
+    bar.querySelector('#reset-filters').addEventListener('click', async () => {
+        state.filters = { source: 'all', status: 'all', match_status: 'all', import_batch: 'all', set_name: 'all', search: '' };
+        state.page = 0;
+        await loadFilterCounts();
+        renderFilters(container);
+        await loadAndRenderRows(container);
+    });
 }
 
 // ----------------------------------------------------------------
@@ -328,8 +366,10 @@ function renderTable(container) {
         return;
     }
 
-    // Only matched + non-processed rows are selectable for batch push
-    const selectableRows = state.rows.filter(r => r.match_status === 'matched' && r.status !== 'processed');
+    // Any non-processed row can be selected (for delete); only matched +
+    // non-processed rows are actually eligible to push to inventory —
+    // that filter is applied inside batchPushSelected instead.
+    const selectableRows = state.rows.filter(r => r.status !== 'processed');
     const selectedOnPage = selectableRows.filter(r => state.selectedIds.has(r.staging_id));
     const allSelected = selectableRows.length > 0 && selectedOnPage.length === selectableRows.length;
 
@@ -340,6 +380,9 @@ function renderTable(container) {
             </span>
             <button class="btn btn-primary batch-push-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
                 Push selected to inventory
+            </button>
+            <button class="btn batch-delete-btn" style="border-color:var(--danger); color:var(--danger);" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
+                Delete selected
             </button>
             <button class="btn batch-clear-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
                 Clear selection
@@ -353,14 +396,17 @@ function renderTable(container) {
                         <input type="checkbox" id="select-all-checkbox" ${allSelected ? 'checked' : ''} ${selectableRows.length === 0 ? 'disabled' : ''} />
                     </th>
                     <th style="width:24px;"></th>
+                    <th style="width:65px; color:var(--text-secondary);">#</th>
                     <th>Card name</th>
                     <th>Set</th>
                     <th>Condition</th>
-                    <th>Foil</th>
-                    <th>Qty</th>
-                    <th>Price</th>
-                    <th>Match</th>
-                    <th>Status</th>
+                    <th>Variant</th>
+                    <th style="width:45px;">Qty</th>
+                    <th style="width:70px;">Cost</th>
+                    <th style="width:70px;">List Price</th>
+                    <th style="width:80px;">Match</th>
+                    <th style="width:80px;">Status</th>
+                    <th style="width:32px;"></th>
                 </tr>
             </thead>
             <tbody id="staging-tbody"></tbody>
@@ -395,30 +441,185 @@ function renderTable(container) {
 
     // Batch push
     wrap.querySelector('.batch-push-btn')?.addEventListener('click', () => batchPushSelected(container));
+
+    // Batch delete
+    wrap.querySelector('.batch-delete-btn')?.addEventListener('click', () => batchDeleteSelected(container));
+}
+
+// ── Variant display helpers ───────────────────────────────────────────────────
+
+const FOIL_DISPLAY = {
+    non_holo: 'Non-Holo', holo: 'Holo', reverse_holo: 'Reverse Holo',
+};
+const PATTERN_DISPLAY = {
+    poke_ball: 'Poké Ball', master_ball: 'Master Ball', friend_ball: 'Friend Ball',
+    love_ball: 'Love Ball', quick_ball: 'Quick Ball', dusk_ball: 'Dusk Ball',
+    team_rocket: 'Team Rocket', energy_symbol: 'Energy Symbol',
+};
+const TEXTURE_DISPLAY = {
+    cosmos: 'Cosmos', hd_cosmos: 'HD Cosmos', galaxy_cosmos: 'Galaxy Cosmos',
+};
+const MATERIAL_DISPLAY = { metal: 'Metal' };
+const SIZE_DISPLAY     = { jumbo: 'Jumbo' };
+const STAMP_DISPLAY    = {
+    '1st_edition': '1st Edition', pokemon_center: 'Pokémon Center',
+    prerelease: 'Prerelease', pokemon_day: 'Pokémon Day',
+    mega_evolution: 'Mega Evolution', prismatic_evolution: 'Prismatic Evolution',
+};
+const SOURCE_DISPLAY   = {
+    deck_exclusive: 'Deck Exclusive', product_exclusive: 'Product Exclusive',
+    box_topper: 'Box Topper', stamp_promo: 'Stamp Promo',
+};
+
+function variantLabel(row) {
+    const parts = [
+        FOIL_DISPLAY[row.foil_type],
+        PATTERN_DISPLAY[row.foil_pattern],
+        TEXTURE_DISPLAY[row.texture],
+        MATERIAL_DISPLAY[row.material],
+        SIZE_DISPLAY[row.size],
+        STAMP_DISPLAY[row.stamp_type],
+        SOURCE_DISPLAY[row.source_type],
+    ].filter(Boolean);
+    return parts.join(' · ') || '-';
+}
+
+function variantLabelFromCode(code) {
+    return FOIL_DISPLAY[code] || PATTERN_DISPLAY[code] || TEXTURE_DISPLAY[code]
+        || MATERIAL_DISPLAY[code] || SIZE_DISPLAY[code]
+        || STAMP_DISPLAY[code] || SOURCE_DISPLAY[code] || code || '-';
+}
+
+function renderAxesSummary(row) {
+    const axes = [
+        ['Foil',     FOIL_DISPLAY[row.foil_type]    || row.foil_type],
+        ['Pattern',  PATTERN_DISPLAY[row.foil_pattern] || row.foil_pattern],
+        ['Texture',  TEXTURE_DISPLAY[row.texture]    || row.texture],
+        ['Material', MATERIAL_DISPLAY[row.material]  || row.material],
+        ['Size',     SIZE_DISPLAY[row.size]          || row.size],
+        ['Stamp',    STAMP_DISPLAY[row.stamp_type]   || row.stamp_type],
+        ['Source',   SOURCE_DISPLAY[row.source_type] || row.source_type],
+    ].filter(([, v]) => v);
+    return axes.map(([k, v]) => `<span>${k}: ${escapeHtml(v)}</span>`).join('');
+}
+
+function renderAxesInputs(row) {
+    const foilOpts = [
+        ['', '— none —'],
+        ['non_holo', 'Non-Holo'],
+        ['holo', 'Holo'],
+        ['reverse_holo', 'Reverse Holo'],
+    ];
+    const patternOpts = [
+        ['', '— none —'],
+        ['poke_ball', 'Poké Ball'],
+        ['master_ball', 'Master Ball'],
+        ['friend_ball', 'Friend Ball'],
+        ['love_ball', 'Love Ball'],
+        ['quick_ball', 'Quick Ball'],
+        ['dusk_ball', 'Dusk Ball'],
+        ['team_rocket', 'Team Rocket'],
+        ['energy_symbol', 'Energy Symbol'],
+    ];
+    const textureOpts = [
+        ['', '— none —'],
+        ['cosmos', 'Cosmos'],
+        ['hd_cosmos', 'HD Cosmos'],
+        ['galaxy_cosmos', 'Galaxy Cosmos'],
+    ];
+    const materialOpts = [
+        ['', '— none —'],
+        ['metal', 'Metal'],
+    ];
+    const sizeOpts = [
+        ['', '— none —'],
+        ['jumbo', 'Jumbo'],
+    ];
+    const stampOpts = [
+        ['', '— none —'],
+        ['1st_edition', '1st Edition'],
+        ['pokemon_center', 'Pokémon Center'],
+        ['prerelease', 'Prerelease'],
+        ['pokemon_day', 'Pokémon Day'],
+        ['mega_evolution', 'Mega Evolution'],
+        ['prismatic_evolution', 'Prismatic Evolution'],
+    ];
+    const sourceOpts = [
+        ['', '— none —'],
+        ['deck_exclusive', 'Deck Exclusive'],
+        ['product_exclusive', 'Product Exclusive'],
+        ['box_topper', 'Box Topper'],
+        ['stamp_promo', 'Stamp Promo'],
+    ];
+
+    function sel(cls, opts, val) {
+        const knownVals = opts.map(([v]) => v);
+        const isCustom = val && !knownVals.includes(val);
+        return `
+            <select class="${cls}-select" onchange="
+                const inp = this.parentElement.querySelector('.${cls}-custom');
+                if (this.value === '__custom__') { inp.style.display='inline'; inp.focus(); }
+                else { inp.style.display='none'; inp.value=''; }
+            ">
+                ${opts.map(([v, l]) => `<option value="${v}" ${(!isCustom && v === (val || '')) ? 'selected' : ''}>${l}</option>`).join('')}
+                <option value="__custom__" ${isCustom ? 'selected' : ''}>Custom...</option>
+            </select>
+            <input type="text" class="${cls}-custom" placeholder="enter value"
+                value="${isCustom ? escapeHtml(val) : ''}"
+                style="display:${isCustom ? 'inline' : 'none'}; width:120px; margin-left:4px;" />
+        `;
+    }
+
+    return `
+        <label>Foil type ${sel('edit-foil-type', foilOpts, row.foil_type)}</label>
+        <label>Pattern ${sel('edit-foil-pattern', patternOpts, row.foil_pattern)}</label>
+        <label>Texture ${sel('edit-texture', textureOpts, row.texture)}</label>
+        <label>Material ${sel('edit-material', materialOpts, row.material)}</label>
+        <label>Size ${sel('edit-size', sizeOpts, row.size)}</label>
+        <label>Stamp ${sel('edit-stamp-type', stampOpts, row.stamp_type)}</label>
+        <label>Source ${sel('edit-source-type', sourceOpts, row.source_type)}</label>
+    `;
+}
+
+function renderAxesDisplay(row) {
+    return `
+        <span>Foil: ${escapeHtml(FOIL_DISPLAY[row.foil_type] || row.foil_type || '-')}</span>
+        ${row.foil_pattern ? `<span>Pattern: ${escapeHtml(PATTERN_DISPLAY[row.foil_pattern] || row.foil_pattern)}</span>` : ''}
+        ${row.texture      ? `<span>Texture: ${escapeHtml(TEXTURE_DISPLAY[row.texture] || row.texture)}</span>` : ''}
+        ${row.material     ? `<span>Material: ${escapeHtml(MATERIAL_DISPLAY[row.material] || row.material)}</span>` : ''}
+        ${row.size         ? `<span>Size: ${escapeHtml(SIZE_DISPLAY[row.size] || row.size)}</span>` : ''}
+        ${row.stamp_type   ? `<span>Stamp: ${escapeHtml(STAMP_DISPLAY[row.stamp_type] || row.stamp_type)}</span>` : ''}
+        ${row.source_type  ? `<span>Source: ${escapeHtml(SOURCE_DISPLAY[row.source_type] || row.source_type)}</span>` : ''}
+    `;
 }
 
 function renderRow(container, row) {
     const tr = document.createElement('tr');
     tr.dataset.stagingId = row.staging_id;
 
-    const foil = [row.foil_pattern, row.foil_type].filter(Boolean).join(' / ') || '-';
     const matchBadge = `<span class="badge badge-${row.match_status || 'not_found'}">${row.match_status || 'not_found'}</span>`;
-    const selectable = row.match_status === 'matched' && row.status !== 'processed';
+    const selectable = row.status !== 'processed';
     const checked = state.selectedIds.has(row.staging_id);
+    const cardNum = row.card_number || row.matched_number || '-';
 
     tr.innerHTML = `
         <td>
             <input type="checkbox" class="row-select-checkbox" ${selectable ? '' : 'disabled'} ${checked ? 'checked' : ''} />
         </td>
         <td style="cursor:pointer;">${state.expandedRowId === row.staging_id ? '&#9660;' : '&#9656;'}</td>
+        <td style="cursor:pointer; color:var(--text-secondary); font-size:12px;">${escapeHtml(cardNum)}</td>
         <td style="cursor:pointer;">${escapeHtml(row.card_name || '')}</td>
         <td style="cursor:pointer;">${escapeHtml(row.set_name || row.matched_set_name || '-')}</td>
         <td style="cursor:pointer;">${escapeHtml(row.condition || '-')}</td>
-        <td style="cursor:pointer;">${escapeHtml(foil)}</td>
+        <td style="cursor:pointer; font-size:12px;">${escapeHtml(variantLabel(row))}</td>
         <td style="cursor:pointer;">${row.quantity ?? '-'}</td>
         <td style="cursor:pointer;">${formatPrice(row.cost_per_card)}</td>
+        <td style="cursor:pointer;">${formatPrice(row.listing_price)}</td>
         <td style="cursor:pointer;">${matchBadge}</td>
         <td style="cursor:pointer;">${escapeHtml(row.status || '-')}</td>
+        <td>
+            <button class="row-delete-btn" title="Remove from staging" style="background:none; border:none; cursor:pointer; font-size:14px;">&#128465;</button>
+        </td>
     `;
 
     // Checkbox toggling shouldn't expand/collapse the row
@@ -433,8 +634,13 @@ function renderRow(container, row) {
         renderTable(container);
     });
 
+    // Inline delete icon shouldn't expand/collapse the row
+    const deleteTd = tr.querySelector('td:last-child');
+    deleteTd.addEventListener('click', (e) => e.stopPropagation());
+    tr.querySelector('.row-delete-btn').addEventListener('click', () => quickDeleteRow(container, row));
+
     // Remaining cells expand/collapse
-    for (const td of tr.querySelectorAll('td:not(:first-child)')) {
+    for (const td of tr.querySelectorAll('td:not(:first-child):not(:last-child)')) {
         td.addEventListener('click', () => {
             state.expandedRowId = state.expandedRowId === row.staging_id ? null : row.staging_id;
             renderTable(container);
@@ -465,12 +671,24 @@ function renderExpandedRow(container, row) {
         td.innerHTML = `
             <div class="expanded-row" data-staging-id="${row.staging_id}">
                 <p style="color:var(--text-secondary); margin:0 0 12px;">${label}</p>
+                ${row.match_status === 'matched' && row.matched_card_name ? `
+                <div style="background:var(--bg-tertiary); border:1px solid var(--border); border-radius:6px;
+                            padding:10px 14px; margin-bottom:12px; font-size:13px;">
+                    <span style="color:var(--success); font-weight:600;">✅ Matched to:</span>
+                    <span style="margin-left:8px;">
+                        <strong>${escapeHtml(row.matched_card_name)}</strong>
+                        #${escapeHtml(row.matched_number || '')}
+                        — ${escapeHtml(row.matched_set_name || '')}
+                        ${row.rarity ? `<span style="color:var(--text-secondary);">(${escapeHtml(row.rarity)})</span>` : ''}
+                    </span>
+                </div>` : ''}
                 <div style="display:flex; gap:16px; flex-wrap:wrap; color:var(--text-secondary); font-size:13px;">
+                    <span>Card: ${escapeHtml(row.card_name || '-')} #${escapeHtml(row.card_number || row.matched_number || '-')}</span>
                     <span>Condition: ${escapeHtml(row.condition || '-')}</span>
                     <span>Quantity: ${row.quantity ?? '-'}</span>
-                    <span>Foil type: ${escapeHtml(row.foil_type || '-')}</span>
-                    <span>Foil pattern: ${escapeHtml(row.foil_pattern || '-')}</span>
-                    <span>Price: ${formatPrice(row.cost_per_card)}</span>
+                    <span>Cost: ${formatPrice(row.cost_per_card)}</span>
+                    <span>Listing Price: ${formatPrice(row.listing_price)}</span>
+                    ${renderAxesDisplay(row)}
                 </div>
                 ${row.notes ? `<p style="color:var(--text-secondary); font-size:13px; margin-top:8px;">Notes: ${escapeHtml(row.notes)}</p>` : ''}
             </div>
@@ -482,7 +700,43 @@ function renderExpandedRow(container, row) {
 
     td.innerHTML = `
         <div class="expanded-row" data-staging-id="${row.staging_id}">
-            <div style="display:flex; gap:16px; flex-wrap:wrap; margin-bottom:12px;">
+
+            ${row.match_status === 'matched' && row.matched_card_name ? `
+            <div style="background:var(--bg-tertiary); border:1px solid var(--border); border-radius:6px;
+                        padding:8px 14px; margin-bottom:12px; font-size:13px;">
+                <span style="color:var(--success); font-weight:600;">✅ Matched:</span>
+                <span style="margin-left:8px;">
+                    <strong>${escapeHtml(row.matched_card_name)}</strong>
+                    #${escapeHtml(row.matched_number || '')}
+                    — ${escapeHtml(row.matched_set_name || '')}
+                    ${row.rarity ? `<span style="color:var(--text-secondary);">(${escapeHtml(row.rarity)})</span>` : ''}
+                </span>
+            </div>` : ''}
+
+            <!-- Row 1: Set, Card Name, Card Number, Rematch -->
+            <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:12px; align-items:flex-end;">
+                <label>Set
+                    <input type="text" class="edit-set-name"
+                           value="${escapeHtml(row.set_name || row.matched_set_name || '')}"
+                           style="width:200px;" placeholder="Type or click to filter..." />
+                </label>
+                <label>Card name
+                    <input type="text" class="edit-card-name"
+                           value="${escapeHtml(row.card_name || '')}"
+                           style="width:160px;" placeholder="Type to search Pokémon..." />
+                </label>
+                <label>#
+                    <input type="text" class="edit-card-number"
+                           value="${escapeHtml(row.card_number || row.matched_number || '')}"
+                           style="width:65px;" />
+                </label>
+                <label style="align-self:flex-end;">
+                    <button class="btn rematch-btn">🔍 Rematch</button>
+                </label>
+            </div>
+
+            <!-- Row 2: Condition, Qty, Cost, Listing Price -->
+            <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:12px; align-items:flex-end;">
                 <label>Condition
                     <select class="edit-condition">
                         ${['Near Mint','Lightly Played','Moderately Played','Heavily Played','Damaged']
@@ -490,26 +744,31 @@ function renderExpandedRow(container, row) {
                             .join('')}
                     </select>
                 </label>
-                <label>Quantity
-                    <input type="number" class="edit-quantity" value="${row.quantity ?? 1}" min="1" style="width:70px;" />
+                <label>Qty
+                    <input type="number" class="edit-quantity" value="${row.quantity ?? 1}" min="1" style="width:60px;" />
                 </label>
-                <label>Foil type
-                    <input type="text" class="edit-foil-type" value="${escapeHtml(row.foil_type || '')}" style="width:120px;" />
+                <label>Cost
+                    <input type="number" step="0.01" class="edit-cost" value="${row.cost_per_card ?? ''}" style="width:80px;" placeholder="0.00" />
                 </label>
-                <label>Foil pattern
-                    <input type="text" class="edit-foil-pattern" value="${escapeHtml(row.foil_pattern || '')}" style="width:140px;" />
-                </label>
-                <label>Override price
-                    <input type="number" step="0.01" class="edit-override-price" value="${row.override_price ?? ''}" style="width:90px;" />
+                <label>Listing Price
+                    <input type="number" step="0.01" class="edit-listing-price" value="${row.listing_price ?? ''}" style="width:80px;" placeholder="0.00" />
                 </label>
             </div>
+
+            <!-- Row 3: Variant axes -->
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; align-items:flex-end;">
+                ${renderAxesInputs(row)}
+            </div>
+
+            <!-- Row 4: Notes -->
             <div style="margin-bottom:12px;">
                 <label style="display:block;">Notes
-                    <input type="text" class="edit-notes" value="${escapeHtml(row.notes || '')}" style="width:100%;max-width:500px;" />
+                    <input type="text" class="edit-notes" value="${escapeHtml(row.notes || '')}" style="width:100%;max-width:600px;" />
                 </label>
             </div>
 
             <div class="match-resolution"></div>
+            <div class="rematch-results" style="margin-bottom:8px;"></div>
 
             <div style="display:flex; gap:8px; margin-top:12px;">
                 <button class="btn save-btn">Save changes</button>
@@ -517,6 +776,7 @@ function renderExpandedRow(container, row) {
                     Push to inventory
                 </button>
                 <button class="btn skip-btn">Skip</button>
+                <button class="btn delete-btn" style="margin-left:auto; border-color:var(--danger); color:var(--danger);">Delete</button>
             </div>
             <div class="row-message" style="margin-top:8px; font-size:13px;"></div>
         </div>
@@ -541,7 +801,151 @@ function renderExpandedRow(container, row) {
     // Skip
     td.querySelector('.skip-btn').addEventListener('click', () => skipRow(container, td, row));
 
+    // Delete
+    td.querySelector('.delete-btn').addEventListener('click', () => deleteRow(container, td, row));
+
+    // Rematch — DB search first, pokemontcg.io API fallback
+    td.querySelector('.rematch-btn').addEventListener('click', () =>
+        runRematch(container, td, row)
+    );
+
+    // Card name autocomplete
+    // Card name autocomplete — card_master first, then characters
+    // Filters by Set/# if those fields already have values, narrowing results.
+    // When both Set and # are filled, shows ALL variants of that specific card.
+    wireAutocomplete({
+        input: td.querySelector('.edit-card-name'),
+        container: td,
+        search: async (term) => {
+            const setVal = td.querySelector('.edit-set-name').value.trim();
+            const numVal = td.querySelector('.edit-card-number').value.trim();
+
+            let cardQuery = supabase
+                .from('v_card_variants')
+                .select('card_id, variant_id, card_name, set_name, display_number, card_number, rarity, foil_type, foil_pattern, texture, material, size, stamp_type, source_type, foil_label, pattern_label, texture_label, material_label, size_label, stamp_label, source_label')
+                .ilike('card_name', `%${term}%`)
+                .order('card_name')
+                .order('foil_type');
+            if (setVal) cardQuery = cardQuery.ilike('set_name', `%${setVal}%`);
+            if (numVal) cardQuery = cardQuery.eq('card_number', numVal);
+            cardQuery = cardQuery.limit((setVal && numVal) ? 30 : 8);
+
+            const [cardRes, charRes] = await Promise.all([
+                cardQuery,
+                supabase
+                    .from('characters')
+                    .select('name')
+                    .ilike('name', `%${term}%`)
+                    .limit(5),
+            ]);
+
+            const cards = (cardRes.data || []).map(c => ({
+                _type: 'card', ...c,
+                variant_label: [c.foil_label, c.pattern_label, c.texture_label, c.material_label, c.size_label, c.stamp_label, c.source_label]
+                    .filter(Boolean).join(' · ') || 'Non-Holo',
+            }));
+            const chars = (charRes.data || [])
+                .map(ch => ({ _type: 'character', card_name: ch.name }));
+
+            return [...cards, ...chars];
+        },
+        renderItem: (c) => c._type === 'card'
+            ? `${c.card_name} — ${c.set_name} #${c.display_number || ''} · ${c.variant_label}`
+            : `✦ ${c.card_name}`,
+        onSelect: (c) => {
+            td.querySelector('.edit-card-name').value = c.card_name;
+            if (c._type === 'card') {
+                td.querySelector('.edit-set-name').value = c.set_name || '';
+                td.querySelector('.edit-card-number').value = c.card_number || c.display_number || '';
+                // Populate variant axis dropdowns from the selected variant
+                const setSel = (cls, val) => { const el = td.querySelector(cls); if (el && val !== undefined && val !== null) el.value = val; };
+                setSel('.edit-foil-type', c.foil_type || 'non_holo');
+                setSel('.edit-foil-pattern', c.foil_pattern || '');
+                setSel('.edit-texture', c.texture || '');
+                setSel('.edit-material', c.material || '');
+                setSel('.edit-size', c.size || '');
+                setSel('.edit-stamp-type', c.stamp_type || '');
+                setSel('.edit-source-type', c.source_type || '');
+            }
+        },
+    });
+
+    // Set name autocomplete
+    wireAutocomplete({
+        input: td.querySelector('.edit-set-name'),
+        container: td,
+        search: async (term) => {
+            const { data } = await supabase
+                .from('card_sets')
+                .select('name')
+                .ilike('name', `%${term}%`)
+                .limit(10);
+            return data || [];
+        },
+        renderItem: (s) => s.name,
+        onSelect: (s) => {
+            td.querySelector('.edit-set-name').value = s.name;
+        },
+    });
+
     return tr;
+}
+
+// ----------------------------------------------------------------
+// Autocomplete helper
+// ----------------------------------------------------------------
+
+function wireAutocomplete({ input, container, search, renderItem, onSelect }) {
+    let dropdown = null;
+
+    const removeDropdown = () => {
+        dropdown?.remove();
+        dropdown = null;
+    };
+
+    input.addEventListener('input', debounce(async () => {
+        const term = input.value.trim();
+        removeDropdown();
+        if (term.length < 2) return;
+
+        const results = await search(term);
+        if (!results.length) return;
+
+        dropdown = document.createElement('div');
+        dropdown.style.cssText = `
+            position: absolute;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            z-index: 100;
+            max-height: 200px;
+            overflow-y: auto;
+            width: ${input.offsetWidth}px;
+            font-size: 13px;
+        `;
+
+        results.forEach(item => {
+            const div = document.createElement('div');
+            div.textContent = renderItem(item);
+            div.style.cssText = 'padding: 6px 10px; cursor: pointer;';
+            div.addEventListener('mouseenter', () => div.style.background = 'var(--bg-tertiary)');
+            div.addEventListener('mouseleave', () => div.style.background = '');
+            div.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                onSelect(item);
+                removeDropdown();
+            });
+            dropdown.appendChild(div);
+        });
+
+        // Position below the input
+        input.parentElement.style.position = 'relative';
+        input.parentElement.appendChild(dropdown);
+        dropdown.style.top = input.offsetHeight + 'px';
+        dropdown.style.left = '0px';
+    }, 300));
+
+    input.addEventListener('blur', () => setTimeout(removeDropdown, 150));
 }
 
 function renderAmbiguousResolution(container, td, row, matchDiv) {
@@ -641,13 +1045,17 @@ function renderManualSearch(container, td, row, target, replace) {
             return;
         }
 
-        results.innerHTML = data.map(c => `
+        results.innerHTML = data.map(c => {
+            const vLabel = [c.foil_label, c.pattern_label, c.texture_label,
+                            c.material_label, c.size_label, c.stamp_label,
+                            c.source_label].filter(Boolean).join(' · ') || 'Non-Holo';
+            return `
             <div class="search-result-item" data-card-id="${c.card_id}" data-variant-id="${c.variant_id}"
                  style="padding:6px; border:1px solid var(--border); border-radius:4px; margin-bottom:4px; cursor:pointer;">
                 ${escapeHtml(c.card_name)} — ${escapeHtml(c.set_name)} #${escapeHtml(c.display_number || '')}
-                <span style="color:var(--text-secondary);">(${escapeHtml(c.variant_type || 'Non-Holo')}, ${escapeHtml(c.rarity || '')})</span>
-            </div>
-        `).join('');
+                <span style="color:var(--text-secondary);">(${escapeHtml(vLabel)}, ${escapeHtml(c.rarity || '')})</span>
+            </div>`;
+        }).join('');
 
         results.querySelectorAll('.search-result-item').forEach(el => {
             el.addEventListener('click', async () => {
@@ -673,21 +1081,333 @@ function formatMatchOption(opt) {
 }
 
 // ----------------------------------------------------------------
+// Rematch: DB search first, pokemontcg.io API fallback
+// ----------------------------------------------------------------
+
+const POKEMON_TCG_API = 'https://api.pokemontcg.io/v2/cards';
+
+async function runRematch(container, td, row) {
+    const btn     = td.querySelector('.rematch-btn');
+    const results = td.querySelector('.rematch-results');
+    const name    = td.querySelector('.edit-card-name').value.trim();
+    const num     = td.querySelector('.edit-card-number').value.trim();
+    const setName = td.querySelector('.edit-set-name').value.trim();
+
+    if (!name) {
+        results.innerHTML = `<p style="color:var(--warning); font-size:13px;">Enter a card name to search.</p>`;
+        return;
+    }
+
+    btn.disabled    = true;
+    btn.textContent = 'Searching DB...';
+    results.innerHTML = '';
+
+    // ── Step 1: DB search ────────────────────────────────────────────────────
+    const dbResults = await searchDB(name, num, setName);
+
+    if (dbResults.length > 0) {
+        btn.disabled    = false;
+        btn.textContent = '🔍 Rematch';
+        renderRematchResults(container, td, row, results, dbResults, 'db');
+        return;
+    }
+
+    // ── Step 2: pokemontcg.io API fallback ───────────────────────────────────
+    btn.textContent = 'Not in DB — searching API...';
+    const apiResults = await searchPokemonTcgApi(name, num, setName);
+
+    btn.disabled    = false;
+    btn.textContent = '🔍 Rematch';
+
+    if (apiResults.length === 0) {
+        results.innerHTML = `
+            <p style="color:var(--warning); font-size:13px;">
+                Not found in DB or pokemontcg.io API for
+                "<strong>${escapeHtml(name)}</strong>"
+                ${num ? `#${escapeHtml(num)}` : ''}
+                ${setName ? `(${escapeHtml(setName)})` : ''}.
+                Try different search terms, or create the card manually.
+            </p>`;
+        return;
+    }
+
+    renderRematchResults(container, td, row, results, apiResults, 'api');
+}
+
+
+async function searchDB(name, num, setName) {
+    let q = supabase
+        .from('v_card_variants')
+        .select('card_id, variant_id, card_name, set_name, display_number, card_number, foil_label, pattern_label, texture_label, rarity, foil_type, foil_pattern, texture, material, size, stamp_type, source_type')
+        .ilike('card_name', `%${name}%`)
+        .limit(15);
+    if (num)     q = q.eq('card_number', num);
+    if (setName) q = q.ilike('set_name', `%${setName}%`);
+
+    const { data, error } = await q;
+    if (error) { console.error('DB search error:', error); return []; }
+
+    return (data || []).map(c => ({
+        source:      'db',
+        card_id:     c.card_id,
+        variant_id:  c.variant_id,
+        name:        c.card_name,
+        number:      c.display_number || c.card_number,  // for display text
+        card_number: c.card_number,                       // bare number, for the # input field
+        set_name:    c.set_name,
+        rarity:      c.rarity,
+        variant_label: [c.foil_label, c.pattern_label, c.texture_label].filter(Boolean).join(' · ') || 'Non-Holo',
+        foil_type:    c.foil_type,
+        foil_pattern: c.foil_pattern,
+        texture:      c.texture,
+        material:     c.material,
+        size:         c.size,
+        stamp_type:   c.stamp_type,
+        source_type:  c.source_type,
+        _raw: c,
+    }));
+}
+
+
+async function searchPokemonTcgApi(name, num, setName) {
+    try {
+        // Build query — pokemontcg.io uses Lucene syntax
+        let q = `name:"${name}"`;
+        if (num) q += ` number:${num}`;
+        // Note: we don't filter by set name here because the API set name may differ
+        // from what's stored (e.g. "151" vs "Scarlet & Violet 151"). Better to show
+        // all results and let the user pick the right one.
+
+        const url = `${POKEMON_TCG_API}?q=${encodeURIComponent(q)}&pageSize=12`;
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`API returned ${resp.status}`);
+        const json = await resp.json();
+
+        return (json.data || []).map(c => ({
+            source:         'api',
+            card_id:        null,   // not yet in DB
+            variant_id:     null,
+            name:           c.name,
+            number:         c.number,
+            set_name:       c.set?.name || '',
+            set_id:         c.set?.id || '',
+            set_code:       c.set?.id || '',
+            set_total:      c.set?.total,
+            rarity:         c.rarity || '',
+            image_url:      c.images?.large || c.images?.small || null,
+            external_id:    c.id,
+            variant_label:  'Non-Holo',  // API doesn't know the variant; user can adjust
+            _raw:           c,
+        }));
+    } catch (e) {
+        console.error('pokemontcg.io API error:', e);
+        return [];
+    }
+}
+
+
+function renderRematchResults(container, td, row, resultsEl, items, source) {
+    const sourceLabel = source === 'db'
+        ? `<span style="color:var(--success); font-size:12px;">📦 From your catalog</span>`
+        : `<span style="color:var(--text-secondary); font-size:12px;">🌐 From pokemontcg.io API — will be added to your catalog on link</span>`;
+
+    resultsEl.innerHTML = `
+        <div style="margin-bottom:6px;">${sourceLabel}</div>
+        <p style="font-size:13px; color:var(--text-secondary); margin:0 0 6px;">
+            ${items.length} result${items.length === 1 ? '' : 's'} — click to link:
+        </p>
+        ${items.map((c, i) => `
+            <div class="rematch-result-item" data-idx="${i}"
+                 style="padding:6px 8px; border:1px solid var(--border); border-radius:4px;
+                        margin-bottom:4px; cursor:pointer; font-size:13px; display:flex; align-items:center; gap:10px;"
+                 onmouseover="this.style.background='var(--bg-tertiary)'"
+                 onmouseout="this.style.background=''">
+                ${c.image_url ? `<img src="${c.image_url}" style="height:40px; border-radius:3px; flex-shrink:0;" />` : ''}
+                <div>
+                    <strong>${escapeHtml(c.name)}</strong>
+                    — ${escapeHtml(c.set_name)} #${escapeHtml(c.number || '')}
+                    <span style="color:var(--text-secondary);">(${escapeHtml(c.variant_label)}, ${escapeHtml(c.rarity)})</span>
+                    ${source === 'api' ? `<span style="color:var(--text-secondary); font-size:11px; display:block;">API ID: ${escapeHtml(c.external_id)}</span>` : ''}
+                </div>
+            </div>
+        `).join('')}
+        ${source === 'db' ? `
+            <button class="btn try-api-btn" style="margin-top:8px; font-size:12px;">
+                Not what you're looking for? Search pokemontcg.io API →
+            </button>` : ''}
+    `;
+
+    // Wire "Search API" button if shown
+    resultsEl.querySelector('.try-api-btn')?.addEventListener('click', async () => {
+        const name    = td.querySelector('.edit-card-name').value.trim();
+        const num     = td.querySelector('.edit-card-number').value.trim();
+        const setName = td.querySelector('.edit-set-name').value.trim();
+        const btn     = td.querySelector('.rematch-btn');
+
+        btn.disabled    = true;
+        btn.textContent = 'Searching API...';
+        resultsEl.innerHTML = '';
+
+        const apiResults = await searchPokemonTcgApi(name, num, setName);
+        btn.disabled    = false;
+        btn.textContent = '🔍 Rematch';
+
+        if (apiResults.length === 0) {
+            resultsEl.innerHTML = `<p style="color:var(--warning); font-size:13px;">Not found on pokemontcg.io either. Check spelling or try without the set filter.</p>`;
+            return;
+        }
+        renderRematchResults(container, td, row, resultsEl, apiResults, 'api');
+    });
+
+    // Wire result item clicks
+    resultsEl.querySelectorAll('.rematch-result-item').forEach(el => {
+        el.addEventListener('click', async () => {
+            const item = items[Number(el.dataset.idx)];
+            await linkStagingToCard(container, td, row, resultsEl, item);
+        });
+    });
+}
+
+
+async function linkStagingToCard(container, td, row, resultsEl, item) {
+    resultsEl.innerHTML = `<p style="color:var(--text-secondary); font-size:13px;">Linking...</p>`;
+
+    let cardId = item.card_id;
+
+    // ── API result: create card_master + card_variants in DB first ────────────
+    if (item.source === 'api') {
+        const api = item._raw;
+
+        // 1. Find or create the set
+        let { data: setRow } = await supabase
+            .from('card_sets')
+            .select('id')
+            .eq('set_code', item.set_code)
+            .maybeSingle();
+
+        if (!setRow) {
+            // Create the set from API data
+            const { data: newSet, error: setErr } = await supabase
+                .from('card_sets')
+                .insert({
+                    name:        item.set_name,
+                    set_code:    item.set_code,
+                    total_cards: item.set_total || null,
+                    game_id:     await getGameId(),
+                })
+                .select('id')
+                .single();
+
+            if (setErr) {
+                resultsEl.innerHTML = `<p style="color:var(--danger)">Failed to create set: ${escapeHtml(setErr.message)}</p>`;
+                return;
+            }
+            setRow = newSet;
+        }
+
+        // 2. Upsert card_master
+        const { data: cardRow, error: cardErr } = await supabase
+            .from('card_master')
+            .upsert({
+                set_id:      setRow.id,
+                name:        api.name,
+                card_number: api.number,
+                rarity:      api.rarity || null,
+                image_url:   api.images?.large || api.images?.small || null,
+                external_id: api.id,
+            }, { onConflict: 'external_id' })
+            .select('id')
+            .single();
+
+        if (cardErr) {
+            resultsEl.innerHTML = `<p style="color:var(--danger)">Failed to create card: ${escapeHtml(cardErr.message)}</p>`;
+            return;
+        }
+        cardId = cardRow.id;
+
+        // Variant creation is deferred to push_staging_row_to_inventory
+        // to avoid orphan card_variants rows with incorrect foil types.
+    }
+
+    // ── Update staging row ────────────────────────────────────────────────────
+    const { error: saveErr } = await supabase.from('staging').update({
+        card_name:    td.querySelector('.edit-card-name').value.trim()   || row.card_name,
+        card_number:  td.querySelector('.edit-card-number').value.trim() || row.card_number,
+        set_name:     td.querySelector('.edit-set-name').value.trim()    || row.set_name,
+        card_id:      cardId,
+        match_status: 'matched',
+        status:       'approved',
+        updated_at:   new Date().toISOString(),
+    }).eq('id', row.staging_id);
+
+    if (saveErr) {
+        resultsEl.innerHTML = `<p style="color:var(--danger)">Failed to link: ${escapeHtml(saveErr.message)}</p>`;
+        return;
+    }
+
+    Object.assign(row, {
+        card_id:      cardId,
+        match_status: 'matched',
+        status:       'approved',
+        card_name:    td.querySelector('.edit-card-name').value.trim()   || row.card_name,
+        card_number:  td.querySelector('.edit-card-number').value.trim() || row.card_number,
+        set_name:     td.querySelector('.edit-set-name').value.trim()    || row.set_name,
+    });
+
+    const source = item.source === 'api' ? ' (added to catalog)' : '';
+    resultsEl.innerHTML = `<p style="color:var(--success); font-size:13px;">✅ Linked${source} — ready to push to inventory.</p>`;
+
+    // Enable push button
+    const pushBtn = td.querySelector('.push-btn');
+    if (pushBtn) pushBtn.disabled = false;
+
+    renderTable(container);
+}
+
+
+// Cache the Pokemon game_id so we don't look it up on every API card create
+let _gameId = null;
+async function getGameId() {
+    if (_gameId) return _gameId;
+    const { data } = await supabase.from('card_games').select('id').eq('name', 'Pokemon').maybeSingle();
+    _gameId = data?.id || null;
+    return _gameId;
+}
+
+
+// ----------------------------------------------------------------
 // Actions: save, resolve, push, skip
 // ----------------------------------------------------------------
 
 async function saveRowChanges(container, td, row) {
-    const updates = {
-        condition: td.querySelector('.edit-condition').value,
-        quantity: Number(td.querySelector('.edit-quantity').value) || 1,
-        foil_type: td.querySelector('.edit-foil-type').value || null,
-        foil_pattern: td.querySelector('.edit-foil-pattern').value || null,
-        notes: td.querySelector('.edit-notes').value || null,
-        updated_at: new Date().toISOString(),
-    };
+    function getAxisVal(cls) {
+        const sel = td.querySelector(`.${cls}-select`);
+        const inp = td.querySelector(`.${cls}-custom`);
+        if (!sel) return null;
+        const v = sel.value === '__custom__' ? (inp ? inp.value.trim() : '') : sel.value;
+        return v || null;
+    }
 
-    const overridePriceRaw = td.querySelector('.edit-override-price').value;
-    updates.override_price = overridePriceRaw === '' ? null : Number(overridePriceRaw);
+    const updates = {
+        card_name:    td.querySelector('.edit-card-name')?.value.trim()   || row.card_name,
+        card_number:  td.querySelector('.edit-card-number')?.value.trim() || row.card_number,
+        set_name:     td.querySelector('.edit-set-name')?.value.trim()    || row.set_name,
+        condition:    td.querySelector('.edit-condition').value,
+        quantity:     Number(td.querySelector('.edit-quantity').value) || 1,
+        price:        Number(td.querySelector('.edit-cost').value) || 0,
+        listing_price: td.querySelector('.edit-listing-price').value !== ''
+                       ? Number(td.querySelector('.edit-listing-price').value)
+                       : null,
+        foil_type:    getAxisVal('edit-foil-type'),
+        foil_pattern: getAxisVal('edit-foil-pattern'),
+        texture:      getAxisVal('edit-texture'),
+        material:     getAxisVal('edit-material'),
+        size:         getAxisVal('edit-size'),
+        stamp_type:   getAxisVal('edit-stamp-type'),
+        source_type:  getAxisVal('edit-source-type'),
+        notes:        td.querySelector('.edit-notes').value || null,
+        updated_at:   new Date().toISOString(),
+    };
 
     const { error } = await supabase
         .from('staging')
@@ -701,14 +1421,22 @@ async function saveRowChanges(container, td, row) {
 
     showRowMessage(td, 'Saved.', 'success');
 
-    // Reflect changes in local state row so re-render shows updated values
     Object.assign(row, {
-        condition: updates.condition,
-        quantity: updates.quantity,
-        foil_type: updates.foil_type,
-        foil_pattern: updates.foil_pattern,
-        notes: updates.notes,
-        override_price: updates.override_price,
+        card_name:     updates.card_name,
+        card_number:   updates.card_number,
+        set_name:      updates.set_name,
+        condition:     updates.condition,
+        quantity:      updates.quantity,
+        cost_per_card: updates.price,
+        listing_price: updates.listing_price,
+        foil_type:     updates.foil_type,
+        foil_pattern:  updates.foil_pattern,
+        texture:       updates.texture,
+        material:      updates.material,
+        size:          updates.size,
+        stamp_type:    updates.stamp_type,
+        source_type:   updates.source_type,
+        notes:         updates.notes,
     });
 }
 
@@ -785,26 +1513,42 @@ async function batchPushSelected(container) {
     const wrap = container.querySelector('#staging-table-wrap');
     const progressEl = wrap.querySelector('.batch-progress');
     const pushBtn = wrap.querySelector('.batch-push-btn');
+    const deleteBtn = wrap.querySelector('.batch-delete-btn');
     const clearBtn = wrap.querySelector('.batch-clear-btn');
 
-    const ids = [...state.selectedIds];
-    if (ids.length === 0) return;
+    // Selection can include unmatched/not_found rows (needed so they're
+    // selectable for delete) — only matched, non-processed rows can
+    // actually be pushed. Silently skip the rest and report the count.
+    const allIds = [...state.selectedIds];
+    const pushable = allIds.filter(id => {
+        const row = state.rows.find(r => r.staging_id === id);
+        return row && row.match_status === 'matched' && row.status !== 'processed';
+    });
+    const skipped = allIds.length - pushable.length;
+
+    if (pushable.length === 0) {
+        progressEl.innerHTML = `<span style="color:var(--danger)">
+            None of the selected rows are matched — nothing to push.
+        </span>`;
+        return;
+    }
 
     pushBtn.disabled = true;
+    deleteBtn.disabled = true;
     clearBtn.disabled = true;
 
     let succeeded = 0;
     let failed = 0;
     let firstError = null;
 
-    for (let i = 0; i < ids.length; i++) {
-        progressEl.textContent = `Pushing ${i + 1} of ${ids.length}...`;
+    for (let i = 0; i < pushable.length; i++) {
+        progressEl.textContent = `Pushing ${i + 1} of ${pushable.length}...`;
 
-        const result = await pushStagingRowRpc(ids[i]);
+        const result = await pushStagingRowRpc(pushable[i]);
 
         if (result.success) {
             succeeded++;
-            state.selectedIds.delete(ids[i]);
+            state.selectedIds.delete(pushable[i]);
         } else {
             failed++;
             if (!firstError) firstError = result.error;
@@ -814,15 +1558,96 @@ async function batchPushSelected(container) {
         }
     }
 
+    const skippedNote = skipped > 0 ? ` (${skipped} unmatched row${skipped === 1 ? '' : 's'} skipped)` : '';
+
     if (failed > 0) {
         progressEl.innerHTML = `<span style="color:var(--danger)">
-            Pushed ${succeeded} of ${ids.length}. Stopped on error: ${escapeHtml(firstError)}
+            Pushed ${succeeded} of ${pushable.length}. Stopped on error: ${escapeHtml(firstError)}${escapeHtml(skippedNote)}
         </span>`;
     } else {
         progressEl.innerHTML = `<span style="color:var(--success)">
-            Pushed ${succeeded} row${succeeded === 1 ? '' : 's'} to inventory.
+            Pushed ${succeeded} row${succeeded === 1 ? '' : 's'} to inventory.${escapeHtml(skippedNote)}
         </span>`;
     }
+
+    await loadAndRenderRows(container);
+}
+
+/**
+ * Deletes all currently-selected staging rows, one at a time, showing
+ * progress as it goes. Stops on first error but reports how many
+ * succeeded before the failure. Unlike push, delete works on any
+ * non-processed row regardless of match status.
+ */
+async function batchDeleteSelected(container) {
+    const ids = [...state.selectedIds];
+    if (ids.length === 0) return;
+
+    const confirmed = window.confirm(
+        `Delete ${ids.length} row${ids.length === 1 ? '' : 's'} from staging? This cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    const wrap = container.querySelector('#staging-table-wrap');
+    const progressEl = wrap.querySelector('.batch-progress');
+    const pushBtn = wrap.querySelector('.batch-push-btn');
+    const deleteBtn = wrap.querySelector('.batch-delete-btn');
+    const clearBtn = wrap.querySelector('.batch-clear-btn');
+
+    pushBtn.disabled = true;
+    deleteBtn.disabled = true;
+    clearBtn.disabled = true;
+
+    let succeeded = 0;
+    let failed = 0;
+    let firstError = null;
+
+    for (let i = 0; i < ids.length; i++) {
+        progressEl.textContent = `Deleting ${i + 1} of ${ids.length}...`;
+
+        const { error } = await supabase.rpc('delete_staging_row', { p_id: ids[i] });
+
+        if (!error) {
+            succeeded++;
+            state.selectedIds.delete(ids[i]);
+        } else {
+            failed++;
+            if (!firstError) firstError = error.message;
+            break;
+        }
+    }
+
+    if (failed > 0) {
+        progressEl.innerHTML = `<span style="color:var(--danger)">
+            Deleted ${succeeded} of ${ids.length}. Stopped on error: ${escapeHtml(firstError)}
+        </span>`;
+    } else {
+        progressEl.innerHTML = `<span style="color:var(--success)">
+            Deleted ${succeeded} row${succeeded === 1 ? '' : 's'} from staging.
+        </span>`;
+    }
+
+    await loadAndRenderRows(container);
+}
+
+/**
+ * Deletes a single row directly from the collapsed table view, without
+ * requiring the row to be expanded first. Mirrors deleteRow() but reports
+ * via a transient toast on the toolbar instead of an expanded-row message.
+ */
+async function quickDeleteRow(container, row) {
+    const confirmed = window.confirm(`Delete "${row.card_name}" from staging? This cannot be undone.`);
+    if (!confirmed) return;
+
+    const { error } = await supabase.rpc('delete_staging_row', { p_id: row.staging_id });
+
+    if (error) {
+        alert('Failed to delete: ' + error.message);
+        return;
+    }
+
+    state.selectedIds.delete(row.staging_id);
+    if (state.expandedRowId === row.staging_id) state.expandedRowId = null;
 
     await loadAndRenderRows(container);
 }
@@ -835,6 +1660,21 @@ async function skipRow(container, td, row) {
 
     if (error) {
         showRowMessage(td, 'Failed to skip: ' + error.message, 'danger');
+        return;
+    }
+
+    advanceToNextRow(container, row.staging_id);
+}
+
+async function deleteRow(container, td, row) {
+    const confirmed = window.confirm(`Delete "${row.card_name}" from staging? This cannot be undone.`);
+    if (!confirmed) return;
+
+    const { error } = await supabase
+        .rpc('delete_staging_row', { p_id: row.staging_id });
+
+    if (error) {
+        showRowMessage(td, 'Failed to delete: ' + error.message, 'danger');
         return;
     }
 
@@ -914,12 +1754,15 @@ function openCreateCardModal(container, td, row) {
 
         dedupArea.innerHTML = `
             <p style="color:var(--warning); font-size:13px;">Possible existing matches — verify this isn't a duplicate:</p>
-            ${data.map(c => `
+            ${data.map(c => {
+                const vLabel = [c.foil_label, c.pattern_label, c.texture_label,
+                                c.material_label, c.size_label].filter(Boolean).join(' · ') || 'Non-Holo';
+                return `
                 <div style="padding:4px; font-size:12px; color:var(--text-secondary);">
                     ${escapeHtml(c.card_name)} — ${escapeHtml(c.set_name)} #${escapeHtml(c.display_number || '')}
-                    (${escapeHtml(c.variant_type || 'Non-Holo')})
-                </div>
-            `).join('')}
+                    (${escapeHtml(vLabel)})
+                </div>`;
+            }).join('')}
         `;
     }, 350);
 
@@ -1005,6 +1848,588 @@ function renderPagination(container) {
         state.expandedRowId = null;
         loadAndRenderRows(container);
     });
+}
+
+// ----------------------------------------------------------------
+// New Local Purchase modal — reuses the exact same searchDB,
+// searchPokemonTcgApi, and getGameId functions as the staging
+// rematch flow, so behavior is identical: DB search first, API
+// fallback, clickable results list, manual create as last resort.
+// ----------------------------------------------------------------
+
+const FOIL_LABELS_NLP = { non_holo: 'Non-Holo', holo: 'Holo', reverse_holo: 'Reverse Holo' };
+const NLP_FOIL_OPTS = [
+    ['non_holo', 'Non-Holo'], ['holo', 'Holo'], ['reverse_holo', 'Reverse Holo'],
+];
+const NLP_PATTERN_OPTS = [
+    ['', '— none —'], ['poke_ball', 'Poké Ball'], ['master_ball', 'Master Ball'],
+    ['friend_ball', 'Friend Ball'], ['love_ball', 'Love Ball'], ['quick_ball', 'Quick Ball'],
+    ['dusk_ball', 'Dusk Ball'], ['team_rocket', 'Team Rocket'], ['energy_symbol', 'Energy Symbol'],
+];
+const NLP_TEXTURE_OPTS = [
+    ['', '— none —'], ['cosmos', 'Cosmos'], ['hd_cosmos', 'HD Cosmos'], ['galaxy_cosmos', 'Galaxy Cosmos'],
+];
+const NLP_MATERIAL_OPTS = [
+    ['', '— none —'], ['metal', 'Metal'],
+];
+const NLP_SIZE_OPTS = [
+    ['', '— none —'], ['jumbo', 'Jumbo'],
+];
+const NLP_STAMP_OPTS = [
+    ['', '— none —'], ['1st_edition', '1st Edition'], ['pokemon_center', 'Pokémon Center'],
+    ['prerelease', 'Prerelease'], ['pokemon_day', 'Pokémon Day'],
+    ['mega_evolution', 'Mega Evolution'], ['prismatic_evolution', 'Prismatic Evolution'],
+];
+const NLP_SOURCE_OPTS = [
+    ['', '— none —'], ['deck_exclusive', 'Deck Exclusive'], ['product_exclusive', 'Product Exclusive'],
+    ['box_topper', 'Box Topper'], ['stamp_promo', 'Stamp Promo'],
+];
+
+function openNewLocalPurchaseModal(container) {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+        position:fixed; inset:0; background:rgba(0,0,0,0.7);
+        display:flex; align-items:center; justify-content:center;
+        z-index:1000; padding:16px;
+    `;
+
+    const batchId = 'local_' + new Date().toISOString().slice(0,10).replace(/-/g,'') +
+                    '_' + Math.random().toString(36).slice(2,6).toUpperCase();
+
+    const addedCards = [];
+
+    overlay.innerHTML = `
+        <div style="background:var(--bg-secondary); border:1px solid var(--border);
+                    border-radius:8px; padding:24px; width:680px; max-width:95vw;
+                    max-height:90vh; overflow-y:auto;">
+            <h3 style="margin-top:0;">New Local Purchase</h3>
+
+            <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px;
+                        padding-bottom:16px; border-bottom:1px solid var(--border);">
+                <label style="font-size:12px; color:var(--text-secondary);">Batch / PO Reference
+                    <input type="text" id="nlp-batch" value="${escapeHtml(batchId)}"
+                           style="width:220px; margin-top:4px; display:block; font-size:12px;" />
+                </label>
+                <label style="font-size:12px; color:var(--text-secondary);">Date
+                    <input type="date" id="nlp-date"
+                           style="width:140px; margin-top:4px; display:block;" />
+                </label>
+            </div>
+
+            <div style="font-size:12px; font-weight:600; color:var(--text-secondary);
+                        text-transform:uppercase; letter-spacing:0.04em; margin-bottom:8px;">
+                Add a card
+            </div>
+            <div id="nlp-form"></div>
+
+            <div style="margin:16px 0;">
+                <div style="font-size:12px; font-weight:600; color:var(--text-secondary);
+                            text-transform:uppercase; letter-spacing:0.04em; margin-bottom:8px;">
+                    Cards in this purchase
+                </div>
+                <div id="nlp-added-list">
+                    <div id="nlp-empty-msg" style="font-size:12px; color:var(--text-secondary); padding:8px 0;">
+                        No cards added yet.
+                    </div>
+                </div>
+            </div>
+
+            <div style="display:flex; gap:8px; align-items:center; border-top:1px solid var(--border); padding-top:16px;">
+                <button class="btn btn-primary" id="nlp-save-btn">Save purchase</button>
+                <button class="btn" id="nlp-cancel-btn">Cancel</button>
+                <span id="nlp-msg" style="font-size:12px; margin-left:8px;"></span>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+    overlay.querySelector('#nlp-date').value = new Date().toISOString().split('T')[0];
+    overlay.querySelector('#nlp-cancel-btn').addEventListener('click', () => overlay.remove());
+
+    const formDiv      = overlay.querySelector('#nlp-form');
+    const addedListDiv = overlay.querySelector('#nlp-added-list');
+
+    // A "virtual row" object so we can reuse the exact same wireAutocomplete,
+    // runRematch, and renderRematchResults functions the staging table uses.
+    let vRow = { card_id: null, _matchedItem: null };
+
+    function renderForm() {
+        formDiv.innerHTML = `
+            <!-- Row 1: Set (own row) -->
+            <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px; align-items:flex-end;">
+                <label>Set
+                    <input type="text" class="nlp-edit-set-name" style="width:200px;" placeholder="Type or click to filter..." />
+                </label>
+            </div>
+
+            <!-- Row 1b: Card Name, #, Rematch -->
+            <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; align-items:flex-end;">
+                <label>Card name
+                    <input type="text" class="nlp-edit-card-name" style="width:200px;" placeholder="Type to search Pokémon..." autocomplete="off" />
+                </label>
+                <label>#
+                    <input type="text" class="nlp-edit-card-number" style="width:65px;" />
+                </label>
+                <label style="align-self:flex-end; margin-left:6px;">
+                    <button class="btn nlp-rematch-btn">🔍 Rematch</button>
+                </label>
+            </div>
+
+            <!-- Row 2: Condition, Qty, Cost, Listing Price -->
+            <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:12px; align-items:flex-end;">
+                <label>Condition
+                    <select class="nlp-edit-condition">
+                        ${['Near Mint','Lightly Played','Moderately Played','Heavily Played','Damaged']
+                            .map(c => `<option value="${c}">${c}</option>`).join('')}
+                    </select>
+                </label>
+                <label>Qty
+                    <input type="number" class="nlp-edit-quantity" value="1" min="1" style="width:60px;" />
+                </label>
+                <label>Cost
+                    <input type="number" step="0.01" class="nlp-edit-cost" style="width:80px;" placeholder="0.00" />
+                </label>
+                <label>Listing Price
+                    <input type="number" step="0.01" class="nlp-edit-listing-price" style="width:80px;" placeholder="0.00" />
+                </label>
+            </div>
+
+            <!-- Row 3: Variant axes -->
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; align-items:flex-end;">
+                <label>Foil type
+                    <select class="nlp-edit-foil-type">
+                        ${NLP_FOIL_OPTS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                    </select>
+                </label>
+                <label>Pattern
+                    <select class="nlp-edit-foil-pattern">
+                        ${NLP_PATTERN_OPTS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                    </select>
+                </label>
+                <label>Texture
+                    <select class="nlp-edit-texture">
+                        ${NLP_TEXTURE_OPTS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                    </select>
+                </label>
+                <label>Material
+                    <select class="nlp-edit-material">
+                        ${NLP_MATERIAL_OPTS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                    </select>
+                </label>
+                <label>Size
+                    <select class="nlp-edit-size">
+                        ${NLP_SIZE_OPTS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                    </select>
+                </label>
+            </div>
+
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; align-items:flex-end;">
+                <label>Stamp
+                    <select class="nlp-edit-stamp-type">
+                        ${NLP_STAMP_OPTS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                    </select>
+                </label>
+                <label>Source
+                    <select class="nlp-edit-source-type">
+                        ${NLP_SOURCE_OPTS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                    </select>
+                </label>
+            </div>
+
+            <div style="margin-bottom:12px;">
+                <label style="display:block;">Notes
+                    <input type="text" class="nlp-edit-notes" style="width:100%; max-width:600px;" />
+                </label>
+            </div>
+
+            <div class="nlp-rematch-results" style="margin-bottom:8px;"></div>
+            <div class="nlp-vp-msg" style="margin-bottom:8px; font-size:13px;"></div>
+
+            <div style="display:flex; gap:8px; margin-top:12px;">
+                <button class="btn btn-primary nlp-add-btn">Add to purchase</button>
+            </div>
+        `;
+
+        const nameInput  = formDiv.querySelector('.nlp-edit-card-name');
+        const setInput   = formDiv.querySelector('.nlp-edit-set-name');
+        const numInput   = formDiv.querySelector('.nlp-edit-card-number');
+        const resultsEl  = formDiv.querySelector('.nlp-rematch-results');
+
+        // Reset match state for this fresh card
+        vRow = { card_id: null, _matchedItem: null };
+
+        // ── Card name autocomplete — identical to staging row ──────────────────
+        wireAutocomplete({
+            input: nameInput,
+            container: formDiv,
+            search: async (term) => {
+                const setVal = setInput.value.trim();
+                const numVal = numInput.value.trim();
+
+                let cardQuery = supabase
+                    .from('v_card_variants')
+                    .select('card_id, variant_id, card_name, set_name, display_number, card_number, rarity, foil_type, foil_pattern, texture, material, size, stamp_type, source_type, foil_label, pattern_label, texture_label, material_label, size_label, stamp_label, source_label')
+                    .ilike('card_name', `%${term}%`)
+                    .order('card_name')
+                    .order('foil_type');
+                if (setVal) cardQuery = cardQuery.ilike('set_name', `%${setVal}%`);
+                if (numVal) cardQuery = cardQuery.eq('card_number', numVal);
+                // When narrowed to a specific card (set + number), show ALL its
+                // variants rather than capping — that's the whole point of asking.
+                cardQuery = cardQuery.limit((setVal && numVal) ? 30 : 8);
+
+                const [cardRes, charRes] = await Promise.all([
+                    cardQuery,
+                    supabase
+                        .from('characters')
+                        .select('name')
+                        .ilike('name', `%${term}%`)
+                        .limit(5),
+                ]);
+                const cards = (cardRes.data || []).map(c => ({
+                    _type: 'card', ...c,
+                    variant_label: [c.foil_label, c.pattern_label, c.texture_label, c.material_label, c.size_label, c.stamp_label, c.source_label]
+                        .filter(Boolean).join(' · ') || 'Non-Holo',
+                }));
+                const chars = (charRes.data || []).map(ch => ({ _type: 'character', card_name: ch.name }));
+                return [...cards, ...chars];
+            },
+            renderItem: (c) => c._type === 'card'
+                ? `${c.card_name} — ${c.set_name} #${c.display_number || ''} · ${c.variant_label}`
+                : `✦ ${c.card_name}`,
+            onSelect: (c) => {
+                nameInput.value = c.card_name;
+                if (c._type === 'card') {
+                    setInput.value = c.set_name || '';
+                    numInput.value = c.display_number || '';
+                    vRow.card_id = c.card_id || null;
+                    vRow._matchedItem = { card_id: c.card_id, source: 'db' };
+
+                    // Populate variant axis dropdowns from the selected variant
+                    const setSel = (cls, val) => {
+                        const el = formDiv.querySelector(cls);
+                        if (el) el.value = val || '';
+                    };
+                    setSel('.nlp-edit-foil-type', c.foil_type || 'non_holo');
+                    setSel('.nlp-edit-foil-pattern', c.foil_pattern || '');
+                    setSel('.nlp-edit-texture', c.texture || '');
+                    setSel('.nlp-edit-material', c.material || '');
+                    setSel('.nlp-edit-size', c.size || '');
+                    setSel('.nlp-edit-stamp-type', c.stamp_type || '');
+                    setSel('.nlp-edit-source-type', c.source_type || '');
+                }
+            },
+        });
+
+        // ── Set name autocomplete — identical to staging row ───────────────────
+        wireAutocomplete({
+            input: setInput,
+            container: formDiv,
+            search: async (term) => {
+                const { data } = await supabase
+                    .from('card_sets').select('name').ilike('name', `%${term}%`).limit(10);
+                return data || [];
+            },
+            renderItem: (s) => s.name,
+            onSelect: (s) => { setInput.value = s.name; },
+        });
+
+        // ── Rematch button — manual trigger, same DB-then-API flow ─────────────
+        formDiv.querySelector('.nlp-rematch-btn').addEventListener('click', async () => {
+            const btn = formDiv.querySelector('.nlp-rematch-btn');
+            const name = nameInput.value.trim();
+            const num  = numInput.value.trim();
+            const setN = setInput.value.trim();
+
+            if (!name) {
+                resultsEl.innerHTML = `<p style="color:var(--warning); font-size:13px;">Enter a card name to search.</p>`;
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = 'Searching DB...';
+            resultsEl.innerHTML = '';
+
+            const dbResults = await searchDB(name, num, setN);
+
+            if (dbResults.length > 0) {
+                btn.disabled = false;
+                btn.textContent = '🔍 Rematch';
+                renderLocalRematchResults(dbResults, 'db', name, num, setN, resultsEl, nameInput, setInput, numInput);
+                return;
+            }
+
+            btn.textContent = 'Not in DB — searching API...';
+            const apiResults = await searchPokemonTcgApi(name, num, setN);
+            btn.disabled = false;
+            btn.textContent = '🔍 Rematch';
+
+            if (apiResults.length === 0) {
+                resultsEl.innerHTML = `
+                    <p style="color:var(--warning); font-size:13px;">
+                        Not found in DB or pokemontcg.io API for
+                        "<strong>${escapeHtml(name)}</strong>"
+                        ${num ? `#${escapeHtml(num)}` : ''}
+                        ${setN ? `(${escapeHtml(setN)})` : ''}.
+                        Fill in the fields manually and click Add to purchase to create it.
+                    </p>`;
+                return;
+            }
+
+            renderLocalRematchResults(apiResults, 'api', name, num, setN, resultsEl, nameInput, setInput, numInput);
+        });
+
+        // ── Add to purchase ─────────────────────────────────────────────────────
+        formDiv.querySelector('.nlp-add-btn').addEventListener('click', async () => {
+            const msg = formDiv.querySelector('.nlp-vp-msg');
+            let cardId = vRow.card_id;
+
+            const setName    = setInput.value.trim();
+            const cardName    = nameInput.value.trim();
+            const cardNumber  = numInput.value.trim();
+
+            if (!cardName || !setName || !cardNumber) {
+                msg.innerHTML = `<span style="color:var(--danger)">Card name, set, and number are required.</span>`;
+                return;
+            }
+
+            // Matched from API but not yet created in DB — create now (mirrors linkStagingToCard)
+            if (vRow._matchedItem && vRow._matchedItem.source === 'api' && !cardId) {
+                msg.innerHTML = `<span style="color:var(--text-secondary)">Adding to catalog...</span>`;
+                const item = vRow._matchedItem;
+                const api  = item._raw;
+
+                let { data: setRow } = await supabase
+                    .from('card_sets').select('id').eq('set_code', item.set_code).maybeSingle();
+
+                if (!setRow) {
+                    const { data: newSet, error: setErr } = await supabase
+                        .from('card_sets')
+                        .insert({
+                            name: item.set_name, set_code: item.set_code,
+                            total_cards: item.set_total || null, game_id: await getGameId(),
+                        })
+                        .select('id').single();
+                    if (setErr) {
+                        msg.innerHTML = `<span style="color:var(--danger)">${escapeHtml(setErr.message)}</span>`;
+                        return;
+                    }
+                    setRow = newSet;
+                }
+
+                const { data: cardRow, error: cardErr } = await supabase
+                    .from('card_master')
+                    .upsert({
+                        set_id: setRow.id, name: api.name, card_number: api.number,
+                        rarity: api.rarity || null,
+                        image_url: api.images?.large || api.images?.small || null,
+                        external_id: api.id,
+                    }, { onConflict: 'external_id' })
+                    .select('id').single();
+
+                if (cardErr) {
+                    msg.innerHTML = `<span style="color:var(--danger)">${escapeHtml(cardErr.message)}</span>`;
+                    return;
+                }
+                cardId = cardRow.id;
+            }
+
+            // Still nothing matched — create fresh from typed fields
+            if (!cardId) {
+                msg.innerHTML = `<span style="color:var(--text-secondary)">Creating card...</span>`;
+
+                let { data: setRow, error: setErr } = await supabase
+                    .from('card_sets').select('id').ilike('name', setName).maybeSingle();
+
+                if (setErr) {
+                    msg.innerHTML = `<span style="color:var(--danger)">${escapeHtml(setErr.message)}</span>`;
+                    return;
+                }
+                if (!setRow) {
+                    msg.innerHTML = `<span style="color:var(--danger)">Set "${escapeHtml(setName)}" not found. Create it on the Sets page first, or use Rematch to pick an existing card.</span>`;
+                    return;
+                }
+
+                const { data: newCard, error: createErr } = await supabase
+                    .from('card_master')
+                    .insert({ set_id: setRow.id, name: cardName, card_number: cardNumber })
+                    .select('id').single();
+
+                if (createErr) {
+                    msg.innerHTML = `<span style="color:var(--danger)">${escapeHtml(createErr.message)}</span>`;
+                    return;
+                }
+                cardId = newCard.id;
+            }
+
+            const condition    = formDiv.querySelector('.nlp-edit-condition').value;
+            const qty          = parseInt(formDiv.querySelector('.nlp-edit-quantity').value) || 1;
+            const cost         = parseFloat(formDiv.querySelector('.nlp-edit-cost').value) || 0;
+            const listingPrice = parseFloat(formDiv.querySelector('.nlp-edit-listing-price').value) || null;
+            const foilType     = formDiv.querySelector('.nlp-edit-foil-type').value;
+            const pattern      = formDiv.querySelector('.nlp-edit-foil-pattern').value || null;
+            const texture      = formDiv.querySelector('.nlp-edit-texture').value || null;
+            const material     = formDiv.querySelector('.nlp-edit-material').value || null;
+            const size         = formDiv.querySelector('.nlp-edit-size').value || null;
+            const stamp        = formDiv.querySelector('.nlp-edit-stamp-type').value || null;
+            const srcType      = formDiv.querySelector('.nlp-edit-source-type').value || null;
+            const notes        = formDiv.querySelector('.nlp-edit-notes').value.trim() || null;
+
+            addedCards.push({
+                card_id: cardId, card_name: cardName, set_name: setName, card_number: cardNumber,
+                condition, foil_type: foilType, foil_pattern: pattern, texture, material, size,
+                stamp_type: stamp, source_type: srcType, notes, qty, cost, listing_price: listingPrice,
+            });
+
+            renderAddedList();
+            renderForm();
+        });
+    }
+
+    function renderLocalRematchResults(items, source, name, num, setN, resultsEl, nameInput, setInput, numInput) {
+        const sourceLabel = source === 'db'
+            ? `<span style="color:var(--success); font-size:12px;">📦 From your catalog</span>`
+            : `<span style="color:var(--text-secondary); font-size:12px;">🌐 From pokemontcg.io API — will be added to your catalog on link</span>`;
+
+        resultsEl.innerHTML = `
+            <div style="margin-bottom:6px;">${sourceLabel}</div>
+            <p style="font-size:13px; color:var(--text-secondary); margin:0 0 6px;">
+                ${items.length} result${items.length === 1 ? '' : 's'} — click to link:
+            </p>
+            ${items.map((c, i) => `
+                <div class="nlp-result-item" data-idx="${i}"
+                     style="padding:6px 8px; border:1px solid var(--border); border-radius:4px;
+                            margin-bottom:4px; cursor:pointer; font-size:13px; display:flex; align-items:center; gap:10px;"
+                     onmouseover="this.style.background='var(--bg-tertiary)'"
+                     onmouseout="this.style.background=''">
+                    ${c.image_url ? `<img src="${escapeHtml(c.image_url)}" style="height:40px; border-radius:3px; flex-shrink:0;" />` : ''}
+                    <div>
+                        <strong>${escapeHtml(c.name)}</strong>
+                        — ${escapeHtml(c.set_name)} #${escapeHtml(c.number || '')}
+                        <span style="color:var(--text-secondary);">(${escapeHtml(c.variant_label)}${c.rarity ? ', ' + escapeHtml(c.rarity) : ''})</span>
+                        ${source === 'api' ? `<span style="color:var(--text-secondary); font-size:11px; display:block;">API ID: ${escapeHtml(c.external_id)}</span>` : ''}
+                    </div>
+                </div>
+            `).join('')}
+            ${source === 'db' ? `
+                <button class="btn nlp-try-api-btn" style="margin-top:8px; font-size:12px;">
+                    Not what you're looking for? Search pokemontcg.io API →
+                </button>` : ''}
+        `;
+
+        resultsEl.querySelector('.nlp-try-api-btn')?.addEventListener('click', async () => {
+            resultsEl.innerHTML = `<p style="font-size:13px; color:var(--text-secondary);">Searching pokemontcg.io...</p>`;
+            const apiResults = await searchPokemonTcgApi(name, num, setN);
+            if (apiResults.length === 0) {
+                resultsEl.innerHTML = `<p style="color:var(--warning); font-size:13px;">Not found on pokemontcg.io either.</p>`;
+                return;
+            }
+            renderLocalRematchResults(apiResults, 'api', name, num, setN, resultsEl, nameInput, setInput, numInput);
+        });
+
+        resultsEl.querySelectorAll('.nlp-result-item').forEach(el => {
+            el.addEventListener('click', () => {
+                const item = items[Number(el.dataset.idx)];
+                // Fill the form fields, mark as matched, do NOT auto-create yet —
+                // creation happens on "Add to purchase" (mirrors linkStagingToCard timing)
+                nameInput.value = item.name;
+                setInput.value  = item.set_name;
+                numInput.value  = item.number || '';
+                vRow.card_id = item.card_id || null;
+                vRow._matchedItem = item;
+
+                // Populate variant axis dropdowns when available (DB matches only —
+                // API results don't know the variant, so leave those as default)
+                if (item.source === 'db') {
+                    const formRoot = el.closest('#nlp-form') || el.closest('div').parentElement.parentElement;
+                    const setSel = (cls, val) => {
+                        const elx = document.querySelector(cls);
+                        if (elx) elx.value = val || '';
+                    };
+                    setSel('.nlp-edit-foil-type', item.foil_type || 'non_holo');
+                    setSel('.nlp-edit-foil-pattern', item.foil_pattern || '');
+                    setSel('.nlp-edit-texture', item.texture || '');
+                    setSel('.nlp-edit-material', item.material || '');
+                    setSel('.nlp-edit-size', item.size || '');
+                    setSel('.nlp-edit-stamp-type', item.stamp_type || '');
+                    setSel('.nlp-edit-source-type', item.source_type || '');
+                }
+
+                resultsEl.innerHTML = `<p style="color:var(--success); font-size:13px;">✅ Selected — fill in qty/cost below and click Add to purchase.</p>`;
+            });
+        });
+    }
+
+    function renderAddedList() {
+        if (addedCards.length === 0) {
+            addedListDiv.innerHTML = `<div id="nlp-empty-msg" style="font-size:12px; color:var(--text-secondary); padding:8px 0;">No cards added yet.</div>`;
+            return;
+        }
+        addedListDiv.innerHTML = addedCards.map((c, i) => `
+            <div style="display:flex; align-items:center; gap:10px; padding:8px 10px;
+                        background:var(--bg-tertiary); border-radius:6px; margin-bottom:6px; font-size:13px;">
+                <div style="flex:1;">
+                    <strong>${escapeHtml(c.card_name)}</strong>
+                    <span style="color:var(--text-secondary); font-size:11px;">
+                        ${escapeHtml(c.set_name)} #${escapeHtml(c.card_number)} · ${escapeHtml(c.foil_type)}
+                    </span>
+                </div>
+                <span style="font-size:12px; color:var(--text-secondary);">${c.qty} × ${formatPrice(c.cost)}</span>
+                <button class="btn nlp-remove-added-btn" data-idx="${i}" style="font-size:11px; padding:2px 8px; color:var(--danger); border-color:var(--danger);">✕</button>
+            </div>
+        `).join('');
+
+        addedListDiv.querySelectorAll('.nlp-remove-added-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                addedCards.splice(Number(btn.dataset.idx), 1);
+                renderAddedList();
+            });
+        });
+    }
+
+    overlay.querySelector('#nlp-save-btn').addEventListener('click', async () => {
+        const msg = overlay.querySelector('#nlp-msg');
+        if (addedCards.length === 0) {
+            msg.innerHTML = `<span style="color:var(--danger)">Add at least one card.</span>`;
+            return;
+        }
+
+        const batchRef  = overlay.querySelector('#nlp-batch').value.trim() || batchId;
+        const dateVal   = overlay.querySelector('#nlp-date').value;
+        const orderDate = dateVal ? new Date(dateVal).toISOString() : new Date().toISOString();
+
+        msg.innerHTML = `<span style="color:var(--text-secondary)">Saving ${addedCards.length} card(s)...</span>`;
+
+        const rows = addedCards.map(c => ({
+            import_batch: batchRef, order_number: batchRef, order_date: orderDate,
+            source: 'local', card_name: c.card_name, set_name: c.set_name, card_number: c.card_number,
+            condition: c.condition, quantity: c.qty, price: c.cost, listing_price: c.listing_price,
+            card_id: c.card_id, match_status: 'matched', status: 'approved',
+            foil_type: c.foil_type, foil_pattern: c.foil_pattern, texture: c.texture,
+            material: c.material, size: c.size, stamp_type: c.stamp_type, source_type: c.source_type,
+            notes: c.notes,
+        }));
+
+        const { error } = await supabase.from('staging').insert(rows);
+
+        if (error) {
+            msg.innerHTML = `<span style="color:var(--danger)">Failed: ${escapeHtml(error.message)}</span>`;
+            return;
+        }
+
+        overlay.remove();
+
+        state.filters.import_batch = batchRef;
+        state.filters.source = 'local';
+        state.filters.match_status = 'all';
+        state.filters.status = 'all';
+        state.page = 0;
+        await loadFilterCounts();
+        renderFilters(container);
+        await loadAndRenderRows(container);
+    });
+
+    renderForm();
 }
 
 // ----------------------------------------------------------------

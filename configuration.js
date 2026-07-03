@@ -1,0 +1,1126 @@
+// configuration.js
+// Configuration section — Sets, Card games, Pricing rules, Listing templates.
+// Follows the same renderX(container) pattern used by inventory.js / staging-review.js.
+
+import { supabase, debounce } from './shared.js';
+
+let state = {
+    sets: [],
+    games: [],
+    setCounts: {},   // set_id -> count of card_master rows
+    search: '',
+    loading: true,
+    error: null,
+};
+
+let gameState = {
+    games: [],
+    gameSetCounts: {},  // game_id -> count of card_sets rows
+    search: '',
+};
+
+let pricingState = {
+    tab: 'tiers',          // 'tiers' | 'set-config' | 'overrides'
+    tiers: [],
+    setConfigs: [],
+    overrides: [],
+    sets: [],
+    cardSearch: '',
+    cardResults: [],
+};
+
+let templatesState = {
+    templates: [],
+};
+
+export async function renderConfiguration(container, initialKey = 'sets') {
+    if (initialKey === 'sets') {
+        state = { sets: [], games: [], setCounts: {}, search: '', loading: true, error: null };
+        container.innerHTML = configShell(setsSectionHTML());
+        wireConfigNav(container, 'sets');
+        await loadSets(container);
+    } else if (initialKey === 'card-games') {
+        gameState = { games: [], gameSetCounts: {}, search: '' };
+        container.innerHTML = configShell(gamesSectionHTML());
+        wireConfigNav(container, 'card-games');
+        await loadGames(container);
+    } else if (initialKey === 'pricing-rules') {
+        pricingState = { tab: 'tiers', tiers: [], setConfigs: [], overrides: [], sets: [], cardSearch: '', cardResults: [] };
+        container.innerHTML = configShell(pricingSectionHTML());
+        wireConfigNav(container, 'pricing-rules');
+        await loadPricing(container);
+    } else if (initialKey === 'listing-templates') {
+        templatesState = { templates: [] };
+        container.innerHTML = configShell(templatesSectionHTML());
+        wireConfigNav(container, 'listing-templates');
+        await loadTemplates(container);
+    } else {
+        container.innerHTML = configShell(`<p style="color:var(--text-secondary)">${labelFor(initialKey)} coming soon.</p>`);
+        wireConfigNav(container, initialKey);
+    }
+}
+
+// ── Shared configuration shell ──────────────────────────────────────────────
+// Renders the left sub-nav (Sets / Card games / Pricing rules / Listing
+// templates) plus a content slot. Other configuration pages can reuse this.
+
+function configShell(bodyHTML) {
+    return `
+        <div style="display:flex; gap:24px;">
+            <div style="width:180px; flex-shrink:0;">
+                <div style="font-size:12px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.03em; padding:0 4px 8px;">Configuration</div>
+                <a href="#sets" data-config-nav="sets" class="config-nav-item">Sets</a>
+                <a href="#card-games" data-config-nav="card-games" class="config-nav-item">Card games</a>
+                <a href="#pricing-rules" data-config-nav="pricing-rules" class="config-nav-item">Pricing rules</a>
+                <a href="#listing-templates" data-config-nav="listing-templates" class="config-nav-item">Listing templates</a>
+            </div>
+            <div style="flex:1; min-width:0;" id="config-body">
+                ${bodyHTML}
+            </div>
+        </div>
+        <style>
+            .config-nav-item {
+                display:block;
+                padding:8px 10px;
+                margin-bottom:2px;
+                border-radius:6px;
+                color:var(--text-secondary);
+                text-decoration:none;
+                font-size:13px;
+            }
+            .config-nav-item:hover { background:var(--bg-tertiary); color:var(--text); }
+            .config-nav-item.active { background:var(--bg-tertiary); color:var(--accent); }
+        </style>
+    `;
+}
+
+function wireConfigNav(container, activeKey) {
+    container.querySelectorAll('.config-nav-item').forEach(a => {
+        a.classList.toggle('active', a.dataset.configNav === activeKey);
+        a.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const key = a.dataset.configNav;
+            if (key === activeKey) return;
+            if (key === 'sets') {
+                await renderConfiguration(container);
+            } else if (key === 'card-games') {
+                await renderConfiguration(container, 'card-games');
+            } else if (key === 'pricing-rules') {
+                await renderConfiguration(container, 'pricing-rules');
+            } else if (key === 'listing-templates') {
+                await renderConfiguration(container, 'listing-templates');
+            } else {
+                // Other configuration sub-pages land here later.
+                container.innerHTML = configShell(`<p style="color:var(--text-secondary)">${labelFor(key)} coming soon.</p>`);
+                wireConfigNav(container, key);
+            }
+        });
+    });
+}
+
+function labelFor(key) {
+    return {
+        'card-games': 'Card games',
+        'pricing-rules': 'Pricing rules',
+        'listing-templates': 'Listing templates',
+    }[key] || key;
+}
+
+// ── Sets section ─────────────────────────────────────────────────────────────
+
+function setsSectionHTML() {
+    return `
+        <div class="filters-bar" style="justify-content:space-between;">
+            <input type="search" id="sets-search" placeholder="Search sets..." style="min-width:240px;" />
+            <button class="btn btn-primary" id="new-set-btn">+ New set</button>
+        </div>
+        <div id="sets-table-wrap"><p>Loading...</p></div>
+        <div id="set-modal-root"></div>
+    `;
+}
+
+async function loadSets(container) {
+    const wrap = container.querySelector('#sets-table-wrap');
+    try {
+        const [{ data: sets, error: setsErr }, { data: games, error: gamesErr }, { data: masterRows, error: masterErr }] =
+            await Promise.all([
+                supabase.from('card_sets').select('*').order('name'),
+                supabase.from('card_games').select('id, name'),
+                supabase.from('card_master').select('set_id'),
+            ]);
+
+        if (setsErr) throw setsErr;
+        if (gamesErr) throw gamesErr;
+        if (masterErr) throw masterErr;
+
+        const counts = {};
+        for (const row of masterRows || []) {
+            counts[row.set_id] = (counts[row.set_id] || 0) + 1;
+        }
+
+        state.sets = sets || [];
+        state.games = games || [];
+        state.setCounts = counts;
+        state.loading = false;
+
+        renderTable(container);
+        wireSetsControls(container);
+    } catch (err) {
+        console.error(err);
+        wrap.innerHTML = `<p style="color:var(--danger)">Failed to load sets: ${err.message}</p>`;
+    }
+}
+
+function renderTable(container) {
+    const wrap = container.querySelector('#sets-table-wrap');
+    const gameNameById = Object.fromEntries(state.games.map(g => [g.id, g.name]));
+
+    const q = state.search.trim().toLowerCase();
+    const rows = state.sets.filter(s =>
+        !q || s.name.toLowerCase().includes(q) || (s.set_code || '').toLowerCase().includes(q)
+    );
+
+    if (!rows.length) {
+        wrap.innerHTML = `<p style="color:var(--text-secondary)">No sets found.</p>`;
+        return;
+    }
+
+    wrap.innerHTML = `
+        <table>
+            <thead>
+                <tr>
+                    <th>Set name</th>
+                    <th>Game</th>
+                    <th>Code</th>
+                    <th>Series</th>
+                    <th>Year</th>
+                    <th>Cards</th>
+                    <th style="width:60px;"></th>
+                </tr>
+            </thead>
+            <tbody>
+                ${rows.map(s => `
+                    <tr data-set-id="${s.id}">
+                        <td>${escapeHTML(s.name)}</td>
+                        <td>${escapeHTML(gameNameById[s.game_id] || '-')}</td>
+                        <td>${escapeHTML(s.set_code || '-')}</td>
+                        <td>${escapeHTML(s.series || '-')}</td>
+                        <td>${s.release_year || '-'}</td>
+                        <td>${state.setCounts[s.id] || 0}${s.total_cards ? ' / ' + s.total_cards : ''}</td>
+                        <td><button class="btn edit-set-btn" data-id="${s.id}">Edit</button></td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    `;
+
+    wrap.querySelectorAll('.edit-set-btn').forEach(btn => {
+        btn.addEventListener('click', () => openSetModal(container, btn.dataset.id));
+    });
+}
+
+async function confirmDeleteSet(container, setId) {
+    const set = state.sets.find(s => s.id === setId);
+    if (!set) return;
+
+    const cardCount = state.setCounts[setId] || 0;
+    const warning = cardCount > 0
+        ? `"${set.name}" has ${cardCount} card${cardCount === 1 ? '' : 's'} linked to it in card_master. Deleting the set will fail unless those cards are removed or reassigned first.\n\nTry to delete anyway?`
+        : `Delete "${set.name}"? This can't be undone.`;
+
+    if (!window.confirm(warning)) return;
+
+    try {
+        const { error } = await supabase.from('card_sets').delete().eq('id', setId);
+        if (error) throw error;
+        await loadSets(container);
+    } catch (err) {
+        console.error(err);
+        const isFkViolation = (err.code === '23503') || /foreign key/i.test(err.message || '');
+        const msg = isFkViolation
+            ? `Can't delete "${set.name}" — it still has cards referencing it in card_master. Remove or reassign those cards first.`
+            : `Failed to delete set: ${err.message}`;
+        window.alert(msg);
+    }
+}
+
+function wireSetsControls(container) {
+    const searchInput = container.querySelector('#sets-search');
+    searchInput.value = state.search;
+    searchInput.addEventListener('input', debounce((e) => {
+        state.search = e.target.value;
+        renderTable(container);
+    }, 200));
+
+    container.querySelector('#new-set-btn').addEventListener('click', () => openSetModal(container, null));
+}
+
+// ── Create / edit modal ──────────────────────────────────────────────────────
+
+function openSetModal(container, setId) {
+    const isEdit = !!setId;
+    const existing = isEdit ? state.sets.find(s => s.id === setId) : null;
+    const root = container.querySelector('#set-modal-root');
+
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:420px; max-width:90vw;">
+                <h3 style="margin:0 0 16px;">${isEdit ? 'Edit set' : 'New set'}</h3>
+                <form id="set-form">
+                    <div style="display:flex; flex-direction:column; gap:10px;">
+                        <label style="font-size:12px; color:var(--text-secondary);">
+                            Game
+                            <select name="game_id" required style="width:100%; margin-top:4px;">
+                                ${state.games.map(g => `<option value="${g.id}" ${existing && existing.game_id === g.id ? 'selected' : ''}>${escapeHTML(g.name)}</option>`).join('')}
+                            </select>
+                        </label>
+                        <label style="font-size:12px; color:var(--text-secondary);">
+                            Set name
+                            <input type="text" name="name" required value="${existing ? escapeAttr(existing.name) : ''}" style="width:100%; margin-top:4px;" />
+                        </label>
+                        <label style="font-size:12px; color:var(--text-secondary);">
+                            Set code
+                            <input type="text" name="set_code" required value="${existing ? escapeAttr(existing.set_code || '') : ''}" style="width:100%; margin-top:4px;" placeholder="e.g. sv8pt5" />
+                        </label>
+                        <label style="font-size:12px; color:var(--text-secondary);">
+                            Series
+                            <input type="text" name="series" value="${existing ? escapeAttr(existing.series || '') : ''}" style="width:100%; margin-top:4px;" />
+                        </label>
+                        <div style="display:flex; gap:10px;">
+                            <label style="font-size:12px; color:var(--text-secondary); flex:1;">
+                                Release year
+                                <input type="number" name="release_year" value="${existing ? (existing.release_year || '') : ''}" style="width:100%; margin-top:4px;" />
+                            </label>
+                            <label style="font-size:12px; color:var(--text-secondary); flex:1;">
+                                Total cards
+                                <input type="number" name="total_cards" value="${existing ? (existing.total_cards || '') : ''}" style="width:100%; margin-top:4px;" />
+                            </label>
+                        </div>
+                        <label style="font-size:12px; color:var(--text-secondary);">
+                            Language
+                            <input type="text" name="language" value="${existing ? escapeAttr(existing.language || 'English') : 'English'}" style="width:100%; margin-top:4px;" />
+                        </label>
+                        <div style="border-top:1px solid var(--border); margin-top:4px; padding-top:10px;">
+                            <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.03em; color:var(--text-secondary); margin-bottom:8px;">Card numbering</div>
+                            <div style="display:flex; flex-direction:column; gap:10px;">
+                                <label style="font-size:12px; color:var(--text-secondary);">
+                                    Base set number
+                                    <input type="text" name="base_set_number" value="${existing ? escapeAttr(existing.base_set_number || '') : ''}" style="width:100%; margin-top:4px;" />
+                                </label>
+                                <label style="font-size:12px; color:var(--text-secondary);">
+                                    On-card code
+                                    <input type="text" name="on_card_code" value="${existing ? escapeAttr(existing.on_card_code || '') : ''}" style="width:100%; margin-top:4px;" />
+                                </label>
+                                <label style="font-size:12px; color:var(--text-secondary);">
+                                    Set prefix
+                                    <input type="text" name="set_prefix" value="${existing ? escapeAttr(existing.set_prefix || '') : ''}" style="width:100%; margin-top:4px;" />
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="set-form-error" style="color:var(--danger); font-size:12px; margin-top:10px;"></div>
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:18px;">
+                        ${isEdit ? `<button type="button" class="btn" id="set-modal-delete" style="color:var(--danger); border-color:var(--danger);">Delete set</button>` : '<span></span>'}
+                        <div style="display:flex; gap:8px;">
+                            <button type="button" class="btn" id="set-modal-cancel">Cancel</button>
+                            <button type="submit" class="btn btn-primary">${isEdit ? 'Save changes' : 'Create set'}</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    `;
+
+    root.querySelector('#set-modal-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+
+    if (isEdit) {
+        root.querySelector('#set-modal-delete').addEventListener('click', async () => {
+            root.innerHTML = '';
+            await confirmDeleteSet(container, setId);
+        });
+    }
+
+    root.querySelector('#set-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#set-form-error');
+        errBox.textContent = '';
+
+        const fd = new FormData(e.target);
+        const payload = {
+            game_id: fd.get('game_id'),
+            name: fd.get('name').trim(),
+            set_code: fd.get('set_code').trim(),
+            series: fd.get('series').trim() || null,
+            release_year: fd.get('release_year') ? parseInt(fd.get('release_year'), 10) : null,
+            total_cards: fd.get('total_cards') ? parseInt(fd.get('total_cards'), 10) : null,
+            language: fd.get('language').trim() || 'English',
+            base_set_number: fd.get('base_set_number').trim() || null,
+            on_card_code: fd.get('on_card_code').trim() || null,
+            set_prefix: fd.get('set_prefix').trim() || null,
+        };
+
+        try {
+            if (isEdit) {
+                const { error } = await supabase.from('card_sets').update(payload).eq('id', setId);
+                if (error) throw error;
+            } else {
+                const { error } = await supabase.from('card_sets').insert(payload);
+                if (error) throw error;
+            }
+            root.innerHTML = '';
+            await loadSets(container);
+        } catch (err) {
+            console.error(err);
+            errBox.textContent = err.message || 'Failed to save set.';
+        }
+    });
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function escapeHTML(str) {
+    return String(str ?? '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+}
+
+function escapeAttr(str) {
+    return escapeHTML(str);
+}
+
+// ── Pricing rules section (3 sub-tabs: tiers / set-config / overrides) ──────
+
+function pricingSectionHTML() {
+    return `
+        <div style="display:flex; gap:4px; margin-bottom:16px; border-bottom:1px solid var(--border);">
+            <button class="pricing-tab-btn" data-tab="tiers">Price tiers</button>
+            <button class="pricing-tab-btn" data-tab="set-config">Set pricing</button>
+            <button class="pricing-tab-btn" data-tab="overrides">Card overrides</button>
+        </div>
+        <div id="pricing-tab-content"><p>Loading...</p></div>
+        <div id="pricing-modal-root"></div>
+        <style>
+            .pricing-tab-btn {
+                background:none; border:none; color:var(--text-secondary);
+                padding:8px 14px; font-size:13px; cursor:pointer;
+                border-bottom:2px solid transparent; margin-bottom:-1px;
+            }
+            .pricing-tab-btn:hover { color:var(--text); }
+            .pricing-tab-btn.active { color:var(--accent); border-bottom-color:var(--accent); }
+        </style>
+    `;
+}
+
+async function loadPricing(container) {
+    const wrap = container.querySelector('#pricing-tab-content');
+    try {
+        const [{ data: tiers, error: tiersErr }, { data: setConfigs, error: scErr },
+               { data: overrides, error: ovErr }, { data: sets, error: setsErr }] = await Promise.all([
+            supabase.from('price_tiers').select('*').order('platform').order('card_type').order('sort_order'),
+            supabase.from('set_pricing_config').select('*').order('created_at', { ascending: false }),
+            supabase.from('card_pricing_overrides').select('*').order('updated_at', { ascending: false }),
+            supabase.from('card_sets').select('id, name'),
+        ]);
+        if (tiersErr) throw tiersErr;
+        if (scErr) throw scErr;
+        if (ovErr) throw ovErr;
+        if (setsErr) throw setsErr;
+
+        pricingState.tiers = tiers || [];
+        pricingState.setConfigs = setConfigs || [];
+        pricingState.overrides = overrides || [];
+        pricingState.sets = sets || [];
+
+        wirePricingTabs(container);
+        renderPricingTab(container);
+    } catch (err) {
+        console.error(err);
+        wrap.innerHTML = `<p style="color:var(--danger)">Failed to load pricing data: ${err.message}</p>`;
+    }
+}
+
+function wirePricingTabs(container) {
+    container.querySelectorAll('.pricing-tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === pricingState.tab);
+        btn.addEventListener('click', () => {
+            pricingState.tab = btn.dataset.tab;
+            container.querySelectorAll('.pricing-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === pricingState.tab));
+            renderPricingTab(container);
+        });
+    });
+}
+
+function renderPricingTab(container) {
+    if (pricingState.tab === 'tiers') renderTiersTab(container);
+    else if (pricingState.tab === 'set-config') renderSetConfigTab(container);
+    else renderOverridesTab(container);
+}
+
+// -- Price tiers --
+
+function renderTiersTab(container) {
+    const wrap = container.querySelector('#pricing-tab-content');
+    const rows = pricingState.tiers;
+
+    wrap.innerHTML = `
+        <div style="display:flex; justify-content:flex-end; margin-bottom:12px;">
+            <button class="btn btn-primary" id="new-tier-btn">+ New tier</button>
+        </div>
+        ${rows.length ? `
+        <table>
+            <thead><tr>
+                <th>Platform</th><th>Account</th><th>Card type</th><th>Market price ≤</th><th>List price</th><th>Sort</th><th style="width:60px;"></th>
+            </tr></thead>
+            <tbody>
+                ${rows.map(t => `
+                    <tr>
+                        <td>${escapeHTML(t.platform)}</td>
+                        <td>${t.account ? escapeHTML(t.account) : '<span style="color:var(--text-secondary);">All accounts</span>'}</td>
+                        <td>${escapeHTML(t.card_type)}</td>
+                        <td>${formatPrice(t.market_price_max)}</td>
+                        <td>${formatPrice(t.list_price)}</td>
+                        <td>${t.sort_order}</td>
+                        <td><button class="btn edit-tier-btn" data-id="${t.id}">Edit</button></td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>` : `<p style="color:var(--text-secondary)">No price tiers yet.</p>`}
+    `;
+
+    wrap.querySelector('#new-tier-btn').addEventListener('click', () => openTierModal(container, null));
+    wrap.querySelectorAll('.edit-tier-btn').forEach(btn => {
+        btn.addEventListener('click', () => openTierModal(container, btn.dataset.id));
+    });
+}
+
+function openTierModal(container, tierId) {
+    const isEdit = !!tierId;
+    const existing = isEdit ? pricingState.tiers.find(t => t.id === tierId) : null;
+    const root = container.querySelector('#pricing-modal-root');
+
+    root.innerHTML = modalShell(isEdit ? 'Edit price tier' : 'New price tier', `
+        <div style="display:flex; flex-direction:column; gap:10px;">
+            ${field('Platform', 'text', 'platform', existing?.platform || 'ebay')}
+            ${field('Account (blank = applies to all accounts)', 'text', 'account', existing?.account || '', 'e.g. BIGGYFISH', '', true)}
+            ${field('Card type', 'text', 'card_type', existing?.card_type || '', 'e.g. common, holo, reverse_holo')}
+            ${field('Market price max ($)', 'number', 'market_price_max', existing?.market_price_max ?? '', '', '0.01')}
+            ${field('List price ($)', 'number', 'list_price', existing?.list_price ?? '', '', '0.01')}
+            ${field('Sort order', 'number', 'sort_order', existing?.sort_order ?? '')}
+        </div>
+    `, isEdit, 'tier');
+
+    root.querySelector('#modal-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+    if (isEdit) {
+        root.querySelector('#modal-delete').addEventListener('click', async () => {
+            root.innerHTML = '';
+            await confirmDelete(container, 'price_tiers', tierId, `this price tier`, () => loadPricing(container));
+        });
+    }
+    root.querySelector('#modal-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#modal-error');
+        errBox.textContent = '';
+        const fd = new FormData(e.target);
+        const payload = {
+            platform: fd.get('platform').trim(),
+            account: fd.get('account').trim() || null,
+            card_type: fd.get('card_type').trim(),
+            market_price_max: parseFloat(fd.get('market_price_max')),
+            list_price: parseFloat(fd.get('list_price')),
+            sort_order: parseInt(fd.get('sort_order'), 10),
+        };
+        try {
+            const { error } = isEdit
+                ? await supabase.from('price_tiers').update(payload).eq('id', tierId)
+                : await supabase.from('price_tiers').insert(payload);
+            if (error) throw error;
+            root.innerHTML = '';
+            await loadPricing(container);
+        } catch (err) {
+            console.error(err);
+            errBox.textContent = err.message || 'Failed to save price tier.';
+        }
+    });
+}
+
+// -- Set pricing config --
+
+function renderSetConfigTab(container) {
+    const wrap = container.querySelector('#pricing-tab-content');
+    const setNameById = Object.fromEntries(pricingState.sets.map(s => [s.id, s.name]));
+    const rows = pricingState.setConfigs;
+
+    wrap.innerHTML = `
+        <div style="display:flex; justify-content:flex-end; margin-bottom:12px;">
+            <button class="btn btn-primary" id="new-setconfig-btn">+ New set pricing rule</button>
+        </div>
+        ${rows.length ? `
+        <table>
+            <thead><tr>
+                <th>Set</th><th>Platform</th><th>Account</th><th>Multiplier</th><th>Ultra rare rule</th><th>Era</th><th style="width:60px;"></th>
+            </tr></thead>
+            <tbody>
+                ${rows.map(sc => `
+                    <tr>
+                        <td>${escapeHTML(setNameById[sc.set_id] || sc.set_id)}</td>
+                        <td>${escapeHTML(sc.platform)}</td>
+                        <td>${sc.account ? escapeHTML(sc.account) : '<span style="color:var(--text-secondary);">All accounts</span>'}</td>
+                        <td>${sc.price_multiplier}x</td>
+                        <td>${escapeHTML(sc.ultra_rare_rule)}</td>
+                        <td>${escapeHTML(sc.era_tag || '-')}</td>
+                        <td><button class="btn edit-setconfig-btn" data-id="${sc.id}">Edit</button></td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>` : `<p style="color:var(--text-secondary)">No set pricing rules yet.</p>`}
+    `;
+
+    wrap.querySelector('#new-setconfig-btn').addEventListener('click', () => openSetConfigModal(container, null));
+    wrap.querySelectorAll('.edit-setconfig-btn').forEach(btn => {
+        btn.addEventListener('click', () => openSetConfigModal(container, btn.dataset.id));
+    });
+}
+
+function openSetConfigModal(container, configId) {
+    const isEdit = !!configId;
+    const existing = isEdit ? pricingState.setConfigs.find(sc => sc.id === configId) : null;
+    const root = container.querySelector('#pricing-modal-root');
+
+    root.innerHTML = modalShell(isEdit ? 'Edit set pricing rule' : 'New set pricing rule', `
+        <div style="display:flex; flex-direction:column; gap:10px;">
+            <label style="font-size:12px; color:var(--text-secondary);">
+                Set
+                <select name="set_id" required style="width:100%; margin-top:4px;">
+                    ${pricingState.sets.map(s => `<option value="${s.id}" ${existing?.set_id === s.id ? 'selected' : ''}>${escapeHTML(s.name)}</option>`).join('')}
+                </select>
+            </label>
+            ${field('Platform', 'text', 'platform', existing?.platform || 'ebay')}
+            ${field('Account (blank = applies to all accounts)', 'text', 'account', existing?.account || '', 'e.g. BIGGYFISH', '', true)}
+            ${field('Price multiplier', 'number', 'price_multiplier', existing?.price_multiplier ?? '1.00', '', '0.01')}
+            <div style="display:flex; gap:10px;">
+                ${field('Common floor ($)', 'number', 'common_floor', existing?.common_floor ?? '', '', '0.01', true)}
+                ${field('Reverse holo floor ($)', 'number', 'reverse_holo_floor', existing?.reverse_holo_floor ?? '', '', '0.01', true)}
+                ${field('Holo floor ($)', 'number', 'holo_floor', existing?.holo_floor ?? '', '', '0.01', true)}
+            </div>
+            <label style="font-size:12px; color:var(--text-secondary);">
+                Ultra rare rule
+                <select name="ultra_rare_rule" style="width:100%; margin-top:4px;">
+                    ${['tier', 'manual', 'multiplier'].map(v => `<option value="${v}" ${existing?.ultra_rare_rule === v ? 'selected' : ''}>${v}</option>`).join('')}
+                </select>
+            </label>
+            <div style="display:flex; gap:10px;">
+                ${field('Ultra rare multiplier', 'number', 'ultra_rare_multiplier', existing?.ultra_rare_multiplier ?? '2.00', '', '0.01', true)}
+                ${field('Ultra rare plus ($)', 'number', 'ultra_rare_plus', existing?.ultra_rare_plus ?? '1.00', '', '0.01', true)}
+            </div>
+            <div style="display:flex; gap:10px;">
+                ${field('Common max card #', 'number', 'common_max_card_num', existing?.common_max_card_num ?? '', '', '', true)}
+                ${field('Set total cards', 'number', 'set_total_cards', existing?.set_total_cards ?? '', '', '', true)}
+            </div>
+            ${field('Era tag', 'text', 'era_tag', existing?.era_tag || '', 'popular, vintage, standard, rotation', '', true)}
+            ${field('Notes', 'text', 'notes', existing?.notes || '', '', '', true)}
+        </div>
+    `, isEdit, 'setconfig');
+
+    root.querySelector('#modal-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+    if (isEdit) {
+        root.querySelector('#modal-delete').addEventListener('click', async () => {
+            root.innerHTML = '';
+            await confirmDelete(container, 'set_pricing_config', configId, `this set pricing rule`, () => loadPricing(container));
+        });
+    }
+    root.querySelector('#modal-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#modal-error');
+        errBox.textContent = '';
+        const fd = new FormData(e.target);
+        const num = (name) => fd.get(name) ? parseFloat(fd.get(name)) : null;
+        const int = (name) => fd.get(name) ? parseInt(fd.get(name), 10) : null;
+        const payload = {
+            set_id: fd.get('set_id'),
+            platform: fd.get('platform').trim(),
+            account: fd.get('account').trim() || null,
+            price_multiplier: parseFloat(fd.get('price_multiplier')) || 1.00,
+            common_floor: num('common_floor'),
+            reverse_holo_floor: num('reverse_holo_floor'),
+            holo_floor: num('holo_floor'),
+            ultra_rare_rule: fd.get('ultra_rare_rule'),
+            ultra_rare_multiplier: num('ultra_rare_multiplier'),
+            ultra_rare_plus: num('ultra_rare_plus'),
+            common_max_card_num: int('common_max_card_num'),
+            set_total_cards: int('set_total_cards'),
+            era_tag: fd.get('era_tag').trim() || null,
+            notes: fd.get('notes').trim() || null,
+            updated_at: new Date().toISOString(),
+        };
+        try {
+            const { error } = isEdit
+                ? await supabase.from('set_pricing_config').update(payload).eq('id', configId)
+                : await supabase.from('set_pricing_config').insert(payload);
+            if (error) throw error;
+            root.innerHTML = '';
+            await loadPricing(container);
+        } catch (err) {
+            console.error(err);
+            errBox.textContent = err.message || 'Failed to save set pricing rule.';
+        }
+    });
+}
+
+// -- Card pricing overrides --
+
+function renderOverridesTab(container) {
+    const wrap = container.querySelector('#pricing-tab-content');
+    const rows = pricingState.overrides;
+
+    wrap.innerHTML = `
+        <div style="display:flex; justify-content:flex-end; margin-bottom:12px;">
+            <button class="btn btn-primary" id="new-override-btn">+ New card override</button>
+        </div>
+        ${rows.length ? `
+        <table>
+            <thead><tr>
+                <th>Card ID</th><th>Platform</th><th>Account</th><th>List price</th><th>Notes</th><th style="width:60px;"></th>
+            </tr></thead>
+            <tbody>
+                ${rows.map(o => `
+                    <tr>
+                        <td style="font-family:monospace; font-size:12px;">${o.card_id}</td>
+                        <td>${escapeHTML(o.platform)}</td>
+                        <td>${o.account ? escapeHTML(o.account) : '<span style="color:var(--text-secondary);">All accounts</span>'}</td>
+                        <td>${formatPrice(o.list_price)}</td>
+                        <td style="color:var(--text-secondary);">${escapeHTML(o.notes || '-')}</td>
+                        <td><button class="btn edit-override-btn" data-id="${o.id}">Edit</button></td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>` : `<p style="color:var(--text-secondary)">No card price overrides yet.</p>`}
+        <p style="color:var(--text-secondary); font-size:12px; margin-top:8px;">Note: card overrides currently reference card_master by UUID directly — a proper card search/picker can be added once the Catalog page exists.</p>
+    `;
+
+    wrap.querySelector('#new-override-btn').addEventListener('click', () => openOverrideModal(container, null));
+    wrap.querySelectorAll('.edit-override-btn').forEach(btn => {
+        btn.addEventListener('click', () => openOverrideModal(container, btn.dataset.id));
+    });
+}
+
+function openOverrideModal(container, overrideId) {
+    const isEdit = !!overrideId;
+    const existing = isEdit ? pricingState.overrides.find(o => o.id === overrideId) : null;
+    const root = container.querySelector('#pricing-modal-root');
+
+    root.innerHTML = modalShell(isEdit ? 'Edit card override' : 'New card override', `
+        <div style="display:flex; flex-direction:column; gap:10px;">
+            ${field('Card ID (UUID)', 'text', 'card_id', existing?.card_id || '', 'paste card_master.id')}
+            ${field('Platform', 'text', 'platform', existing?.platform || 'ebay')}
+            ${field('Account (blank = applies to all accounts)', 'text', 'account', existing?.account || '', 'e.g. BIGGYFISH', '', true)}
+            ${field('List price ($)', 'number', 'list_price', existing?.list_price ?? '', '', '0.01')}
+            ${field('Notes', 'text', 'notes', existing?.notes || '', '', '', true)}
+        </div>
+    `, isEdit, 'override');
+
+    root.querySelector('#modal-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+    if (isEdit) {
+        root.querySelector('#modal-delete').addEventListener('click', async () => {
+            root.innerHTML = '';
+            await confirmDelete(container, 'card_pricing_overrides', overrideId, `this card override`, () => loadPricing(container));
+        });
+    }
+    root.querySelector('#modal-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#modal-error');
+        errBox.textContent = '';
+        const fd = new FormData(e.target);
+        const payload = {
+            card_id: fd.get('card_id').trim(),
+            platform: fd.get('platform').trim(),
+            account: fd.get('account').trim() || null,
+            list_price: parseFloat(fd.get('list_price')),
+            notes: fd.get('notes').trim() || null,
+            updated_at: new Date().toISOString(),
+        };
+        try {
+            const { error } = isEdit
+                ? await supabase.from('card_pricing_overrides').update(payload).eq('id', overrideId)
+                : await supabase.from('card_pricing_overrides').insert(payload);
+            if (error) throw error;
+            root.innerHTML = '';
+            await loadPricing(container);
+        } catch (err) {
+            console.error(err);
+            errBox.textContent = err.message || 'Failed to save card override. Check that the Card ID is a valid card_master UUID.';
+        }
+    });
+}
+
+// ── Listing templates section ───────────────────────────────────────────────
+
+function templatesSectionHTML() {
+    return `
+        <div class="filters-bar" style="justify-content:flex-end;">
+            <button class="btn btn-primary" id="new-template-btn">+ New template</button>
+        </div>
+        <div id="templates-table-wrap"><p>Loading...</p></div>
+        <div id="template-modal-root"></div>
+    `;
+}
+
+async function loadTemplates(container) {
+    const wrap = container.querySelector('#templates-table-wrap');
+    try {
+        const { data, error } = await supabase.from('listing_templates').select('*').order('platform').order('name');
+        if (error) throw error;
+        templatesState.templates = data || [];
+        renderTemplatesTable(container);
+    } catch (err) {
+        console.error(err);
+        wrap.innerHTML = `<p style="color:var(--danger)">Failed to load listing templates: ${err.message}</p>`;
+    }
+}
+
+function renderTemplatesTable(container) {
+    const wrap = container.querySelector('#templates-table-wrap');
+    const rows = templatesState.templates;
+
+    if (!rows.length) {
+        wrap.innerHTML = `<p style="color:var(--text-secondary)">No listing templates yet.</p>`;
+    } else {
+        wrap.innerHTML = `
+            <table>
+                <thead><tr>
+                    <th>Name</th><th>Platform</th><th>Account</th><th>Included types</th><th>Card # range</th><th>Shipping</th><th>Max qty</th><th style="width:60px;"></th>
+                </tr></thead>
+                <tbody>
+                    ${rows.map(t => `
+                        <tr>
+                            <td>${escapeHTML(t.name)}</td>
+                            <td>${escapeHTML(t.platform)}</td>
+                            <td>${t.account ? escapeHTML(t.account) : '<span style="color:var(--text-secondary);">All accounts</span>'}</td>
+                            <td style="color:var(--text-secondary); font-size:12px;">${(t.included_types || []).map(escapeHTML).join(', ') || '-'}</td>
+                            <td>${t.card_num_min ?? '-'} – ${t.card_num_max ?? '-'}</td>
+                            <td>${formatPrice(t.shipping_base)} + ${formatPrice(t.shipping_per_card)}/card</td>
+                            <td>${t.max_quantity}</td>
+                            <td><button class="btn edit-template-btn" data-id="${t.id}">Edit</button></td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+    }
+
+    container.querySelector('#new-template-btn').addEventListener('click', () => openTemplateModal(container, null));
+    wrap.querySelectorAll('.edit-template-btn').forEach(btn => {
+        btn.addEventListener('click', () => openTemplateModal(container, btn.dataset.id));
+    });
+}
+
+function openTemplateModal(container, templateId) {
+    const isEdit = !!templateId;
+    const existing = isEdit ? templatesState.templates.find(t => t.id === templateId) : null;
+    const root = container.querySelector('#template-modal-root');
+
+    root.innerHTML = modalShell(isEdit ? 'Edit listing template' : 'New listing template', `
+        <div style="display:flex; flex-direction:column; gap:10px;">
+            ${field('Platform', 'text', 'platform', existing?.platform || 'ebay')}
+            ${field('Account (blank = applies to all accounts)', 'text', 'account', existing?.account || '', 'e.g. BIGGYFISH', '', true)}
+            ${field('Name', 'text', 'name', existing?.name || '', 'e.g. commons')}
+            ${field('Description', 'text', 'description', existing?.description || '', '', '', true)}
+            ${field('Included types (comma-separated)', 'text', 'included_types', (existing?.included_types || []).join(', '), 'common, holo, double_rare')}
+            ${field('Excluded types (comma-separated)', 'text', 'excluded_types', (existing?.excluded_types || []).join(', '), '', '', true)}
+            <div style="display:flex; gap:10px;">
+                ${field('Card # min', 'number', 'card_num_min', existing?.card_num_min ?? '', '', '', true)}
+                ${field('Card # max', 'number', 'card_num_max', existing?.card_num_max ?? '', '', '', true)}
+            </div>
+            <div style="display:flex; gap:10px;">
+                ${field('Shipping base ($)', 'number', 'shipping_base', existing?.shipping_base ?? '0.00', '', '0.01')}
+                ${field('Shipping per card ($)', 'number', 'shipping_per_card', existing?.shipping_per_card ?? '0.00', '', '0.01')}
+            </div>
+            ${field('Max quantity', 'number', 'max_quantity', existing?.max_quantity ?? '250')}
+        </div>
+    `, isEdit, 'template');
+
+    root.querySelector('#modal-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+    if (isEdit) {
+        root.querySelector('#modal-delete').addEventListener('click', async () => {
+            root.innerHTML = '';
+            await confirmDelete(container, 'listing_templates', templateId, `this listing template`, () => loadTemplates(container));
+        });
+    }
+    root.querySelector('#modal-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#modal-error');
+        errBox.textContent = '';
+        const fd = new FormData(e.target);
+        const splitList = (name) => {
+            const raw = fd.get(name).trim();
+            return raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
+        };
+        const payload = {
+            platform: fd.get('platform').trim(),
+            account: fd.get('account').trim() || null,
+            name: fd.get('name').trim(),
+            description: fd.get('description').trim() || null,
+            included_types: splitList('included_types'),
+            excluded_types: splitList('excluded_types'),
+            card_num_min: fd.get('card_num_min') ? parseInt(fd.get('card_num_min'), 10) : null,
+            card_num_max: fd.get('card_num_max') ? parseInt(fd.get('card_num_max'), 10) : null,
+            shipping_base: parseFloat(fd.get('shipping_base')) || 0,
+            shipping_per_card: parseFloat(fd.get('shipping_per_card')) || 0,
+            max_quantity: parseInt(fd.get('max_quantity'), 10) || 250,
+        };
+        try {
+            const { error } = isEdit
+                ? await supabase.from('listing_templates').update(payload).eq('id', templateId)
+                : await supabase.from('listing_templates').insert(payload);
+            if (error) throw error;
+            root.innerHTML = '';
+            await loadTemplates(container);
+        } catch (err) {
+            console.error(err);
+            errBox.textContent = err.message || 'Failed to save listing template.';
+        }
+    });
+}
+
+// ── Small shared modal helpers (used by pricing + templates) ────────────────
+
+function modalShell(title, bodyHTML, isEdit, formName) {
+    return `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:460px; max-width:90vw; max-height:85vh; overflow-y:auto;">
+                <h3 style="margin:0 0 16px;">${title}</h3>
+                <form id="modal-form">
+                    ${bodyHTML}
+                    <div id="modal-error" style="color:var(--danger); font-size:12px; margin-top:10px;"></div>
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:18px;">
+                        ${isEdit ? `<button type="button" class="btn" id="modal-delete" style="color:var(--danger); border-color:var(--danger);">Delete</button>` : '<span></span>'}
+                        <div style="display:flex; gap:8px;">
+                            <button type="button" class="btn" id="modal-cancel">Cancel</button>
+                            <button type="submit" class="btn btn-primary">${isEdit ? 'Save changes' : 'Create'}</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    `;
+}
+
+function field(label, type, name, value, placeholder = '', step = '', optional = false) {
+    return `
+        <label style="font-size:12px; color:var(--text-secondary); flex:${optional ? '1' : 'initial'};">
+            ${label}
+            <input type="${type}" name="${name}" ${step ? `step="${step}"` : ''} ${optional ? '' : (type === 'number' ? '' : 'required')}
+                   value="${escapeAttr(value)}" placeholder="${escapeAttr(placeholder)}" style="width:100%; margin-top:4px;" />
+        </label>
+    `;
+}
+
+async function confirmDelete(container, table, id, label, onDone) {
+    if (!window.confirm(`Delete ${label}? This can't be undone.`)) return;
+    try {
+        const { error } = await supabase.from(table).delete().eq('id', id);
+        if (error) throw error;
+        await onDone();
+    } catch (err) {
+        console.error(err);
+        const isFkViolation = (err.code === '23503') || /foreign key/i.test(err.message || '');
+        window.alert(isFkViolation
+            ? `Can't delete ${label} — other records still reference it.`
+            : `Failed to delete: ${err.message}`);
+    }
+}
+
+function formatPrice(value) {
+    if (value === null || value === undefined || value === '') return '-';
+    return '$' + Number(value).toFixed(2);
+}
+
+// ── Card games section ───────────────────────────────────────────────────────
+
+function gamesSectionHTML() {
+    return `
+        <div class="filters-bar" style="justify-content:space-between;">
+            <input type="search" id="games-search" placeholder="Search card games..." style="min-width:240px;" />
+            <button class="btn btn-primary" id="new-game-btn">+ New card game</button>
+        </div>
+        <div id="games-table-wrap"><p>Loading...</p></div>
+        <div id="game-modal-root"></div>
+    `;
+}
+
+async function loadGames(container) {
+    const wrap = container.querySelector('#games-table-wrap');
+    try {
+        const [{ data: games, error: gamesErr }, { data: setRows, error: setsErr }] = await Promise.all([
+            supabase.from('card_games').select('*').order('name'),
+            supabase.from('card_sets').select('game_id'),
+        ]);
+
+        if (gamesErr) throw gamesErr;
+        if (setsErr) throw setsErr;
+
+        const counts = {};
+        for (const row of setRows || []) {
+            counts[row.game_id] = (counts[row.game_id] || 0) + 1;
+        }
+
+        gameState.games = games || [];
+        gameState.gameSetCounts = counts;
+
+        renderGamesTable(container);
+        wireGamesControls(container);
+    } catch (err) {
+        console.error(err);
+        wrap.innerHTML = `<p style="color:var(--danger)">Failed to load card games: ${err.message}</p>`;
+    }
+}
+
+function renderGamesTable(container) {
+    const wrap = container.querySelector('#games-table-wrap');
+    const q = gameState.search.trim().toLowerCase();
+    const rows = gameState.games.filter(g => !q || g.name.toLowerCase().includes(q));
+
+    if (!rows.length) {
+        wrap.innerHTML = `<p style="color:var(--text-secondary)">No card games found.</p>`;
+        return;
+    }
+
+    wrap.innerHTML = `
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Publisher</th>
+                    <th>Notes</th>
+                    <th>Sets</th>
+                    <th style="width:60px;"></th>
+                </tr>
+            </thead>
+            <tbody>
+                ${rows.map(g => `
+                    <tr data-game-id="${g.id}">
+                        <td>${escapeHTML(g.name)}</td>
+                        <td>${escapeHTML(g.publisher || '-')}</td>
+                        <td style="color:var(--text-secondary);">${escapeHTML(g.notes || '-')}</td>
+                        <td>${gameState.gameSetCounts[g.id] || 0}</td>
+                        <td><button class="btn edit-game-btn" data-id="${g.id}">Edit</button></td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    `;
+
+    wrap.querySelectorAll('.edit-game-btn').forEach(btn => {
+        btn.addEventListener('click', () => openGameModal(container, btn.dataset.id));
+    });
+}
+
+function wireGamesControls(container) {
+    const searchInput = container.querySelector('#games-search');
+    searchInput.value = gameState.search;
+    searchInput.addEventListener('input', debounce((e) => {
+        gameState.search = e.target.value;
+        renderGamesTable(container);
+    }, 200));
+
+    container.querySelector('#new-game-btn').addEventListener('click', () => openGameModal(container, null));
+}
+
+function openGameModal(container, gameId) {
+    const isEdit = !!gameId;
+    const existing = isEdit ? gameState.games.find(g => g.id === gameId) : null;
+    const root = container.querySelector('#game-modal-root');
+
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:420px; max-width:90vw;">
+                <h3 style="margin:0 0 16px;">${isEdit ? 'Edit card game' : 'New card game'}</h3>
+                <form id="game-form">
+                    <div style="display:flex; flex-direction:column; gap:10px;">
+                        <label style="font-size:12px; color:var(--text-secondary);">
+                            Name
+                            <input type="text" name="name" required value="${existing ? escapeAttr(existing.name) : ''}" style="width:100%; margin-top:4px;" placeholder="e.g. Pokemon" />
+                        </label>
+                        <label style="font-size:12px; color:var(--text-secondary);">
+                            Publisher
+                            <input type="text" name="publisher" value="${existing ? escapeAttr(existing.publisher || '') : ''}" style="width:100%; margin-top:4px;" />
+                        </label>
+                        <label style="font-size:12px; color:var(--text-secondary);">
+                            Notes
+                            <input type="text" name="notes" value="${existing ? escapeAttr(existing.notes || '') : ''}" style="width:100%; margin-top:4px;" />
+                        </label>
+                    </div>
+                    <div id="game-form-error" style="color:var(--danger); font-size:12px; margin-top:10px;"></div>
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:18px;">
+                        ${isEdit ? `<button type="button" class="btn" id="game-modal-delete" style="color:var(--danger); border-color:var(--danger);">Delete game</button>` : '<span></span>'}
+                        <div style="display:flex; gap:8px;">
+                            <button type="button" class="btn" id="game-modal-cancel">Cancel</button>
+                            <button type="submit" class="btn btn-primary">${isEdit ? 'Save changes' : 'Create game'}</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    `;
+
+    root.querySelector('#game-modal-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+
+    if (isEdit) {
+        root.querySelector('#game-modal-delete').addEventListener('click', async () => {
+            root.innerHTML = '';
+            await confirmDeleteGame(container, gameId);
+        });
+    }
+
+    root.querySelector('#game-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#game-form-error');
+        errBox.textContent = '';
+
+        const fd = new FormData(e.target);
+        const payload = {
+            name: fd.get('name').trim(),
+            publisher: fd.get('publisher').trim() || null,
+            notes: fd.get('notes').trim() || null,
+        };
+
+        try {
+            if (isEdit) {
+                const { error } = await supabase.from('card_games').update(payload).eq('id', gameId);
+                if (error) throw error;
+            } else {
+                const { error } = await supabase.from('card_games').insert(payload);
+                if (error) throw error;
+            }
+            root.innerHTML = '';
+            await loadGames(container);
+        } catch (err) {
+            console.error(err);
+            errBox.textContent = err.message || 'Failed to save card game.';
+        }
+    });
+}
+
+async function confirmDeleteGame(container, gameId) {
+    const game = gameState.games.find(g => g.id === gameId);
+    if (!game) return;
+
+    const setCount = gameState.gameSetCounts[gameId] || 0;
+    const warning = setCount > 0
+        ? `"${game.name}" has ${setCount} set${setCount === 1 ? '' : 's'} linked to it. Deleting the game will fail unless those sets are removed or reassigned first.\n\nTry to delete anyway?`
+        : `Delete "${game.name}"? This can't be undone.`;
+
+    if (!window.confirm(warning)) return;
+
+    try {
+        const { error } = await supabase.from('card_games').delete().eq('id', gameId);
+        if (error) throw error;
+        await loadGames(container);
+    } catch (err) {
+        console.error(err);
+        const isFkViolation = (err.code === '23503') || /foreign key/i.test(err.message || '');
+        const msg = isFkViolation
+            ? `Can't delete "${game.name}" — it still has sets referencing it. Remove or reassign those sets first.`
+            : `Failed to delete card game: ${err.message}`;
+        window.alert(msg);
+    }
+}
