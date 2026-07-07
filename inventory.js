@@ -2,7 +2,7 @@
 // Inventory page: browse, search, sort, filter, and manage inventory stock.
 // Platform listing is handled inline via modals.
 
-import { supabase, debounce, formatPrice } from './shared.js';
+import { supabase, debounce, formatPrice, loadAxisOptions, axisDisplay } from './shared.js';
 
 const PAGE_SIZES = [50, 100, 250];
 const PLATFORMS  = ['ebay', 'tcgplayer', 'amazon', 'shopify', 'wix'];
@@ -51,9 +51,14 @@ export async function renderInventory(container) {
     `;
 
     await loadSets();
+    await loadAxisOptions();  // Inventory only reads AXIS_DISPLAY, no dropdowns needed
     renderFilters(container);
     await loadAndRender(container);
 }
+
+// AXIS_DISPLAY / axisDisplay() now come from shared.js (imported above)
+// rather than a local copy, so Staging Review, Inventory, and Catalog
+// all read from one implementation instead of three that could drift apart.
 
 // ----------------------------------------------------------------
 // Data
@@ -73,26 +78,42 @@ async function loadAndRender(container) {
 
     const f = state.filters;
 
-    // Fetch ALL lots matching filters — we group by variant in JS
-    let query = supabase.from('v_inventory').select('*');
+    // Fetch ALL lots matching filters — we group by variant in JS.
+    // PostgREST caps unbounded queries at its configured max rows (commonly
+    // 1000), so once inventory exceeds that, later pages (alphabetically,
+    // whatever falls past the cutoff) would silently never arrive. Page
+    // through explicitly until a page comes back short of the page size.
+    const PAGE_SIZE = 1000;
+    let allLots = [];
+    let page = 0;
 
-    if (f.search.trim())       query = query.ilike('card_name', `%${f.search.trim()}%`);
-    if (f.set_name !== 'all')  query = query.eq('set_name', f.set_name);
-    if (f.condition !== 'all') query = query.eq('condition', f.condition);
-    if (f.status !== 'all')    query = query.eq('listing_status', f.status);
-    if (f.source !== 'all')    query = query.eq('purchase_source', f.source);
+    while (true) {
+        let query = supabase.from('v_inventory').select('*');
 
-    query = query.order('card_name', { ascending: true })
-                 .order('acquired_at', { ascending: true });
+        if (f.search.trim())       query = query.ilike('card_name', `%${f.search.trim()}%`);
+        if (f.set_name !== 'all')  query = query.eq('set_name', f.set_name);
+        if (f.condition !== 'all') query = query.eq('condition', f.condition);
+        if (f.status !== 'all')    query = query.eq('listing_status', f.status);
+        if (f.source !== 'all')    query = query.eq('purchase_source', f.source);
 
-    const { data, error } = await query;
+        query = query
+            .order('card_name', { ascending: true })
+            .order('acquired_at', { ascending: true })
+            .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
 
-    if (error) {
-        wrap.innerHTML = `<p style="color:var(--danger)">Error: ${error.message}</p>`;
-        return;
+        const { data, error } = await query;
+
+        if (error) {
+            wrap.innerHTML = `<p style="color:var(--danger)">Error: ${error.message}</p>`;
+            return;
+        }
+
+        const batch = data || [];
+        allLots = allLots.concat(batch);
+
+        if (batch.length < PAGE_SIZE) break;   // last page
+        page++;
     }
-
-    const allLots = data || [];
 
     // ── Group lots by variant_id ──────────────────────────────────────────────
     const variantMap = new Map();
@@ -107,6 +128,8 @@ async function loadAndRender(container) {
     for (const [variantId, lots] of variantMap) {
         const first     = lots[0];
         const totalQty  = lots.reduce((a, r) => a + (r.quantity || 0), 0);
+        const totalSold = lots.reduce((a, r) => a + (r.quantity_sold || 0), 0);
+        const totalAvailable = lots.reduce((a, r) => a + (r.quantity_available ?? (r.quantity - (r.quantity_sold || 0))), 0);
         // WAC excludes lots with cost_basis = 0 (eBay imports with unknown cost)
         const costLots  = lots.filter(r => (r.cost_basis || 0) > 0);
         const totalCost = costLots.reduce((a, r) => a + (r.cost_basis * (r.quantity || 0)), 0);
@@ -133,6 +156,8 @@ async function loadAndRender(container) {
             market_updated_at: first.market_updated_at,
             listing_status:    first.listing_status,
             total_qty:         totalQty,
+            total_sold:        totalSold,
+            total_available:   totalAvailable,
             wac,
             last_cost:         lastLot.cost_basis,
             last_acquired_at:  lastLot.acquired_at,
@@ -142,12 +167,12 @@ async function loadAndRender(container) {
     // ── Sort ──────────────────────────────────────────────────────────────────
     grouped.sort((a, b) => {
         const field = state.sort.field;
-        const av = field === 'quantity'     ? a.total_qty
+        const av = field === 'quantity'     ? a.total_available
                  : field === 'cost_basis'   ? a.wac
                  : field === 'market_price' ? (a.market_price ?? -1)
                  : field === 'card_number'  ? (a.card_number || '')
                  : a[field] ?? '';
-        const bv = field === 'quantity'     ? b.total_qty
+        const bv = field === 'quantity'     ? b.total_available
                  : field === 'cost_basis'   ? b.wac
                  : field === 'market_price' ? (b.market_price ?? -1)
                  : field === 'card_number'  ? (b.card_number || '')
@@ -320,15 +345,15 @@ function openPlatformSettings(container) {
 // Table
 // ----------------------------------------------------------------
 
-const FOIL_DISPLAY = {
-    non_holo: 'Non-Holo', holo: 'Holo', reverse_holo: 'Reverse Holo',
-};
-
 function variantLabel(row) {
     return [
-        FOIL_DISPLAY[row.foil_type] || row.foil_type,
-        row.foil_pattern, row.texture, row.material,
-        row.size, row.stamp_type, row.source_type,
+        axisDisplay('foil_type', row.foil_type),
+        axisDisplay('foil_pattern', row.foil_pattern),
+        axisDisplay('texture', row.texture),
+        axisDisplay('material', row.material),
+        axisDisplay('size', row.size),
+        axisDisplay('stamp_type', row.stamp_type),
+        axisDisplay('source_type', row.source_type),
     ].filter(Boolean).join(' · ') || 'Non-Holo';
 }
 
@@ -509,7 +534,10 @@ function renderRow(container, row) {
             ${escapeHtml(row.card_number || '—')}
         </td>
         <td style="font-size:12px; color:var(--text-secondary); padding:8px 6px;">${escapeHtml(row.set_name || '—')}</td>
-        <td style="text-align:center; font-weight:600; font-size:14px; padding:8px 6px;">${row.total_qty ?? '—'}</td>
+        <td style="text-align:center; padding:8px 6px;">
+            <div style="font-weight:600; font-size:14px;">${row.total_available ?? row.total_qty ?? '—'}</div>
+            ${row.total_sold ? `<div style="font-size:10px; color:var(--text-secondary);">sold: ${row.total_sold}</div>` : ''}
+        </td>
         <td style="padding:8px 6px;">${costCell}</td>
         <td style="padding:8px 6px;">${marketCell}</td>
         ${platCells}
@@ -580,6 +608,8 @@ function renderDetailPanel(container, row, td) {
                         style="font-size:12px; padding:4px 12px;">+ Add listing</button>
                 <button class="btn detail-history-btn"
                         style="font-size:12px; padding:4px 10px;">Purchase Order</button>
+                <button class="btn detail-sales-btn"
+                        style="font-size:12px; padding:4px 10px;">Sales</button>
             </div>
         </div>
     `;
@@ -591,6 +621,10 @@ function renderDetailPanel(container, row, td) {
     td.querySelector('.detail-history-btn').addEventListener('click', (e) => {
         e.stopPropagation();
         openHistoryModal(container, row);
+    });
+    td.querySelector('.detail-sales-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        openSalesModal(container, row);
     });
     td.querySelectorAll('.detail-edit-listing-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
@@ -857,10 +891,14 @@ function openHistoryModal(container, row) {
         if (freshLots && freshLots.length > 0) {
             row.lots = freshLots;
             const totalQty  = freshLots.reduce((a, r) => a + (r.quantity || 0), 0);
+            const totalSold = freshLots.reduce((a, r) => a + (r.quantity_sold || 0), 0);
+            const totalAvailable = freshLots.reduce((a, r) => a + (r.quantity_available ?? (r.quantity - (r.quantity_sold || 0))), 0);
             const costLots  = freshLots.filter(r => (r.cost_basis || 0) > 0);
             const totalCost = costLots.reduce((a, r) => a + (r.cost_basis * (r.quantity || 0)), 0);
             const costQty   = costLots.reduce((a, r) => a + (r.quantity || 0), 0);
-            row.total_qty = totalQty;
+            row.total_qty       = totalQty;
+            row.total_sold      = totalSold;
+            row.total_available = totalAvailable;
             row.wac       = costQty > 0 ? totalCost / costQty : 0;
             row.last_cost = freshLots[freshLots.length - 1].cost_basis;
         }
@@ -890,7 +928,10 @@ function renderHistoryModal(container, row, overlay) {
             <td style="padding:8px 10px;">
                 ${sourceBadge(lot.purchase_source)}
             </td>
-            <td style="padding:8px 10px; text-align:right;">${lot.quantity ?? '—'}</td>
+            <td style="padding:8px 10px; text-align:right;">
+                ${lot.quantity ?? '—'}
+                ${lot.quantity_sold ? `<div style="font-size:10px; color:var(--text-secondary);">sold: ${lot.quantity_sold}</div>` : ''}
+            </td>
             <td style="padding:8px 10px; text-align:right;">${formatPrice(lot.cost_basis)}</td>
             <td style="padding:8px 10px; text-align:right;">
                 ${formatPrice((lot.cost_basis || 0) * (lot.quantity || 0))}
@@ -1621,6 +1662,104 @@ function renderPagination(container) {
 // ----------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------
+
+// ----------------------------------------------------------------
+// Sales modal — read-only list of recorded sales for this variant
+// ----------------------------------------------------------------
+
+async function openSalesModal(container, row) {
+    const overlay = makeOverlay();
+
+    overlay.innerHTML = `
+        <div style="background:var(--bg-secondary); border:1px solid var(--border);
+                    border-radius:8px; padding:24px; width:680px; max-width:90vw;
+                    max-height:80vh; overflow-y:auto;">
+            <h3 style="margin-top:0;">Sales</h3>
+            <div style="font-size:13px; color:var(--text-secondary); margin-bottom:16px;">
+                <strong style="color:var(--text);">${escapeHtml(row.card_name || '')}</strong>
+                — ${escapeHtml(row.set_name || '')} #${escapeHtml(row.card_number || '—')}
+                · ${escapeHtml(row.condition || '')}
+                · <span style="color:var(--accent);">${escapeHtml(variantLabel(row))}</span>
+            </div>
+            <div id="sales-list">Loading...</div>
+            <div style="display:flex; gap:8px; margin-top:16px;">
+                <button class="btn close-btn">Close</button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+    overlay.querySelector('.close-btn').addEventListener('click', () => overlay.remove());
+
+    const { data, error } = await supabase
+        .from('sales')
+        .select('*')
+        .eq('variant_id', row.variant_id)
+        .order('sold_at', { ascending: false });
+
+    const listEl = overlay.querySelector('#sales-list');
+
+    if (error) {
+        listEl.innerHTML = `<p style="color:var(--danger); font-size:13px;">
+            Failed to load sales: ${escapeHtml(error.message)}</p>`;
+        return;
+    }
+
+    if (!data || data.length === 0) {
+        listEl.innerHTML = `<p style="color:var(--text-secondary); font-size:13px;">No sales recorded yet.</p>`;
+        return;
+    }
+
+    const totalQty     = data.reduce((a, s) => a + (s.quantity_sold || 0), 0);
+    const totalRevenue = data.reduce((a, s) => a + (s.sale_price || 0) * (s.quantity_sold || 0), 0);
+
+    const rows = data.map(s => {
+        const revenue = (s.sale_price || 0) * (s.quantity_sold || 0);
+        return `
+            <tr style="font-size:13px; border-bottom:1px solid var(--border);">
+                <td style="padding:8px 10px; color:var(--text-secondary);">
+                    ${s.sold_at ? new Date(s.sold_at).toLocaleDateString() : '—'}
+                </td>
+                <td style="padding:8px 10px;">
+                    <span style="text-transform:capitalize;">${escapeHtml(s.platform || '—')}</span>
+                    ${s.account ? `<span style="font-size:11px; color:var(--text-secondary);"> (${escapeHtml(s.account)})</span>` : ''}
+                </td>
+                <td style="padding:8px 10px; color:var(--text-secondary); font-size:12px;
+                           ${s.notes ? 'cursor:help; border-bottom:1px dotted var(--text-secondary);' : ''}"
+                    ${s.notes ? `title="${escapeHtml(s.notes)}"` : ''}>
+                    ${escapeHtml(s.platform_order_id || '—')}
+                </td>
+                <td style="padding:8px 10px; text-align:right;">${s.quantity_sold ?? '—'}</td>
+                <td style="padding:8px 10px; text-align:right;">${formatPrice(s.sale_price)}</td>
+                <td style="padding:8px 10px; text-align:right; font-weight:600;">${formatPrice(revenue)}</td>
+            </tr>
+        `;
+    }).join('');
+
+    listEl.innerHTML = `
+        <table style="width:100%; border-collapse:collapse;">
+            <thead>
+                <tr style="font-size:12px; color:var(--text-secondary); border-bottom:1px solid var(--border);">
+                    <th style="padding:6px 10px; text-align:left; font-weight:500;">Date</th>
+                    <th style="padding:6px 10px; text-align:left; font-weight:500;">Platform</th>
+                    <th style="padding:6px 10px; text-align:left; font-weight:500;">Order #</th>
+                    <th style="padding:6px 10px; text-align:right; font-weight:500;">Qty</th>
+                    <th style="padding:6px 10px; text-align:right; font-weight:500;">Price/ea</th>
+                    <th style="padding:6px 10px; text-align:right; font-weight:500;">Revenue</th>
+                </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+            <tfoot>
+                <tr style="border-top:2px solid var(--border); font-weight:600; font-size:13px;">
+                    <td style="padding:10px 10px;" colspan="3">Total</td>
+                    <td style="padding:10px 10px; text-align:right;">${totalQty}</td>
+                    <td></td>
+                    <td style="padding:10px 10px; text-align:right;">${formatPrice(totalRevenue)}</td>
+                </tr>
+            </tfoot>
+        </table>
+    `;
+}
 
 function makeOverlay() {
     const overlay = document.createElement('div');

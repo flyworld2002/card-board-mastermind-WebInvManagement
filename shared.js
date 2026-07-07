@@ -100,3 +100,72 @@ export function formatPrice(value) {
     if (value === null || value === undefined) return '-';
     return '$' + Number(value).toFixed(2);
 }
+
+// ----------------------------------------------------------------
+// Variant attribute options — shared across Staging Review, Inventory,
+// and Catalog. Loaded once from the real lookup tables (foil_types,
+// foil_patterns, textures, materials, sizes, stamp_types, source_types)
+// so dropdowns/labels everywhere stay in sync with whatever's been added
+// via Configuration -> Variant attributes, instead of each page keeping
+// its own hardcoded (or separately-loaded) copy that can drift out of
+// sync with the others.
+//
+// AXIS_OPTIONS and AXIS_DISPLAY are exported as live bindings -- importers
+// see them update in place once loadAxisOptions() resolves, as long as
+// they reference properties at render time (e.g. AXIS_OPTIONS.foil_type)
+// rather than destructuring/copying at import time.
+// ----------------------------------------------------------------
+
+export const AXIS_TABLES = {
+    foil_type:    'foil_types',
+    foil_pattern: 'foil_patterns',
+    texture:      'textures',
+    material:     'materials',
+    size:         'sizes',
+    stamp_type:   'stamp_types',
+    source_type:  'source_types',
+};
+
+export let AXIS_OPTIONS = {};  // axis -> [[code, display_name], ...]
+export let AXIS_DISPLAY = {};  // axis -> { code: display_name }
+
+/**
+ * Loads AXIS_OPTIONS and AXIS_DISPLAY from the 7 variant lookup tables.
+ * Call once per page mount, before rendering anything that uses them.
+ *
+ * @param {boolean} includeNoneOption - if true, prefixes each axis's
+ *   AXIS_OPTIONS list with ['', '— none —'] (Staging Review's editable
+ *   dropdowns want this; Catalog builds its own '-' option separately
+ *   and doesn't need it baked in here).
+ */
+export async function loadAxisOptions(includeNoneOption = false) {
+    const entries = Object.entries(AXIS_TABLES);
+
+    const results = await Promise.all(
+        entries.map(([, table]) =>
+            supabase.from(table).select('code, display_name').order('sort_order').order('display_name'))
+    );
+
+    entries.forEach(([axis], i) => {
+        const { data, error } = results[i];
+        if (error) {
+            console.error(`Failed to load ${AXIS_TABLES[axis]}:`, error);
+            AXIS_OPTIONS[axis] = includeNoneOption ? [['', '— none —']] : [];
+            AXIS_DISPLAY[axis] = {};
+            return;
+        }
+        const pairs = (data || []).map(r => [r.code, r.display_name]);
+        AXIS_OPTIONS[axis] = includeNoneOption ? [['', '— none —'], ...pairs] : pairs;
+        AXIS_DISPLAY[axis] = Object.fromEntries(pairs);
+    });
+}
+
+/**
+ * Looks up the display label for a single axis code, falling back to
+ * the raw code itself if it's not in AXIS_DISPLAY (e.g. loadAxisOptions
+ * hasn't run yet, or the code predates being added to the lookup table).
+ */
+export function axisDisplay(axis, code) {
+    if (!code) return undefined;
+    return (AXIS_DISPLAY[axis] && AXIS_DISPLAY[axis][code]) || code;
+}

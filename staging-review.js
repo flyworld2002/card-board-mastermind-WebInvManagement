@@ -1,7 +1,7 @@
 // staging-review.js
 // Staging Review page: filter, edit, resolve, and push staging rows to inventory.
 
-import { supabase, debounce, formatPrice } from './shared.js';
+import { supabase, debounce, formatPrice, loadAxisOptions, AXIS_TABLES, AXIS_OPTIONS, AXIS_DISPLAY, axisDisplay } from './shared.js';
 
 const PAGE_SIZES = [50, 100, 250];
 
@@ -28,6 +28,7 @@ const state = {
     },
     expandedRowId: null,
     selectedIds: new Set(),
+    sort: { column: null, ascending: true }, // null = default order_date/card_name sort
 };
 
 export async function renderStagingReview(container) {
@@ -42,10 +43,16 @@ export async function renderStagingReview(container) {
 
     await loadImportBatches();
     await loadSets();
+    await loadAxisOptions(true);  // Staging's dropdowns want a leading '— none —'
     await loadFilterCounts();
     renderFilters(container);
     await loadAndRenderRows(container);
 }
+
+// Variant attribute options (AXIS_OPTIONS, AXIS_DISPLAY, loadAxisOptions,
+// axisDisplay) now live in shared.js -- imported above -- rather than a
+// local copy here, so Staging Review, Inventory, and Catalog all read
+// from one implementation instead of three that could drift apart.
 
 // ----------------------------------------------------------------
 // Data loading
@@ -178,10 +185,14 @@ async function loadAndRenderRows(container) {
     const from = state.page * state.pageSize;
     const to = from + state.pageSize - 1;
 
-    query = query
-        .order('order_date', { ascending: false })
-        .order('card_name', { ascending: true })
-        .range(from, to);
+    if (state.sort.column) {
+        query = query.order(state.sort.column, { ascending: state.sort.ascending, nullsFirst: false });
+    } else {
+        query = query
+            .order('order_date', { ascending: false })
+            .order('card_name', { ascending: true });
+    }
+    query = query.range(from, to);
 
     const { data, error, count } = await query;
 
@@ -266,6 +277,7 @@ function renderFilters(container) {
         </select>
 
         <input type="search" id="filter-search" placeholder="Search card name..." />
+        <button id="refresh-staging" class="btn" style="white-space:nowrap;" title="Reload data without changing filters">&#8635; Refresh</button>
         <button id="reset-filters" class="btn" style="white-space:nowrap;">Reset filters</button>
         <button id="new-local-purchase-btn" class="btn btn-primary" style="white-space:nowrap;">+ New Local Purchase</button>
 
@@ -340,6 +352,22 @@ function renderFilters(container) {
         openNewLocalPurchaseModal(container);
     });
 
+    bar.querySelector('#refresh-staging').addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        const original = btn.textContent;
+        btn.textContent = 'Refreshing...';
+
+        await loadImportBatches();
+        await loadSets();
+        await loadFilterCounts();
+        renderFilters(container);
+        await loadAndRenderRows(container);
+
+        // renderFilters() replaces the toolbar DOM, so re-querying isn't
+        // needed — the old btn reference is gone; nothing left to reset.
+    });
+
     bar.querySelector('#reset-filters').addEventListener('click', async () => {
         state.filters = { source: 'all', status: 'all', match_status: 'all', import_batch: 'all', set_name: 'all', search: '' };
         state.page = 0;
@@ -352,6 +380,12 @@ function renderFilters(container) {
 // ----------------------------------------------------------------
 // Table rendering
 // ----------------------------------------------------------------
+
+function sortTh(label, column, style = '') {
+    const isActive = state.sort.column === column;
+    const arrow = isActive ? (state.sort.ascending ? ' ▲' : ' ▼') : '';
+    return `<th class="sortable-th" data-sort-column="${column}" style="${style} cursor:pointer; user-select:none;" title="Sort by ${escapeHtml(label)}">${escapeHtml(label)}${arrow}</th>`;
+}
 
 function renderTable(container) {
     const wrap = container.querySelector('#staging-table-wrap');
@@ -384,6 +418,9 @@ function renderTable(container) {
             <button class="btn batch-delete-btn" style="border-color:var(--danger); color:var(--danger);" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
                 Delete selected
             </button>
+            <button class="btn batch-modify-set-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
+                Modify set
+            </button>
             <button class="btn batch-clear-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
                 Clear selection
             </button>
@@ -396,16 +433,16 @@ function renderTable(container) {
                         <input type="checkbox" id="select-all-checkbox" ${allSelected ? 'checked' : ''} ${selectableRows.length === 0 ? 'disabled' : ''} />
                     </th>
                     <th style="width:24px;"></th>
-                    <th style="width:65px; color:var(--text-secondary);">#</th>
-                    <th>Card name</th>
-                    <th>Set</th>
-                    <th>Condition</th>
+                    ${sortTh('#', 'card_number_numeric', 'width:65px; color:var(--text-secondary);')}
+                    ${sortTh('Card name', 'card_name')}
+                    ${sortTh('Set', 'set_name')}
+                    ${sortTh('Condition', 'condition')}
                     <th>Variant</th>
-                    <th style="width:45px;">Qty</th>
-                    <th style="width:70px;">Cost</th>
-                    <th style="width:70px;">List Price</th>
-                    <th style="width:80px;">Match</th>
-                    <th style="width:80px;">Status</th>
+                    ${sortTh('Qty', 'quantity', 'width:45px;')}
+                    ${sortTh('Cost', 'cost_per_card', 'width:70px;')}
+                    ${sortTh('List Price', 'listing_price', 'width:70px;')}
+                    ${sortTh('Match', 'match_status', 'width:80px;')}
+                    ${sortTh('Status', 'status', 'width:80px;')}
                     <th style="width:32px;"></th>
                 </tr>
             </thead>
@@ -422,6 +459,20 @@ function renderTable(container) {
             tbody.appendChild(renderExpandedRow(container, row));
         }
     }
+
+    // Sortable column headers
+    wrap.querySelectorAll('.sortable-th').forEach(th => {
+        th.addEventListener('click', async () => {
+            const column = th.dataset.sortColumn;
+            if (state.sort.column === column) {
+                state.sort.ascending = !state.sort.ascending;
+            } else {
+                state.sort = { column, ascending: true };
+            }
+            state.page = 0;
+            await loadAndRenderRows(container);
+        });
+    });
 
     // Select-all checkbox
     wrap.querySelector('#select-all-checkbox')?.addEventListener('change', (e) => {
@@ -444,113 +495,56 @@ function renderTable(container) {
 
     // Batch delete
     wrap.querySelector('.batch-delete-btn')?.addEventListener('click', () => batchDeleteSelected(container));
+
+    // Batch modify set
+    wrap.querySelector('.batch-modify-set-btn')?.addEventListener('click', () => openBatchModifySetModal(container));
 }
 
 // ── Variant display helpers ───────────────────────────────────────────────────
-
-const FOIL_DISPLAY = {
-    non_holo: 'Non-Holo', holo: 'Holo', reverse_holo: 'Reverse Holo',
-};
-const PATTERN_DISPLAY = {
-    poke_ball: 'Poké Ball', master_ball: 'Master Ball', friend_ball: 'Friend Ball',
-    love_ball: 'Love Ball', quick_ball: 'Quick Ball', dusk_ball: 'Dusk Ball',
-    team_rocket: 'Team Rocket', energy_symbol: 'Energy Symbol',
-};
-const TEXTURE_DISPLAY = {
-    cosmos: 'Cosmos', hd_cosmos: 'HD Cosmos', galaxy_cosmos: 'Galaxy Cosmos',
-};
-const MATERIAL_DISPLAY = { metal: 'Metal' };
-const SIZE_DISPLAY     = { jumbo: 'Jumbo' };
-const STAMP_DISPLAY    = {
-    '1st_edition': '1st Edition', pokemon_center: 'Pokémon Center',
-    prerelease: 'Prerelease', pokemon_day: 'Pokémon Day',
-    mega_evolution: 'Mega Evolution', prismatic_evolution: 'Prismatic Evolution',
-};
-const SOURCE_DISPLAY   = {
-    deck_exclusive: 'Deck Exclusive', product_exclusive: 'Product Exclusive',
-    box_topper: 'Box Topper', stamp_promo: 'Stamp Promo',
-};
+// Display labels come from AXIS_DISPLAY / axisDisplay(), imported from
+// shared.js (loaded once via loadAxisOptions() at page mount).
 
 function variantLabel(row) {
     const parts = [
-        FOIL_DISPLAY[row.foil_type],
-        PATTERN_DISPLAY[row.foil_pattern],
-        TEXTURE_DISPLAY[row.texture],
-        MATERIAL_DISPLAY[row.material],
-        SIZE_DISPLAY[row.size],
-        STAMP_DISPLAY[row.stamp_type],
-        SOURCE_DISPLAY[row.source_type],
+        axisDisplay('foil_type', row.foil_type),
+        axisDisplay('foil_pattern', row.foil_pattern),
+        axisDisplay('texture', row.texture),
+        axisDisplay('material', row.material),
+        axisDisplay('size', row.size),
+        axisDisplay('stamp_type', row.stamp_type),
+        axisDisplay('source_type', row.source_type),
     ].filter(Boolean);
     return parts.join(' · ') || '-';
 }
 
 function variantLabelFromCode(code) {
-    return FOIL_DISPLAY[code] || PATTERN_DISPLAY[code] || TEXTURE_DISPLAY[code]
-        || MATERIAL_DISPLAY[code] || SIZE_DISPLAY[code]
-        || STAMP_DISPLAY[code] || SOURCE_DISPLAY[code] || code || '-';
+    for (const axis of Object.keys(AXIS_TABLES)) {
+        if (AXIS_DISPLAY[axis] && AXIS_DISPLAY[axis][code]) return AXIS_DISPLAY[axis][code];
+    }
+    return code || '-';
 }
 
 function renderAxesSummary(row) {
     const axes = [
-        ['Foil',     FOIL_DISPLAY[row.foil_type]    || row.foil_type],
-        ['Pattern',  PATTERN_DISPLAY[row.foil_pattern] || row.foil_pattern],
-        ['Texture',  TEXTURE_DISPLAY[row.texture]    || row.texture],
-        ['Material', MATERIAL_DISPLAY[row.material]  || row.material],
-        ['Size',     SIZE_DISPLAY[row.size]          || row.size],
-        ['Stamp',    STAMP_DISPLAY[row.stamp_type]   || row.stamp_type],
-        ['Source',   SOURCE_DISPLAY[row.source_type] || row.source_type],
+        ['Foil',     axisDisplay('foil_type', row.foil_type)],
+        ['Pattern',  axisDisplay('foil_pattern', row.foil_pattern)],
+        ['Texture',  axisDisplay('texture', row.texture)],
+        ['Material', axisDisplay('material', row.material)],
+        ['Size',     axisDisplay('size', row.size)],
+        ['Stamp',    axisDisplay('stamp_type', row.stamp_type)],
+        ['Source',   axisDisplay('source_type', row.source_type)],
     ].filter(([, v]) => v);
     return axes.map(([k, v]) => `<span>${k}: ${escapeHtml(v)}</span>`).join('');
 }
 
 function renderAxesInputs(row) {
-    const foilOpts = [
-        ['', '— none —'],
-        ['non_holo', 'Non-Holo'],
-        ['holo', 'Holo'],
-        ['reverse_holo', 'Reverse Holo'],
-    ];
-    const patternOpts = [
-        ['', '— none —'],
-        ['poke_ball', 'Poké Ball'],
-        ['master_ball', 'Master Ball'],
-        ['friend_ball', 'Friend Ball'],
-        ['love_ball', 'Love Ball'],
-        ['quick_ball', 'Quick Ball'],
-        ['dusk_ball', 'Dusk Ball'],
-        ['team_rocket', 'Team Rocket'],
-        ['energy_symbol', 'Energy Symbol'],
-    ];
-    const textureOpts = [
-        ['', '— none —'],
-        ['cosmos', 'Cosmos'],
-        ['hd_cosmos', 'HD Cosmos'],
-        ['galaxy_cosmos', 'Galaxy Cosmos'],
-    ];
-    const materialOpts = [
-        ['', '— none —'],
-        ['metal', 'Metal'],
-    ];
-    const sizeOpts = [
-        ['', '— none —'],
-        ['jumbo', 'Jumbo'],
-    ];
-    const stampOpts = [
-        ['', '— none —'],
-        ['1st_edition', '1st Edition'],
-        ['pokemon_center', 'Pokémon Center'],
-        ['prerelease', 'Prerelease'],
-        ['pokemon_day', 'Pokémon Day'],
-        ['mega_evolution', 'Mega Evolution'],
-        ['prismatic_evolution', 'Prismatic Evolution'],
-    ];
-    const sourceOpts = [
-        ['', '— none —'],
-        ['deck_exclusive', 'Deck Exclusive'],
-        ['product_exclusive', 'Product Exclusive'],
-        ['box_topper', 'Box Topper'],
-        ['stamp_promo', 'Stamp Promo'],
-    ];
+    const foilOpts     = AXIS_OPTIONS.foil_type    || [['', '— none —']];
+    const patternOpts  = AXIS_OPTIONS.foil_pattern || [['', '— none —']];
+    const textureOpts  = AXIS_OPTIONS.texture      || [['', '— none —']];
+    const materialOpts = AXIS_OPTIONS.material     || [['', '— none —']];
+    const sizeOpts     = AXIS_OPTIONS.size         || [['', '— none —']];
+    const stampOpts    = AXIS_OPTIONS.stamp_type   || [['', '— none —']];
+    const sourceOpts   = AXIS_OPTIONS.source_type  || [['', '— none —']];
 
     function sel(cls, opts, val) {
         const knownVals = opts.map(([v]) => v);
@@ -583,21 +577,28 @@ function renderAxesInputs(row) {
 
 function renderAxesDisplay(row) {
     return `
-        <span>Foil: ${escapeHtml(FOIL_DISPLAY[row.foil_type] || row.foil_type || '-')}</span>
-        ${row.foil_pattern ? `<span>Pattern: ${escapeHtml(PATTERN_DISPLAY[row.foil_pattern] || row.foil_pattern)}</span>` : ''}
-        ${row.texture      ? `<span>Texture: ${escapeHtml(TEXTURE_DISPLAY[row.texture] || row.texture)}</span>` : ''}
-        ${row.material     ? `<span>Material: ${escapeHtml(MATERIAL_DISPLAY[row.material] || row.material)}</span>` : ''}
-        ${row.size         ? `<span>Size: ${escapeHtml(SIZE_DISPLAY[row.size] || row.size)}</span>` : ''}
-        ${row.stamp_type   ? `<span>Stamp: ${escapeHtml(STAMP_DISPLAY[row.stamp_type] || row.stamp_type)}</span>` : ''}
-        ${row.source_type  ? `<span>Source: ${escapeHtml(SOURCE_DISPLAY[row.source_type] || row.source_type)}</span>` : ''}
+        <span>Foil: ${escapeHtml(axisDisplay('foil_type', row.foil_type) || row.foil_type || '-')}</span>
+        ${row.foil_pattern ? `<span>Pattern: ${escapeHtml(axisDisplay('foil_pattern', row.foil_pattern))}</span>` : ''}
+        ${row.texture      ? `<span>Texture: ${escapeHtml(axisDisplay('texture', row.texture))}</span>` : ''}
+        ${row.material     ? `<span>Material: ${escapeHtml(axisDisplay('material', row.material))}</span>` : ''}
+        ${row.size         ? `<span>Size: ${escapeHtml(axisDisplay('size', row.size))}</span>` : ''}
+        ${row.stamp_type   ? `<span>Stamp: ${escapeHtml(axisDisplay('stamp_type', row.stamp_type))}</span>` : ''}
+        ${row.source_type  ? `<span>Source: ${escapeHtml(axisDisplay('source_type', row.source_type))}</span>` : ''}
     `;
+}
+
+function hasNumberMismatch(row) {
+    return row.match_status === 'matched'
+        && row.card_number && row.matched_number
+        && String(row.card_number).trim() !== String(row.matched_number).trim();
 }
 
 function renderRow(container, row) {
     const tr = document.createElement('tr');
     tr.dataset.stagingId = row.staging_id;
 
-    const matchBadge = `<span class="badge badge-${row.match_status || 'not_found'}">${row.match_status || 'not_found'}</span>`;
+    const matchBadge = `<span class="badge badge-${row.match_status || 'not_found'}">${row.match_status || 'not_found'}</span>`
+        + (hasNumberMismatch(row) ? `<span title="Staging #${escapeHtml(row.card_number)} but matched to #${escapeHtml(row.matched_number)}" style="margin-left:4px; cursor:help;">⚠️</span>` : '');
     const selectable = row.status !== 'processed';
     const checked = state.selectedIds.has(row.staging_id);
     const cardNum = row.card_number || row.matched_number || '-';
@@ -681,6 +682,10 @@ function renderExpandedRow(container, row) {
                         — ${escapeHtml(row.matched_set_name || '')}
                         ${row.rarity ? `<span style="color:var(--text-secondary);">(${escapeHtml(row.rarity)})</span>` : ''}
                     </span>
+                    ${hasNumberMismatch(row) ? `
+                    <div style="color:var(--danger); margin-top:6px;">
+                        ⚠️ Number mismatch: staging listing says #${escapeHtml(row.card_number)}, but this is matched to #${escapeHtml(row.matched_number)}.
+                    </div>` : ''}
                 </div>` : ''}
                 <div style="display:flex; gap:16px; flex-wrap:wrap; color:var(--text-secondary); font-size:13px;">
                     <span>Card: ${escapeHtml(row.card_name || '-')} #${escapeHtml(row.card_number || row.matched_number || '-')}</span>
@@ -711,6 +716,11 @@ function renderExpandedRow(container, row) {
                     — ${escapeHtml(row.matched_set_name || '')}
                     ${row.rarity ? `<span style="color:var(--text-secondary);">(${escapeHtml(row.rarity)})</span>` : ''}
                 </span>
+                ${hasNumberMismatch(row) ? `
+                <div style="color:var(--danger); margin-top:6px;">
+                    ⚠️ Number mismatch: staging listing says #${escapeHtml(row.card_number)}, but this is matched to #${escapeHtml(row.matched_number)}.
+                    Use Rematch below or fix the match manually.
+                </div>` : ''}
             </div>` : ''}
 
             <!-- Row 1: Set, Card Name, Card Number, Rematch -->
@@ -790,6 +800,15 @@ function renderExpandedRow(container, row) {
         renderAmbiguousResolution(container, td, row, matchDiv);
     } else if (row.match_status === 'not_found') {
         renderNotFoundResolution(container, td, row, matchDiv);
+    } else if (row.match_status === 'matched') {
+        // Matched rows don't get search/create tools by default -- but a
+        // match can be wrong (e.g. linked to the wrong card_number), and
+        // if the correct card isn't in the API or DB yet, Rematch alone
+        // can't fix it. Give an explicit way in to the same tools.
+        matchDiv.innerHTML = `<button class="btn fix-match-btn" style="font-size:12px;">⚠️ Wrong match? Fix it</button>`;
+        matchDiv.querySelector('.fix-match-btn').addEventListener('click', () => {
+            renderWrongMatchResolution(container, td, row, matchDiv);
+        });
     }
 
     // Save changes
@@ -830,13 +849,21 @@ function renderExpandedRow(container, row) {
             if (numVal) cardQuery = cardQuery.eq('card_number', numVal);
             cardQuery = cardQuery.limit((setVal && numVal) ? 30 : 8);
 
-            const [cardRes, charRes] = await Promise.all([
+            let cmQuery = supabase
+                .from('card_master')
+                .select('id, name, card_number, rarity, card_sets(name)')
+                .ilike('name', `%${term}%`)
+                .limit(8);
+            if (numVal) cmQuery = cmQuery.eq('card_number', numVal);
+
+            const [cardRes, charRes, cmRes] = await Promise.all([
                 cardQuery,
                 supabase
                     .from('characters')
                     .select('name')
                     .ilike('name', `%${term}%`)
                     .limit(5),
+                cmQuery,
             ]);
 
             const cards = (cardRes.data || []).map(c => ({
@@ -844,10 +871,29 @@ function renderExpandedRow(container, row) {
                 variant_label: [c.foil_label, c.pattern_label, c.texture_label, c.material_label, c.size_label, c.stamp_label, c.source_label]
                     .filter(Boolean).join(' · ') || 'Non-Holo',
             }));
+
+            // Card_master rows with no card_variants row yet (custom-created,
+            // not pushed to inventory) — invisible to v_card_variants above.
+            const seenCardIds = new Set(cards.map(c => c.card_id));
+            const setValLower = (setVal || '').toLowerCase();
+            const noVariantCards = (cmRes.data || [])
+                .filter(c => !seenCardIds.has(c.id))
+                .filter(c => !setValLower || (c.card_sets?.name || '').toLowerCase().includes(setValLower))
+                .map(c => ({
+                    _type: 'card',
+                    card_id: c.id, variant_id: null,
+                    card_name: c.name, set_name: c.card_sets?.name || '',
+                    display_number: c.card_number, card_number: c.card_number,
+                    rarity: c.rarity,
+                    foil_type: null, foil_pattern: null, texture: null,
+                    material: null, size: null, stamp_type: null, source_type: null,
+                    variant_label: 'No variant yet',
+                }));
+
             const chars = (charRes.data || [])
                 .map(ch => ({ _type: 'character', card_name: ch.name }));
 
-            return [...cards, ...chars];
+            return [...cards, ...noVariantCards, ...chars];
         },
         renderItem: (c) => c._type === 'card'
             ? `${c.card_name} — ${c.set_name} #${c.display_number || ''} · ${c.variant_label}`
@@ -1003,6 +1049,37 @@ function renderNotFoundResolution(container, td, row, matchDiv) {
     });
 }
 
+/**
+ * Same tools as renderNotFoundResolution (manual search + create new card),
+ * but for a row that's currently matched — just matched to the wrong card.
+ * Reuses linkStagingToCard/openCreateCardModal unchanged; neither checks
+ * the row's current match_status, so re-linking or creating a fresh card
+ * here overwrites the bad match the same way it would set a fresh one.
+ */
+function renderWrongMatchResolution(container, td, row, matchDiv) {
+    matchDiv.innerHTML = `
+        <p style="color:var(--warning); margin-bottom:6px;">
+            Search for the correct card, or create it if it's not in your catalog or the API.
+        </p>
+        <div class="manual-search-area"></div>
+        <button class="btn create-card-btn" style="margin-top:8px;">Create new card</button>
+        <button class="btn fix-match-cancel-btn" style="margin-top:8px;">Cancel</button>
+    `;
+
+    renderManualSearch(container, td, row, matchDiv.querySelector('.manual-search-area'), false);
+
+    matchDiv.querySelector('.create-card-btn').addEventListener('click', () => {
+        openCreateCardModal(container, td, row);
+    });
+
+    matchDiv.querySelector('.fix-match-cancel-btn').addEventListener('click', () => {
+        matchDiv.innerHTML = `<button class="btn fix-match-btn" style="font-size:12px;">⚠️ Wrong match? Fix it</button>`;
+        matchDiv.querySelector('.fix-match-btn').addEventListener('click', () => {
+            renderWrongMatchResolution(container, td, row, matchDiv);
+        });
+    });
+}
+
 function renderManualSearch(container, td, row, target, replace) {
     const html = `
         <div class="manual-search" style="margin-top:8px;">
@@ -1040,12 +1117,37 @@ function renderManualSearch(container, td, row, target, replace) {
             return;
         }
 
-        if (data.length === 0) {
+        // Also search card_master directly, for cards with no card_variants
+        // row yet (e.g. custom-created but not pushed to inventory) — these
+        // don't appear in v_card_variants since it requires a variant match.
+        const { data: cmData, error: cmError } = await supabase
+            .from('card_master')
+            .select('id, name, card_number, rarity, card_sets(name)')
+            .ilike('name', `%${term}%`)
+            .limit(15);
+
+        if (cmError) console.error('Manual search error (card_master):', cmError);
+
+        const seenIds = new Set((data || []).map(c => c.card_id));
+        const noVariantMatches = (cmData || [])
+            .filter(c => !seenIds.has(c.id))
+            .map(c => ({
+                card_id: c.id, variant_id: '',
+                card_name: c.name, set_name: c.card_sets?.name || '',
+                display_number: c.card_number, rarity: c.rarity,
+                foil_label: 'No variant yet',
+                pattern_label: null, texture_label: null, material_label: null,
+                size_label: null, stamp_label: null, source_label: null,
+            }));
+
+        const combined = [...(data || []), ...noVariantMatches];
+
+        if (combined.length === 0) {
             results.innerHTML = '<p style="color:var(--text-secondary)">No matches found.</p>';
             return;
         }
 
-        results.innerHTML = data.map(c => {
+        results.innerHTML = combined.map(c => {
             const vLabel = [c.foil_label, c.pattern_label, c.texture_label,
                             c.material_label, c.size_label, c.stamp_label,
                             c.source_label].filter(Boolean).join(' · ') || 'Non-Holo';
@@ -1126,8 +1228,12 @@ async function runRematch(container, td, row) {
                 "<strong>${escapeHtml(name)}</strong>"
                 ${num ? `#${escapeHtml(num)}` : ''}
                 ${setName ? `(${escapeHtml(setName)})` : ''}.
-                Try different search terms, or create the card manually.
-            </p>`;
+                Try different search terms, or create it below.
+            </p>
+            <button class="btn rematch-create-card-btn" style="margin-top:6px;">Create new card</button>`;
+        results.querySelector('.rematch-create-card-btn').addEventListener('click', () => {
+            openCreateCardModal(container, td, row);
+        });
         return;
     }
 
@@ -1145,9 +1251,9 @@ async function searchDB(name, num, setName) {
     if (setName) q = q.ilike('set_name', `%${setName}%`);
 
     const { data, error } = await q;
-    if (error) { console.error('DB search error:', error); return []; }
+    if (error) console.error('DB search error (variants):', error);
 
-    return (data || []).map(c => ({
+    const withVariants = (data || []).map(c => ({
         source:      'db',
         card_id:     c.card_id,
         variant_id:  c.variant_id,
@@ -1166,6 +1272,48 @@ async function searchDB(name, num, setName) {
         source_type:  c.source_type,
         _raw: c,
     }));
+
+    // ── Also search card_master directly, for cards with no card_variants
+    // row yet (e.g. just custom-created, not pushed to inventory) — these
+    // don't show up in v_card_variants at all since that view requires a
+    // matching variant row to exist.
+    let cmq = supabase
+        .from('card_master')
+        .select('id, name, card_number, rarity, card_sets(name)')
+        .ilike('name', `%${name}%`)
+        .limit(15);
+    if (num) cmq = cmq.eq('card_number', num);
+
+    const { data: cmData, error: cmError } = await cmq;
+    if (cmError) console.error('DB search error (card_master):', cmError);
+
+    const alreadyHaveVariant = new Set(withVariants.map(c => c.card_id));
+    const setNameLower = (setName || '').toLowerCase();
+
+    const withoutVariants = (cmData || [])
+        .filter(c => !alreadyHaveVariant.has(c.id))
+        .filter(c => !setNameLower || (c.card_sets?.name || '').toLowerCase().includes(setNameLower))
+        .map(c => ({
+            source:      'db',
+            card_id:     c.id,
+            variant_id:  null,
+            name:        c.name,
+            number:      c.card_number,
+            card_number: c.card_number,
+            set_name:    c.card_sets?.name || '',
+            rarity:      c.rarity,
+            variant_label: 'No variant yet',
+            foil_type:    null,
+            foil_pattern: null,
+            texture:      null,
+            material:     null,
+            size:         null,
+            stamp_type:   null,
+            source_type:  null,
+            _raw: c,
+        }));
+
+    return [...withVariants, ...withoutVariants];
 }
 
 
@@ -1631,6 +1779,150 @@ async function batchDeleteSelected(container) {
 }
 
 /**
+ * Bulk-reassigns the set_name for all currently-selected staging rows.
+ * Since a set change can invalidate whatever card_master match a row
+ * already had, this also clears card_id/match_status back to not_found
+ * so the rows get properly re-matched (via Rematch or Create new card)
+ * against the corrected set, rather than silently keeping a stale link.
+ */
+function openBatchModifySetModal(container) {
+    const ids = [...state.selectedIds];
+    if (ids.length === 0) return;
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+        position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+        display: flex; align-items: center; justify-content: center; z-index: 1000;
+    `;
+
+    overlay.innerHTML = `
+        <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:420px; max-width:90vw;">
+            <h3 style="margin-top:0;">Modify set for ${ids.length} row${ids.length === 1 ? '' : 's'}</h3>
+            <p style="font-size:13px; color:var(--text-secondary); margin-top:-8px;">
+                This will also clear the existing match on these rows, since the old match
+                may no longer be correct once the set changes.
+            </p>
+            <label>New set name
+                <input type="text" class="bms-set-name" style="width:100%;" placeholder="Start typing to search..." />
+                <div class="bms-set-results" style="max-height:140px; overflow-y:auto; margin-top:4px;"></div>
+            </label>
+            <div class="bms-message" style="margin-top:8px; font-size:13px;"></div>
+            <div style="display:flex; gap:8px; margin-top:14px;">
+                <button class="btn btn-primary bms-apply-btn" disabled>Apply to ${ids.length} row${ids.length === 1 ? '' : 's'}</button>
+                <button class="btn bms-cancel-btn">Cancel</button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    const setInput    = overlay.querySelector('.bms-set-name');
+    const resultsEl    = overlay.querySelector('.bms-set-results');
+    const msgEl        = overlay.querySelector('.bms-message');
+    const applyBtn     = overlay.querySelector('.bms-apply-btn');
+    let chosenSetName  = null;
+
+    const searchSets = debounce(async () => {
+        const term = setInput.value.trim();
+        chosenSetName = null;
+        applyBtn.disabled = true;
+
+        if (!term) {
+            resultsEl.innerHTML = '';
+            return;
+        }
+
+        const { data, error } = await supabase
+            .from('card_sets')
+            .select('name')
+            .ilike('name', `%${term}%`)
+            .limit(10);
+
+        if (error) {
+            resultsEl.innerHTML = `<p style="color:var(--danger); font-size:12px;">${escapeHtml(error.message)}</p>`;
+            return;
+        }
+
+        if (!data || data.length === 0) {
+            resultsEl.innerHTML = `<p style="color:var(--warning); font-size:12px;">No existing set matches. Create it in Configuration first, or check spelling.</p>`;
+            return;
+        }
+
+        resultsEl.innerHTML = data.map(s => `
+            <div class="bms-set-item" data-name="${escapeHtml(s.name)}"
+                 style="padding:5px 6px; border:1px solid var(--border); border-radius:4px;
+                        margin-bottom:3px; cursor:pointer; font-size:13px;">
+                ${escapeHtml(s.name)}
+            </div>
+        `).join('');
+
+        resultsEl.querySelectorAll('.bms-set-item').forEach(el => {
+            el.addEventListener('click', () => {
+                chosenSetName = el.dataset.name;
+                setInput.value = chosenSetName;
+                resultsEl.innerHTML = '';
+                applyBtn.disabled = false;
+            });
+        });
+    }, 300);
+
+    setInput.addEventListener('input', searchSets);
+
+    overlay.querySelector('.bms-cancel-btn').addEventListener('click', () => overlay.remove());
+
+    applyBtn.addEventListener('click', async () => {
+        if (!chosenSetName) return;
+
+        applyBtn.disabled = true;
+        applyBtn.textContent = 'Applying...';
+
+        let succeeded = 0;
+        let failed = 0;
+        let firstError = null;
+
+        for (let i = 0; i < ids.length; i++) {
+            msgEl.textContent = `Updating ${i + 1} of ${ids.length}...`;
+
+            const { error } = await supabase
+                .from('staging')
+                .update({
+                    set_name:     chosenSetName,
+                    card_id:      null,
+                    match_status: 'not_found',
+                    status:       'pending',
+                    updated_at:   new Date().toISOString(),
+                })
+                .eq('id', ids[i]);
+
+            if (!error) {
+                succeeded++;
+            } else {
+                failed++;
+                if (!firstError) firstError = error.message;
+                break;
+            }
+        }
+
+        if (failed > 0) {
+            msgEl.innerHTML = `<span style="color:var(--danger)">
+                Updated ${succeeded} of ${ids.length}. Stopped on error: ${escapeHtml(firstError)}
+            </span>`;
+            applyBtn.disabled = false;
+            applyBtn.textContent = `Apply to ${ids.length} row${ids.length === 1 ? '' : 's'}`;
+            return;
+        }
+
+        msgEl.innerHTML = `<span style="color:var(--success)">Updated ${succeeded} row${succeeded === 1 ? '' : 's'}.</span>`;
+        state.selectedIds.clear();
+
+        setTimeout(async () => {
+            overlay.remove();
+            await loadAndRenderRows(container);
+        }, 500);
+    });
+}
+
+/**
  * Deletes a single row directly from the collapsed table view, without
  * requiring the row to be expanded first. Mirrors deleteRow() but reports
  * via a transient toast on the toolbar instead of an expanded-row message.
@@ -1712,10 +2004,22 @@ function openCreateCardModal(container, td, row) {
                     <input type="text" class="modal-set-name" value="${escapeHtml(row.set_name || '')}" style="width:100%;" />
                 </label>
                 <label>Card number
-                    <input type="text" class="modal-card-number" placeholder="e.g. 045/198" style="width:100%;" />
+                    <input type="text" class="modal-card-number" value="${escapeHtml(row.card_number || '')}" placeholder="e.g. 045/198" style="width:100%;" />
                 </label>
                 <label>Rarity
-                    <input type="text" class="modal-rarity" style="width:100%;" />
+                    <input type="text" class="modal-rarity" value="${escapeHtml(row.api_rarity || '')}" style="width:100%;" />
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; flex-direction:row;">
+                    <input type="checkbox" class="modal-is-promo" />
+                    Promo card
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; flex-direction:row;">
+                    <input type="checkbox" class="modal-is-first-edition" />
+                    1st Edition
+                </label>
+                <label style="display:flex; align-items:center; gap:6px; flex-direction:row;">
+                    <input type="checkbox" class="modal-is-shiny" />
+                    Shiny
                 </label>
             </div>
             <div class="modal-dedup-results" style="margin-top:10px; max-height:160px; overflow-y:auto;"></div>
@@ -1747,14 +2051,40 @@ function openCreateCardModal(container, td, row) {
             .ilike('card_name', `%${name}%`)
             .limit(10);
 
-        if (error || !data || data.length === 0) {
+        if (error) console.error('Dedup check error (variants):', error);
+
+        // Also check card_master directly, for cards created but not yet
+        // pushed to inventory — those have no card_variants row yet and
+        // wouldn't otherwise show up as a dedup warning here.
+        const { data: cmData, error: cmError } = await supabase
+            .from('card_master')
+            .select('id, name, card_number, card_sets(name)')
+            .ilike('name', `%${name}%`)
+            .limit(10);
+
+        if (cmError) console.error('Dedup check error (card_master):', cmError);
+
+        const seenIds = new Set((data || []).map(c => c.card_id));
+        const noVariantMatches = (cmData || [])
+            .filter(c => !seenIds.has(c.id))
+            .map(c => ({
+                card_name: c.name,
+                set_name: c.card_sets?.name || '',
+                display_number: c.card_number,
+                foil_label: 'No variant yet',
+                pattern_label: null, texture_label: null, material_label: null, size_label: null,
+            }));
+
+        const combined = [...(data || []), ...noVariantMatches];
+
+        if (combined.length === 0) {
             dedupArea.innerHTML = '';
             return;
         }
 
         dedupArea.innerHTML = `
             <p style="color:var(--warning); font-size:13px;">Possible existing matches — verify this isn't a duplicate:</p>
-            ${data.map(c => {
+            ${combined.map(c => {
                 const vLabel = [c.foil_label, c.pattern_label, c.texture_label,
                                 c.material_label, c.size_label].filter(Boolean).join(' · ') || 'Non-Holo';
                 return `
@@ -1776,11 +2106,21 @@ function openCreateCardModal(container, td, row) {
         const setName = setInput.value.trim();
         const cardNumber = overlay.querySelector('.modal-card-number').value.trim();
         const rarity = overlay.querySelector('.modal-rarity').value.trim();
+        const isPromo = overlay.querySelector('.modal-is-promo').checked;
+        const isFirstEdition = overlay.querySelector('.modal-is-first-edition').checked;
+        const isShiny = overlay.querySelector('.modal-is-shiny').checked;
 
         if (!cardName || !setName || !cardNumber) {
             msgArea.innerHTML = `<span style="color:var(--danger)">Card name, set name, and card number are required.</span>`;
             return;
         }
+
+        // Guard against double-submit: the two awaits below take long enough
+        // that a second click would otherwise insert a duplicate card_master row.
+        const createBtn = overlay.querySelector('.modal-create-btn');
+        if (createBtn.disabled) return;
+        createBtn.disabled = true;
+        msgArea.innerHTML = `<span style="color:var(--text-secondary)">Creating...</span>`;
 
         // Find or create the set
         let { data: setRow, error: setErr } = await supabase
@@ -1790,11 +2130,13 @@ function openCreateCardModal(container, td, row) {
             .maybeSingle();
 
         if (setErr) {
+            createBtn.disabled = false;
             msgArea.innerHTML = `<span style="color:var(--danger)">Set lookup failed: ${setErr.message}</span>`;
             return;
         }
 
         if (!setRow) {
+            createBtn.disabled = false;
             msgArea.innerHTML = `<span style="color:var(--danger)">Set "${escapeHtml(setName)}" not found. Create it on the Sets page first.</span>`;
             return;
         }
@@ -1806,11 +2148,15 @@ function openCreateCardModal(container, td, row) {
                 name: cardName,
                 card_number: cardNumber,
                 rarity: rarity || null,
+                is_promo: isPromo,
+                is_first_edition: isFirstEdition,
+                is_shiny: isShiny,
             })
             .select('id')
             .single();
 
         if (createErr) {
+            createBtn.disabled = false;
             msgArea.innerHTML = `<span style="color:var(--danger)">Failed to create card: ${createErr.message}</span>`;
             return;
         }
@@ -1857,33 +2203,19 @@ function renderPagination(container) {
 // fallback, clickable results list, manual create as last resort.
 // ----------------------------------------------------------------
 
-const FOIL_LABELS_NLP = { non_holo: 'Non-Holo', holo: 'Holo', reverse_holo: 'Reverse Holo' };
-const NLP_FOIL_OPTS = [
-    ['non_holo', 'Non-Holo'], ['holo', 'Holo'], ['reverse_holo', 'Reverse Holo'],
-];
-const NLP_PATTERN_OPTS = [
-    ['', '— none —'], ['poke_ball', 'Poké Ball'], ['master_ball', 'Master Ball'],
-    ['friend_ball', 'Friend Ball'], ['love_ball', 'Love Ball'], ['quick_ball', 'Quick Ball'],
-    ['dusk_ball', 'Dusk Ball'], ['team_rocket', 'Team Rocket'], ['energy_symbol', 'Energy Symbol'],
-];
-const NLP_TEXTURE_OPTS = [
-    ['', '— none —'], ['cosmos', 'Cosmos'], ['hd_cosmos', 'HD Cosmos'], ['galaxy_cosmos', 'Galaxy Cosmos'],
-];
-const NLP_MATERIAL_OPTS = [
-    ['', '— none —'], ['metal', 'Metal'],
-];
-const NLP_SIZE_OPTS = [
-    ['', '— none —'], ['jumbo', 'Jumbo'],
-];
-const NLP_STAMP_OPTS = [
-    ['', '— none —'], ['1st_edition', '1st Edition'], ['pokemon_center', 'Pokémon Center'],
-    ['prerelease', 'Prerelease'], ['pokemon_day', 'Pokémon Day'],
-    ['mega_evolution', 'Mega Evolution'], ['prismatic_evolution', 'Prismatic Evolution'],
-];
-const NLP_SOURCE_OPTS = [
-    ['', '— none —'], ['deck_exclusive', 'Deck Exclusive'], ['product_exclusive', 'Product Exclusive'],
-    ['box_topper', 'Box Topper'], ['stamp_promo', 'Stamp Promo'],
-];
+// FOIL_LABELS_NLP and NLP_*_OPTS pull from the same DB-driven AXIS_OPTIONS /
+// AXIS_DISPLAY loaded once at page mount (see loadAxisOptions()), rather
+// than a separate hardcoded copy that could drift from the main editor.
+// NLP_FOIL_OPTS deliberately excludes the '— none —' entry present in the
+// other axes -- a local purchase always has a definite foil status.
+function nlpFoilLabels()   { return AXIS_DISPLAY.foil_type || {}; }
+function nlpFoilOpts()     { return (AXIS_OPTIONS.foil_type    || [['', '— none —']]).filter(([v]) => v !== ''); }
+function nlpPatternOpts()  { return AXIS_OPTIONS.foil_pattern || [['', '— none —']]; }
+function nlpTextureOpts()  { return AXIS_OPTIONS.texture      || [['', '— none —']]; }
+function nlpMaterialOpts() { return AXIS_OPTIONS.material     || [['', '— none —']]; }
+function nlpSizeOpts()     { return AXIS_OPTIONS.size         || [['', '— none —']]; }
+function nlpStampOpts()    { return AXIS_OPTIONS.stamp_type   || [['', '— none —']]; }
+function nlpSourceOpts()   { return AXIS_OPTIONS.source_type  || [['', '— none —']]; }
 
 function openNewLocalPurchaseModal(container) {
     const overlay = document.createElement('div');
@@ -1998,27 +2330,27 @@ function openNewLocalPurchaseModal(container) {
             <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; align-items:flex-end;">
                 <label>Foil type
                     <select class="nlp-edit-foil-type">
-                        ${NLP_FOIL_OPTS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                        ${nlpFoilOpts().map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
                     </select>
                 </label>
                 <label>Pattern
                     <select class="nlp-edit-foil-pattern">
-                        ${NLP_PATTERN_OPTS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                        ${nlpPatternOpts().map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
                     </select>
                 </label>
                 <label>Texture
                     <select class="nlp-edit-texture">
-                        ${NLP_TEXTURE_OPTS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                        ${nlpTextureOpts().map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
                     </select>
                 </label>
                 <label>Material
                     <select class="nlp-edit-material">
-                        ${NLP_MATERIAL_OPTS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                        ${nlpMaterialOpts().map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
                     </select>
                 </label>
                 <label>Size
                     <select class="nlp-edit-size">
-                        ${NLP_SIZE_OPTS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                        ${nlpSizeOpts().map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
                     </select>
                 </label>
             </div>
@@ -2026,12 +2358,12 @@ function openNewLocalPurchaseModal(container) {
             <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; align-items:flex-end;">
                 <label>Stamp
                     <select class="nlp-edit-stamp-type">
-                        ${NLP_STAMP_OPTS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                        ${nlpStampOpts().map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
                     </select>
                 </label>
                 <label>Source
                     <select class="nlp-edit-source-type">
-                        ${NLP_SOURCE_OPTS.map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
+                        ${nlpSourceOpts().map(([v,l]) => `<option value="${v}">${l}</option>`).join('')}
                     </select>
                 </label>
             </div>
@@ -2078,21 +2410,47 @@ function openNewLocalPurchaseModal(container) {
                 // variants rather than capping — that's the whole point of asking.
                 cardQuery = cardQuery.limit((setVal && numVal) ? 30 : 8);
 
-                const [cardRes, charRes] = await Promise.all([
+                let cmQuery = supabase
+                    .from('card_master')
+                    .select('id, name, card_number, rarity, card_sets(name)')
+                    .ilike('name', `%${term}%`)
+                    .limit(8);
+                if (numVal) cmQuery = cmQuery.eq('card_number', numVal);
+
+                const [cardRes, charRes, cmRes] = await Promise.all([
                     cardQuery,
                     supabase
                         .from('characters')
                         .select('name')
                         .ilike('name', `%${term}%`)
                         .limit(5),
+                    cmQuery,
                 ]);
                 const cards = (cardRes.data || []).map(c => ({
                     _type: 'card', ...c,
                     variant_label: [c.foil_label, c.pattern_label, c.texture_label, c.material_label, c.size_label, c.stamp_label, c.source_label]
                         .filter(Boolean).join(' · ') || 'Non-Holo',
                 }));
+
+                // Card_master rows with no card_variants row yet.
+                const seenCardIds = new Set(cards.map(c => c.card_id));
+                const setValLower = (setVal || '').toLowerCase();
+                const noVariantCards = (cmRes.data || [])
+                    .filter(c => !seenCardIds.has(c.id))
+                    .filter(c => !setValLower || (c.card_sets?.name || '').toLowerCase().includes(setValLower))
+                    .map(c => ({
+                        _type: 'card',
+                        card_id: c.id, variant_id: null,
+                        card_name: c.name, set_name: c.card_sets?.name || '',
+                        display_number: c.card_number, card_number: c.card_number,
+                        rarity: c.rarity,
+                        foil_type: null, foil_pattern: null, texture: null,
+                        material: null, size: null, stamp_type: null, source_type: null,
+                        variant_label: 'No variant yet',
+                    }));
+
                 const chars = (charRes.data || []).map(ch => ({ _type: 'character', card_name: ch.name }));
-                return [...cards, ...chars];
+                return [...cards, ...noVariantCards, ...chars];
             },
             renderItem: (c) => c._type === 'card'
                 ? `${c.card_name} — ${c.set_name} #${c.display_number || ''} · ${c.variant_label}`

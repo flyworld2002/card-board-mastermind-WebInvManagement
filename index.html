@@ -194,6 +194,8 @@
                         <a href="#dashboard" data-page="dashboard">Dashboard</a>
                         <a href="#staging" data-page="staging">Staging Review</a>
                         <a href="#inventory" data-page="inventory">Inventory</a>
+                        <a href="#purchases" data-page="purchases">Purchases</a>
+                        <a href="#sales" data-page="sales">Sales</a>
                         <a href="#catalog" data-page="catalog">Catalog</a>
                         <a href="#configuration" data-page="configuration">Configuration</a>
                         <a href="#" id="signout-link" style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px;">Sign out</a>
@@ -236,6 +238,16 @@
                     case 'inventory': {
                         const { renderInventory } = await import(`./inventory.js?v=${Date.now()}`);
                         await renderInventory(content);
+                        break;
+                    }
+                    case 'purchases': {
+                        const { renderPurchases } = await import(`./purchases.js?v=${Date.now()}`);
+                        await renderPurchases(content);
+                        break;
+                    }
+                    case 'sales': {
+                        const { renderSales } = await import(`./sales.js?v=${Date.now()}`);
+                        await renderSales(content);
                         break;
                     }
                     case 'catalog': {

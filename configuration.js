@@ -33,6 +33,26 @@ let templatesState = {
     templates: [],
 };
 
+// The 7 variant lookup tables card_variants references by `code` — all
+// share the identical (code, display_name, sort_order) shape, so one
+// generic CRUD component handles all of them instead of 7 near-copies.
+const ATTR_TABLES = [
+    { table: 'foil_types',    label: 'Foil Types',    variantColumn: 'foil_type' },
+    { table: 'foil_patterns', label: 'Foil Patterns', variantColumn: 'foil_pattern' },
+    { table: 'textures',      label: 'Textures',      variantColumn: 'texture' },
+    { table: 'materials',     label: 'Materials',     variantColumn: 'material' },
+    { table: 'sizes',         label: 'Sizes',          variantColumn: 'size' },
+    { table: 'stamp_types',   label: 'Stamp Types',    variantColumn: 'stamp_type' },
+    { table: 'source_types',  label: 'Source Types',   variantColumn: 'source_type' },
+];
+
+let attrState = {
+    activeTable: 'foil_types',
+    rows: [],
+    usageCounts: {},   // code -> count of card_variants rows using it
+    search: '',
+};
+
 export async function renderConfiguration(container, initialKey = 'sets') {
     if (initialKey === 'sets') {
         state = { sets: [], games: [], setCounts: {}, search: '', loading: true, error: null };
@@ -54,6 +74,12 @@ export async function renderConfiguration(container, initialKey = 'sets') {
         container.innerHTML = configShell(templatesSectionHTML());
         wireConfigNav(container, 'listing-templates');
         await loadTemplates(container);
+    } else if (initialKey === 'variant-attributes') {
+        attrState = { activeTable: 'foil_types', rows: [], usageCounts: {}, search: '' };
+        container.innerHTML = configShell(attrSectionHTML());
+        wireConfigNav(container, 'variant-attributes');
+        wireAttrTabs(container);
+        await loadAttrTable(container);
     } else {
         container.innerHTML = configShell(`<p style="color:var(--text-secondary)">${labelFor(initialKey)} coming soon.</p>`);
         wireConfigNav(container, initialKey);
@@ -73,6 +99,7 @@ function configShell(bodyHTML) {
                 <a href="#card-games" data-config-nav="card-games" class="config-nav-item">Card games</a>
                 <a href="#pricing-rules" data-config-nav="pricing-rules" class="config-nav-item">Pricing rules</a>
                 <a href="#listing-templates" data-config-nav="listing-templates" class="config-nav-item">Listing templates</a>
+                <a href="#variant-attributes" data-config-nav="variant-attributes" class="config-nav-item">Variant attributes</a>
             </div>
             <div style="flex:1; min-width:0;" id="config-body">
                 ${bodyHTML}
@@ -109,6 +136,8 @@ function wireConfigNav(container, activeKey) {
                 await renderConfiguration(container, 'pricing-rules');
             } else if (key === 'listing-templates') {
                 await renderConfiguration(container, 'listing-templates');
+            } else if (key === 'variant-attributes') {
+                await renderConfiguration(container, 'variant-attributes');
             } else {
                 // Other configuration sub-pages land here later.
                 container.innerHTML = configShell(`<p style="color:var(--text-secondary)">${labelFor(key)} coming soon.</p>`);
@@ -1121,6 +1150,243 @@ async function confirmDeleteGame(container, gameId) {
         const msg = isFkViolation
             ? `Can't delete "${game.name}" — it still has sets referencing it. Remove or reassign those sets first.`
             : `Failed to delete card game: ${err.message}`;
+        window.alert(msg);
+    }
+}
+
+// ── Variant attributes ───────────────────────────────────────────────────
+// One generic CRUD component for all 7 lookup tables card_variants
+// references by `code` (foil_types, foil_patterns, textures, materials,
+// sizes, stamp_types, source_types). All 7 share the identical
+// (code, display_name, sort_order) shape.
+
+function attrSectionHTML() {
+    return `
+        <div style="display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap;">
+            ${ATTR_TABLES.map(t => `
+                <button class="btn attr-tab-btn" data-table="${t.table}"
+                        style="${t.table === attrState.activeTable ? 'background:var(--accent); color:white;' : ''}">
+                    ${t.label}
+                </button>
+            `).join('')}
+        </div>
+        <div class="filters-bar" style="justify-content:space-between;">
+            <input type="search" id="attr-search" placeholder="Search..." style="min-width:240px;" />
+            <button class="btn btn-primary" id="new-attr-btn">+ New value</button>
+        </div>
+        <div id="attr-table-wrap"><p>Loading...</p></div>
+        <div id="attr-modal-root"></div>
+    `;
+}
+
+function wireAttrTabs(container) {
+    container.querySelectorAll('.attr-tab-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            attrState.activeTable = btn.dataset.table;
+            attrState.search = '';
+            // Re-render the tab bar itself so the active highlight moves.
+            container.querySelector('#config-body').innerHTML = attrSectionHTML();
+            wireAttrTabs(container);
+            await loadAttrTable(container);
+        });
+    });
+}
+
+function currentAttrDef() {
+    return ATTR_TABLES.find(t => t.table === attrState.activeTable);
+}
+
+async function loadAttrTable(container) {
+    const wrap = container.querySelector('#attr-table-wrap');
+    const def = currentAttrDef();
+
+    try {
+        const [{ data: rows, error: rowsErr }, { data: usageRows, error: usageErr }] = await Promise.all([
+            supabase.from(def.table).select('*').order('sort_order').order('display_name'),
+            supabase.from('card_variants').select(def.variantColumn),
+        ]);
+
+        if (rowsErr) throw rowsErr;
+        if (usageErr) throw usageErr;
+
+        const counts = {};
+        for (const row of usageRows || []) {
+            const val = row[def.variantColumn];
+            if (!val) continue;
+            counts[val] = (counts[val] || 0) + 1;
+        }
+
+        attrState.rows = rows || [];
+        attrState.usageCounts = counts;
+
+        renderAttrTable(container);
+        wireAttrControls(container);
+    } catch (err) {
+        console.error(err);
+        wrap.innerHTML = `<p style="color:var(--danger)">Failed to load ${def.label}: ${err.message}</p>`;
+    }
+}
+
+function renderAttrTable(container) {
+    const wrap = container.querySelector('#attr-table-wrap');
+    const def = currentAttrDef();
+    const q = attrState.search.trim().toLowerCase();
+    const rows = attrState.rows.filter(r =>
+        !q || r.code.toLowerCase().includes(q) || r.display_name.toLowerCase().includes(q));
+
+    if (!rows.length) {
+        wrap.innerHTML = `<p style="color:var(--text-secondary)">No ${def.label.toLowerCase()} found.</p>`;
+        return;
+    }
+
+    wrap.innerHTML = `
+        <table>
+            <thead>
+                <tr>
+                    <th>Code</th>
+                    <th>Display name</th>
+                    <th style="width:80px;">Sort order</th>
+                    <th style="width:100px;">In use</th>
+                    <th style="width:60px;"></th>
+                </tr>
+            </thead>
+            <tbody>
+                ${rows.map(r => `
+                    <tr data-code="${escapeAttr(r.code)}">
+                        <td><code>${escapeHTML(r.code)}</code></td>
+                        <td>${escapeHTML(r.display_name)}</td>
+                        <td>${r.sort_order ?? 0}</td>
+                        <td>${attrState.usageCounts[r.code] || 0}</td>
+                        <td><button class="btn edit-attr-btn" data-code="${escapeAttr(r.code)}">Edit</button></td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    `;
+
+    wrap.querySelectorAll('.edit-attr-btn').forEach(btn => {
+        btn.addEventListener('click', () => openAttrModal(container, btn.dataset.code));
+    });
+}
+
+function wireAttrControls(container) {
+    const searchInput = container.querySelector('#attr-search');
+    searchInput.value = attrState.search;
+    searchInput.addEventListener('input', debounce((e) => {
+        attrState.search = e.target.value;
+        renderAttrTable(container);
+    }, 200));
+
+    container.querySelector('#new-attr-btn').addEventListener('click', () => openAttrModal(container, null));
+}
+
+function openAttrModal(container, code) {
+    const def = currentAttrDef();
+    const isEdit = !!code;
+    const existing = isEdit ? attrState.rows.find(r => r.code === code) : null;
+    const root = container.querySelector('#attr-modal-root');
+
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:420px; max-width:90vw;">
+                <h3 style="margin:0 0 16px;">${isEdit ? `Edit ${def.label.slice(0, -1)}` : `New ${def.label.slice(0, -1)}`}</h3>
+                <form id="attr-form">
+                    <div style="display:flex; flex-direction:column; gap:10px;">
+                        <label style="font-size:12px; color:var(--text-secondary);">
+                            Code ${isEdit ? '<span style="color:var(--text-secondary);">(locked — referenced by existing variants)</span>' : ''}
+                            <input type="text" name="code" required value="${existing ? escapeAttr(existing.code) : ''}"
+                                   ${isEdit ? 'readonly style="width:100%; margin-top:4px; opacity:0.6;"' : 'style="width:100%; margin-top:4px;"'}
+                                   placeholder="e.g. Confetti" />
+                        </label>
+                        <label style="font-size:12px; color:var(--text-secondary);">
+                            Display name
+                            <input type="text" name="display_name" required value="${existing ? escapeAttr(existing.display_name) : ''}" style="width:100%; margin-top:4px;" placeholder="e.g. Confetti" />
+                        </label>
+                        <label style="font-size:12px; color:var(--text-secondary);">
+                            Sort order
+                            <input type="number" name="sort_order" value="${existing ? existing.sort_order ?? 0 : 0}" style="width:100%; margin-top:4px;" />
+                        </label>
+                    </div>
+                    <div id="attr-form-error" style="color:var(--danger); font-size:12px; margin-top:10px;"></div>
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:18px;">
+                        ${isEdit ? `<button type="button" class="btn" id="attr-modal-delete" style="color:var(--danger); border-color:var(--danger);">Delete</button>` : '<span></span>'}
+                        <div style="display:flex; gap:8px;">
+                            <button type="button" class="btn" id="attr-modal-cancel">Cancel</button>
+                            <button type="submit" class="btn btn-primary">${isEdit ? 'Save changes' : 'Create'}</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    `;
+
+    root.querySelector('#attr-modal-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+
+    if (isEdit) {
+        root.querySelector('#attr-modal-delete').addEventListener('click', async () => {
+            root.innerHTML = '';
+            await confirmDeleteAttr(container, code);
+        });
+    }
+
+    root.querySelector('#attr-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#attr-form-error');
+        errBox.textContent = '';
+
+        const fd = new FormData(e.target);
+        const payload = {
+            code: fd.get('code').trim(),
+            display_name: fd.get('display_name').trim(),
+            sort_order: parseInt(fd.get('sort_order'), 10) || 0,
+        };
+
+        try {
+            if (isEdit) {
+                // code is locked/readonly in the form, so only display_name
+                // and sort_order can actually change here.
+                const { error } = await supabase.from(def.table)
+                    .update({ display_name: payload.display_name, sort_order: payload.sort_order })
+                    .eq('code', code);
+                if (error) throw error;
+            } else {
+                const { error } = await supabase.from(def.table).insert(payload);
+                if (error) throw error;
+            }
+            root.innerHTML = '';
+            await loadAttrTable(container);
+        } catch (err) {
+            console.error(err);
+            const isDupe = err.code === '23505';
+            errBox.textContent = isDupe
+                ? `"${payload.code}" already exists in ${def.label}.`
+                : (err.message || `Failed to save ${def.label.toLowerCase()} value.`);
+        }
+    });
+}
+
+async function confirmDeleteAttr(container, code) {
+    const def = currentAttrDef();
+    const row = attrState.rows.find(r => r.code === code);
+    if (!row) return;
+
+    const usageCount = attrState.usageCounts[code] || 0;
+    const warning = usageCount > 0
+        ? `"${row.display_name}" is used by ${usageCount} existing card variant${usageCount === 1 ? '' : 's'}. Deleting it will fail unless those variants are updated first.\n\nTry to delete anyway?`
+        : `Delete "${row.display_name}"? This can't be undone.`;
+
+    if (!window.confirm(warning)) return;
+
+    try {
+        const { error } = await supabase.from(def.table).delete().eq('code', code);
+        if (error) throw error;
+        await loadAttrTable(container);
+    } catch (err) {
+        console.error(err);
+        const isFkViolation = (err.code === '23503') || /foreign key/i.test(err.message || '');
+        const msg = isFkViolation
+            ? `Can't delete "${row.display_name}" — it's still referenced by existing card variants. Update those variants first.`
+            : `Failed to delete: ${err.message}`;
         window.alert(msg);
     }
 }

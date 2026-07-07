@@ -9,19 +9,31 @@
 // from schema.sql, which has been stale before — verify against your live
 // schema if anything here errors on load.
 
-import { supabase, debounce } from './shared.js';
+import { supabase, debounce, loadAxisOptions, AXIS_OPTIONS } from './shared.js';
 
-const FOIL_TYPES    = ['non_holo', 'holo', 'reverse_holo'];
-const FOIL_PATTERNS = ['poke_ball', 'master_ball', 'friend_ball', 'love_ball',
-                        'quick_ball', 'dusk_ball', 'team_rocket', 'energy_symbol'];
-const TEXTURES      = ['cosmos', 'hd_cosmos', 'galaxy_cosmos'];
-const MATERIALS     = ['metal'];
-const SIZES         = ['jumbo'];
-const STAMPS        = ['1st_edition', 'pokemon_center', 'prerelease',
-                        'pokemon_day', 'mega_evolution', 'prismatic_evolution'];
-const SOURCES       = ['deck_exclusive', 'product_exclusive', 'box_topper', 'stamp_promo'];
+// AXIS_OPTIONS now comes from shared.js (loaded once via loadAxisOptions()
+// at page mount below) rather than a local copy, so Staging Review,
+// Inventory, and Catalog all read from one implementation instead of
+// three that could drift apart.
 
 const PAGE_SIZE = 50;
+
+// Columns sortable via the clickable headers in renderTable(). 'set' is a
+// special case -- card_sets is an embedded/joined resource in the select(),
+// so sorting by its name needs supabase-js's { foreignTable } option
+// rather than a plain column name.
+function applySort(query, sort) {
+    if (sort.column === 'set') {
+        return query.order('name', { ascending: sort.ascending, foreignTable: 'card_sets' });
+    }
+    return query.order(sort.column, { ascending: sort.ascending, nullsFirst: false });
+}
+
+function catalogSortTh(label, column, style = '') {
+    const isActive = state.sort.column === column;
+    const arrow = isActive ? (state.sort.ascending ? ' ▲' : ' ▼') : '';
+    return `<th class="catalog-sortable-th" data-sort-column="${column}" style="${style} cursor:pointer; user-select:none;" title="Sort by ${escapeHTML(label)}">${escapeHTML(label)}${arrow}</th>`;
+}
 
 let state = {
     rows: [],
@@ -32,11 +44,13 @@ let state = {
     hasMore: true,
     expandedCardId: null,
     variantsByCard: {},   // card_id -> array of card_variants rows
+    sort: { column: 'name', ascending: true },
 };
 
 export async function renderCatalog(container) {
-    state = { rows: [], sets: [], search: '', setFilter: '', page: 0, hasMore: true, expandedCardId: null, variantsByCard: {} };
+    state = { rows: [], sets: [], search: '', setFilter: '', page: 0, hasMore: true, expandedCardId: null, variantsByCard: {}, sort: { column: 'name', ascending: true } };
     container.innerHTML = shellHTML();
+    await loadAxisOptions();
     await loadSetsFilter(container);
     wireControls(container);
     await loadPage(container, { reset: true });
@@ -125,6 +139,15 @@ function wireControls(container) {
 
     container.querySelector('#catalog-set-filter').addEventListener('change', (e) => {
         state.setFilter = e.target.value;
+        // Browsing one set reads better in card-number order than
+        // alphabetically -- but only switch if the sort is still at its
+        // untouched default, so a manually-chosen sort isn't overridden.
+        const isDefaultSort = state.sort.column === 'name' && state.sort.ascending === true;
+        if (state.setFilter && isDefaultSort) {
+            state.sort = { column: 'card_number_numeric', ascending: true };
+        } else if (!state.setFilter && state.sort.column === 'card_number_numeric' && state.sort.ascending === true) {
+            state.sort = { column: 'name', ascending: true };
+        }
         loadPage(container, { reset: true });
     });
 }
@@ -142,9 +165,10 @@ async function loadPage(container, { reset = false } = {}) {
     try {
         let query = supabase
             .from('card_master')
-            .select('id, name, card_number, rarity, image_url, external_id, set_id, card_sets(name)')
-            .order('name')
+            .select('id, name, card_number, card_number_numeric, rarity, image_url, external_id, set_id, card_sets(name)')
             .range(state.page * PAGE_SIZE, state.page * PAGE_SIZE + PAGE_SIZE - 1);
+
+        query = applySort(query, state.sort);
 
         if (state.search) {
             query = query.or(`name.ilike.%${state.search}%,card_number.ilike.%${state.search}%`);
@@ -190,10 +214,10 @@ function renderTable(container) {
             <thead>
                 <tr>
                     <th style="width:40px;"></th>
-                    <th>Name</th>
-                    <th>#</th>
-                    <th>Set</th>
-                    <th>Rarity</th>
+                    ${catalogSortTh('Name', 'name')}
+                    ${catalogSortTh('#', 'card_number_numeric')}
+                    ${catalogSortTh('Set', 'set')}
+                    ${catalogSortTh('Rarity', 'rarity')}
                     <th>External ID</th>
                     <th style="width:40px;"></th>
                 </tr>
@@ -218,6 +242,18 @@ function renderTable(container) {
             </tbody>
         </table>
     `;
+
+    wrap.querySelectorAll('.catalog-sortable-th').forEach(th => {
+        th.addEventListener('click', () => {
+            const column = th.dataset.sortColumn;
+            if (state.sort.column === column) {
+                state.sort.ascending = !state.sort.ascending;
+            } else {
+                state.sort = { column, ascending: true };
+            }
+            loadPage(container, { reset: true });
+        });
+    });
 
     wrap.querySelectorAll('.expand-card-btn').forEach(btn => {
         btn.addEventListener('click', () => toggleExpand(container, btn.dataset.id));
@@ -285,13 +321,13 @@ function renderVariants(container, cardId) {
 function variantCardHTML(v) {
     return `
         <div class="variant-card" data-variant-id="${v.id}">
-            ${axisField('foil_type', 'Foil type', FOIL_TYPES, v.foil_type)}
-            ${axisField('foil_pattern', 'Foil pattern', FOIL_PATTERNS, v.foil_pattern)}
-            ${axisField('texture', 'Texture', TEXTURES, v.texture)}
-            ${axisField('material', 'Material', MATERIALS, v.material)}
-            ${axisField('size', 'Size', SIZES, v.size)}
-            ${axisField('stamp_type', 'Stamp', STAMPS, v.stamp_type)}
-            ${axisField('source_type', 'Source', SOURCES, v.source_type)}
+            ${axisField('foil_type', 'Foil type', AXIS_OPTIONS.foil_type, v.foil_type)}
+            ${axisField('foil_pattern', 'Foil pattern', AXIS_OPTIONS.foil_pattern, v.foil_pattern)}
+            ${axisField('texture', 'Texture', AXIS_OPTIONS.texture, v.texture)}
+            ${axisField('material', 'Material', AXIS_OPTIONS.material, v.material)}
+            ${axisField('size', 'Size', AXIS_OPTIONS.size, v.size)}
+            ${axisField('stamp_type', 'Stamp', AXIS_OPTIONS.stamp_type, v.stamp_type)}
+            ${axisField('source_type', 'Source', AXIS_OPTIONS.source_type, v.source_type)}
             <div class="variant-actions">
                 <button class="btn save-variant-btn" data-id="${v.id}" style="padding:6px 10px;">Save</button>
                 <button class="btn delete-variant-btn" data-id="${v.id}" title="Delete variant"
@@ -314,7 +350,7 @@ function axisSelect(name, options, current) {
     return `
         <select data-axis="${name}" style="font-size:12px;">
             <option value="">-</option>
-            ${options.map(o => `<option value="${o}" ${current === o ? 'selected' : ''}>${o}</option>`).join('')}
+            ${options.map(([code, label]) => `<option value="${code}" ${current === code ? 'selected' : ''}>${label}</option>`).join('')}
         </select>
     `;
 }
@@ -357,13 +393,13 @@ function showNewVariantForm(container, cardId) {
     const formWrap = container.querySelector(`#new-variant-form-${cardId}`);
     formWrap.innerHTML = `
         <div class="variant-card">
-            ${axisField('foil_type', 'Foil type', FOIL_TYPES, '')}
-            ${axisField('foil_pattern', 'Foil pattern', FOIL_PATTERNS, '')}
-            ${axisField('texture', 'Texture', TEXTURES, '')}
-            ${axisField('material', 'Material', MATERIALS, '')}
-            ${axisField('size', 'Size', SIZES, '')}
-            ${axisField('stamp_type', 'Stamp', STAMPS, '')}
-            ${axisField('source_type', 'Source', SOURCES, '')}
+            ${axisField('foil_type', 'Foil type', AXIS_OPTIONS.foil_type, '')}
+            ${axisField('foil_pattern', 'Foil pattern', AXIS_OPTIONS.foil_pattern, '')}
+            ${axisField('texture', 'Texture', AXIS_OPTIONS.texture, '')}
+            ${axisField('material', 'Material', AXIS_OPTIONS.material, '')}
+            ${axisField('size', 'Size', AXIS_OPTIONS.size, '')}
+            ${axisField('stamp_type', 'Stamp', AXIS_OPTIONS.stamp_type, '')}
+            ${axisField('source_type', 'Source', AXIS_OPTIONS.source_type, '')}
             <div class="variant-actions">
                 <button class="btn btn-primary" id="create-variant-btn-${cardId}" style="padding:6px 10px;">Create</button>
                 <button class="btn" id="cancel-variant-btn-${cardId}" style="padding:6px 10px;">Cancel</button>
