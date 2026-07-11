@@ -151,6 +151,7 @@
         .badge-matched { background: rgba(62,207,142,0.15); color: var(--success); }
         .badge-ambiguous { background: rgba(245,166,35,0.15); color: var(--warning); }
         .badge-not_found { background: rgba(229,83,75,0.15); color: var(--danger); }
+        .badge-listing_gap { background: rgba(74,140,255,0.15); color: var(--accent); }
 
         .filters-bar {
             display: flex;
@@ -174,7 +175,7 @@
     <div id="app"></div>
 
     <script type="module">
-        import { requireAuth, signOut } from './shared.js';
+        import { requireAuth, signOut, supabase } from './shared.js';
 
         const app = document.getElementById('app');
 
@@ -196,6 +197,7 @@
                         <a href="#inventory" data-page="inventory">Inventory</a>
                         <a href="#purchases" data-page="purchases">Purchases</a>
                         <a href="#sales" data-page="sales">Sales</a>
+                        <a href="#issues" data-page="issues">Issues <span id="issues-badge" class="badge badge-not_found" style="display:none;"></span></a>
                         <a href="#catalog" data-page="catalog">Catalog</a>
                         <a href="#configuration" data-page="configuration">Configuration</a>
                         <a href="#" id="signout-link" style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px;">Sign out</a>
@@ -213,6 +215,47 @@
 
             window.addEventListener('hashchange', loadPage);
             loadPage();
+
+            refreshIssuesBadge();
+            setupIssuesRealtime();
+        }
+
+        // ── Issues badge — unresolved ebay_order_issues count next to Sales ──────
+        // Lives at the shell level (rendered once per sign-in) rather than inside
+        // a page module, so it stays accurate no matter which page is open —
+        // unlike the Inventory realtime subscription, this isn't tied to
+        // navigating to any particular tab.
+
+        let issuesDebounceTimer = null;
+
+        async function refreshIssuesBadge() {
+            const badge = document.getElementById('issues-badge');
+            if (!badge) return;
+
+            const { count, error } = await supabase
+                .from('ebay_order_issues')
+                .select('id', { count: 'exact', head: true })
+                .eq('status', 'open')
+                .neq('reason', 'pre_inventory');
+
+            if (!error && count > 0) {
+                badge.textContent = count;
+                badge.style.display = 'inline-block';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+
+        function setupIssuesRealtime() {
+            supabase
+                .channel('ebay-order-issues-changes')
+                .on('postgres_changes', { event: '*', schema: 'public', table: 'ebay_order_issues' }, () => {
+                    // Debounced so a batch of issues filed in one pull run
+                    // triggers a single re-count, not one query per row.
+                    clearTimeout(issuesDebounceTimer);
+                    issuesDebounceTimer = setTimeout(refreshIssuesBadge, 1000);
+                })
+                .subscribe();
         }
 
         async function loadPage() {
@@ -248,6 +291,11 @@
                     case 'sales': {
                         const { renderSales } = await import(`./sales.js?v=${Date.now()}`);
                         await renderSales(content);
+                        break;
+                    }
+                    case 'issues': {
+                        const { renderIssues } = await import(`./issues.js?v=${Date.now()}`);
+                        await renderIssues(content);
                         break;
                     }
                     case 'catalog': {

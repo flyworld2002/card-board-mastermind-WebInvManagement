@@ -32,6 +32,7 @@ const state = {
         condition: 'all',
         status: 'all',
         source: 'all',
+        includeOOS: false,
     },
     sort: { field: 'card_name', asc: true },
     sets: [],
@@ -54,6 +55,65 @@ export async function renderInventory(container) {
     await loadAxisOptions();  // Inventory only reads AXIS_DISPLAY, no dropdowns needed
     renderFilters(container);
     await loadAndRender(container);
+    setupRealtimeSubscription(container);
+}
+
+// ----------------------------------------------------------------
+// Realtime — auto-refresh when new sales land (e.g. from the scheduled
+// eBay pull running in the background)
+// ----------------------------------------------------------------
+//
+// index.html re-imports this module with a cache-busting `?v=` on every
+// navigation, so each visit gets a fresh module instance — a module-level
+// variable here would "forget" the previous subscription even though it's
+// still alive and listening. Stashing the channel on `window` instead lets
+// us find and tear down the prior one before creating a new one.
+
+function teardownRealtimeSubscription() {
+    if (window.__cbmInventoryChannel) {
+        supabase.removeChannel(window.__cbmInventoryChannel);
+        window.__cbmInventoryChannel = null;
+    }
+    if (window.__cbmInventoryHashHandler) {
+        window.removeEventListener('hashchange', window.__cbmInventoryHashHandler);
+        window.__cbmInventoryHashHandler = null;
+    }
+}
+
+function setupRealtimeSubscription(container) {
+    teardownRealtimeSubscription(); // clear any subscription left from a previous visit
+
+    let debounceTimer = null;
+
+    const channel = supabase
+        .channel('inventory-sales-changes')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'sales' }, () => {
+            // Debounce: a burst of sales (e.g. a scheduled pull recording
+            // several at once) triggers one re-fetch after things settle,
+            // not one per row.
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                const hash = window.location.hash.replace('#', '') || 'dashboard';
+                if (hash === 'inventory' || hash === 'dashboard') {
+                    loadAndRender(container);
+                }
+            }, 2000);
+        })
+        .subscribe();
+
+    window.__cbmInventoryChannel = channel;
+
+    // Stop listening once the person navigates away from Inventory/Dashboard,
+    // so switching pages doesn't leave a stale subscription refetching
+    // against a page that's no longer showing.
+    const hashHandler = () => {
+        const hash = window.location.hash.replace('#', '') || 'dashboard';
+        if (hash !== 'inventory' && hash !== 'dashboard') {
+            teardownRealtimeSubscription();
+        }
+    };
+    window.__cbmInventoryHashHandler = hashHandler;
+    window.addEventListener('hashchange', hashHandler);
 }
 
 // AXIS_DISPLAY / axisDisplay() now come from shared.js (imported above)
@@ -88,7 +148,7 @@ async function loadAndRender(container) {
     let page = 0;
 
     while (true) {
-        let query = supabase.from('v_inventory').select('*');
+        let query = supabase.from(f.includeOOS ? 'v_inventory_all' : 'v_inventory').select('*');
 
         if (f.search.trim())       query = query.ilike('card_name', `%${f.search.trim()}%`);
         if (f.set_name !== 'all')  query = query.eq('set_name', f.set_name);
@@ -262,6 +322,10 @@ function renderFilters(container) {
             <option value="tcgplayer" ${f.source === 'tcgplayer' ? 'selected' : ''}>TCGPlayer</option>
         </select>
         <button id="inv-reset-filters" class="btn">Reset filters</button>
+        <label style="font-size:13px; color:var(--text-secondary); display:flex; align-items:center; gap:6px;">
+            <input type="checkbox" id="inv-include-oos" ${f.includeOOS ? 'checked' : ''} />
+            Show out of stock
+        </label>
         <button id="inv-platform-settings" class="btn" title="Configure platform columns" style="margin-left:4px;">⚙ Platforms</button>
         <select id="inv-page-size" style="margin-left:auto;">
             ${PAGE_SIZES.map(s =>
@@ -292,9 +356,13 @@ function renderFilters(container) {
         await loadAndRender(container);
     });
     bar.querySelector('#inv-reset-filters').addEventListener('click', async () => {
-        state.filters = { search: '', set_name: 'all', condition: 'all', status: 'all', source: 'all' };
+        state.filters = { search: '', set_name: 'all', condition: 'all', status: 'all', source: 'all', includeOOS: false };
         state.page = 0;
         renderFilters(container);
+        await loadAndRender(container);
+    });
+    bar.querySelector('#inv-include-oos').addEventListener('change', async (e) => {
+        state.filters.includeOOS = e.target.checked; state.page = 0;
         await loadAndRender(container);
     });
     bar.querySelector('#inv-page-size').addEventListener('change', (e) => {
@@ -476,6 +544,7 @@ function renderRow(container, row) {
     const tr = document.createElement('tr');
     tr.dataset.variantId = row.variant_id;
     tr.style.cursor = 'pointer';
+    if ((row.total_available ?? row.total_qty ?? 0) === 0) tr.style.opacity = '0.55';
 
     const imgCell = row.image_url
         ? `<img src="${escapeHtml(row.image_url)}" loading="lazy"
@@ -535,8 +604,12 @@ function renderRow(container, row) {
         </td>
         <td style="font-size:12px; color:var(--text-secondary); padding:8px 6px;">${escapeHtml(row.set_name || '—')}</td>
         <td style="text-align:center; padding:8px 6px;">
-            <div style="font-weight:600; font-size:14px;">${row.total_available ?? row.total_qty ?? '—'}</div>
-            ${row.total_sold ? `<div style="font-size:10px; color:var(--text-secondary);">sold: ${row.total_sold}</div>` : ''}
+            <div style="font-weight:600; font-size:14px; ${(row.total_available ?? row.total_qty ?? 0) === 0 ? 'color:var(--text-secondary);' : ''}">
+                ${row.total_available ?? row.total_qty ?? '—'}
+            </div>
+            ${(row.total_available ?? row.total_qty ?? 0) === 0
+                ? `<div style="font-size:10px; color:var(--warning);">sold out</div>`
+                : (row.total_sold ? `<div style="font-size:10px; color:var(--text-secondary);">sold: ${row.total_sold}</div>` : '')}
         </td>
         <td style="padding:8px 6px;">${costCell}</td>
         <td style="padding:8px 6px;">${marketCell}</td>
@@ -883,7 +956,7 @@ function openHistoryModal(container, row) {
     // Re-fetch fresh lot data then render modal
     async function fetchAndRender(existingOverlay) {
         const { data: freshLots } = await supabase
-            .from('v_inventory')
+            .from('v_inventory_all')
             .select('*')
             .eq('variant_id', row.variant_id)
             .order('acquired_at', { ascending: true });

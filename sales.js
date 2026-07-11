@@ -1,20 +1,34 @@
 // sales.js
 // Sales page: record sales (FIFO depletion via the record_sale RPC) and
-// browse sale history with landed-cost profit from v_sales.
+// browse sale history grouped at ORDER level.
 //
-// A single sale event can span multiple inventory lots; those rows share a
-// sale_group_id and are displayed grouped. Deleting a sale deletes the whole
-// group and reverses the quantity_sold depletion (delete_sale_group RPC).
+// Grouping: rows sharing a platform_order_id (per platform/account) are one
+// order; rows without an order id (local/manual sales) fall back to their
+// sale_group_id — displayed as single-event "orders".
+//
+// Fees: order-level facts (final value fee, promo fee, label cost, buyer-paid
+// shipping, refunds) live in sale_orders, populated by a separate fee-sync
+// process. Per-card fee shares are COMPUTED here at display time,
+// proportional to each card's revenue share of the order — never stored.
+//
+// Expansion is two-level: order row -> cards in the order -> (click a card)
+// FIFO lot breakdown for that sale event.
+//
+// Deleting is per sale event (sale_group_id) via the delete_sale_group RPC,
+// same as before — in a multi-card order each card row has its own delete.
 
 import { supabase, debounce, formatPrice, loadAxisOptions, axisDisplay } from './shared.js';
 
 const state = {
     rows: [],            // v_sales rows
+    orderHeaders: {},    // orderKey -> sale_orders row
+    lineFees: {},         // lineFeeKey -> sale_line_item_fees row
     filters: {
         search: '',
         platform: 'all',
     },
-    expandedGroupId: null,
+    expandedOrderKey: null,
+    expandedGroupId: null,   // second-level: which card (sale event) shows lots
 };
 
 export async function renderSales(container) {
@@ -110,23 +124,72 @@ async function loadAndRender(container) {
     const wrap = container.querySelector('#sales-table-wrap');
     wrap.innerHTML = '<p>Loading sales...</p>';
 
-    const { data, error } = await supabase
-        .from('v_sales')
-        .select('*')
-        .order('sold_at', { ascending: false })
-        .order('created_at', { ascending: false })
-        .limit(500);
+    const [salesRes, ordersRes, lineFeesRes] = await Promise.all([
+        supabase
+            .from('v_sales')
+            .select('*')
+            .order('sold_at', { ascending: false })
+            .order('created_at', { ascending: false })
+            .limit(500),
+        supabase
+            .from('sale_orders')
+            .select('*'),
+        supabase
+            .from('sale_line_item_fees')
+            .select('*'),
+    ]);
 
-    if (error) {
-        wrap.innerHTML = `<p style="color:var(--danger)">Failed to load sales: ${escapeHtml(error.message)}</p>`;
+    if (salesRes.error) {
+        wrap.innerHTML = `<p style="color:var(--danger)">Failed to load sales: ${escapeHtml(salesRes.error.message)}</p>`;
         return;
     }
 
-    state.rows = data || [];
+    state.rows = salesRes.data || [];
+
+    state.orderHeaders = {};
+    if (!ordersRes.error) {
+        for (const o of (ordersRes.data || [])) {
+            state.orderHeaders[orderKeyFromHeader(o)] = o;
+        }
+    } else {
+        // Non-fatal: page still works, fees just show as not synced.
+        console.error('Failed to load sale_orders:', ordersRes.error);
+    }
+
+    state.lineFees = {};
+    if (!lineFeesRes.error) {
+        for (const lf of (lineFeesRes.data || [])) {
+            state.lineFees[lineFeeKey(lf.platform, lf.account, lf.order_line_item_id)] = lf;
+        }
+    } else {
+        // Non-fatal: page still works, per-card fee shares just fall back to
+        // the order-level proportional split.
+        console.error('Failed to load sale_line_item_fees:', lineFeesRes.error);
+    }
+
     renderTable(container);
 }
 
-function visibleGroups() {
+function orderKeyFromHeader(o) {
+    return `${o.platform}|${o.account || ''}|${o.platform_order_id}`;
+}
+
+function lineFeeKey(platform, account, orderLineItemId) {
+    return `${platform}|${account || ''}|${orderLineItemId}`;
+}
+
+function orderKeyFromSale(r) {
+    if (r.platform_order_id) {
+        return `${r.platform}|${r.account || ''}|${r.platform_order_id}`;
+    }
+    return `group:${r.sale_group_id}`;
+}
+
+// ----------------------------------------------------------------
+// Grouping: v_sales rows -> sale events (sale_group_id) -> orders
+// ----------------------------------------------------------------
+
+function visibleOrders() {
     const f = state.filters;
     let rows = state.rows;
 
@@ -140,24 +203,98 @@ function visibleGroups() {
             (r.notes || '').toLowerCase().includes(q));
     }
 
-    // Group rows by sale_group_id, preserving order (rows already sorted desc)
-    const groups = [];
-    const byId = {};
+    // Pass 1: group v_sales rows into sale events by sale_group_id
+    const events = [];
+    const eventById = {};
     for (const r of rows) {
-        if (!byId[r.sale_group_id]) {
-            byId[r.sale_group_id] = { id: r.sale_group_id, rows: [] };
-            groups.push(byId[r.sale_group_id]);
+        if (!eventById[r.sale_group_id]) {
+            eventById[r.sale_group_id] = { id: r.sale_group_id, rows: [] };
+            events.push(eventById[r.sale_group_id]);
         }
-        byId[r.sale_group_id].rows.push(r);
+        eventById[r.sale_group_id].rows.push(r);
     }
-    for (const g of groups) {
-        g.qty     = g.rows.reduce((a, r) => a + (r.quantity_sold || 0), 0);
-        g.revenue = g.rows.reduce((a, r) => a + (r.sale_price || 0) * (r.quantity_sold || 0), 0);
-        g.profit  = g.rows.reduce((a, r) => a + (r.profit ?? 0), 0);
-        g.hasNullCost = g.rows.some(r => r.landed_cost_per_unit === null);
-        g.first   = g.rows[0];
+    for (const ev of events) {
+        ev.qty         = ev.rows.reduce((a, r) => a + (r.quantity_sold || 0), 0);
+        ev.revenue     = ev.rows.reduce((a, r) => a + (r.sale_price || 0) * (r.quantity_sold || 0), 0);
+        ev.grossProfit = ev.rows.reduce((a, r) => a + (r.profit ?? 0), 0);
+        ev.landedCost  = ev.revenue - ev.grossProfit;
+        ev.hasNullCost = ev.rows.some(r => r.landed_cost_per_unit === null);
+        ev.first       = ev.rows[0];
+
+        // Real per-card fee data, looked up by order_line_item_id. A sale
+        // event's rows (FIFO lots from one sale) normally share a single
+        // eBay line item id, but sum across distinct ids defensively in
+        // case a sale ever spans more than one.
+        const lineIds = [...new Set(ev.rows.map(r => r.order_line_item_id).filter(Boolean))];
+        ev.lineFVF = 0; ev.lineDiscount = 0; ev.lineRefund = 0; ev.hasLineFeeData = false;
+        for (const lid of lineIds) {
+            const key = lineFeeKey(ev.first.platform, ev.first.account, lid);
+            const lf = state.lineFees[key];
+            if (lf) {
+                ev.hasLineFeeData = true;
+                ev.lineFVF      += lf.final_value_fee || 0;
+                ev.lineDiscount += lf.discount_amount || 0;
+                ev.lineRefund   += lf.refund_amount || 0;
+            }
+        }
     }
-    return groups;
+
+    // Pass 2: group sale events into orders
+    const orders = [];
+    const orderByKey = {};
+    for (const ev of events) {
+        const key = orderKeyFromSale(ev.first);
+        if (!orderByKey[key]) {
+            orderByKey[key] = { key, events: [] };
+            orders.push(orderByKey[key]);
+        }
+        orderByKey[key].events.push(ev);
+    }
+
+    for (const o of orders) {
+        const first = o.events[0].first;
+        o.first       = first;
+        o.header      = state.orderHeaders[o.key] || null;
+        o.qty         = o.events.reduce((a, ev) => a + ev.qty, 0);
+        o.itemRevenue = o.events.reduce((a, ev) => a + ev.revenue, 0);
+        o.grossProfit = o.events.reduce((a, ev) => a + ev.grossProfit, 0);
+        o.hasNullCost = o.events.some(ev => ev.hasNullCost);
+
+        const h = o.header;
+
+        // Real, per-card totals (sum of what eBay actually reported per line)
+        o.lineFVFTotal      = o.events.reduce((a, ev) => a + ev.lineFVF, 0);
+        o.lineDiscountTotal = o.events.reduce((a, ev) => a + ev.lineDiscount, 0);  // informational only —
+                                                                                    // already reflected in sale_price
+        o.lineRefundTotal   = o.events.reduce((a, ev) => a + ev.lineRefund, 0);
+
+        // Order-level facts (no per-line breakdown exists for these)
+        o.shipping           = h?.shipping_charged ?? 0;
+        o.labelCost          = h?.label_cost ?? 0;
+        o.returnLabelCost    = h?.return_label_cost ?? 0;
+        o.promoFee           = h?.promo_fee ?? 0;
+        o.fvfFixed           = h?.final_value_fee_fixed ?? 0;
+        o.salesTax           = h?.sales_tax ?? 0;         // pass-through, never subtracted from earnings
+        o.promoDiscount      = h?.promo_discount ?? 0;    // informational — already reflected in sale_price
+        o.orderCatchAllRefund = h?.refund_amount ?? 0;     // rare: refund with no per-line breakdown
+
+        // Costs that need spreading across cards for display, proportional
+        // to each card's revenue share of the order (matches how eBay itself
+        // spread a shipping-related refund across line items — see project notes).
+        o.spreadPool = o.labelCost + o.promoFee + o.fvfFixed;
+
+        o.fees   = o.lineFVFTotal + o.spreadPool;
+        o.refund = o.lineRefundTotal + o.returnLabelCost + o.orderCatchAllRefund;
+        o.revenue = o.itemRevenue + o.shipping;
+        o.net     = o.grossProfit + o.shipping - o.fees - o.refund;
+
+        // "Fees pending" = platform order exists but no synced header yet.
+        // Local/manual sales (no platform_order_id) never expect fees.
+        o.isPlatformOrder = !!first.platform_order_id;
+        o.feesPending = o.isPlatformOrder && !(h?.fees_synced_at);
+    }
+
+    return orders;
 }
 
 // ----------------------------------------------------------------
@@ -198,7 +335,7 @@ function renderFilters(container) {
 }
 
 // ----------------------------------------------------------------
-// Record sale panel
+// Record sale panel (unchanged behavior)
 // ----------------------------------------------------------------
 
 function wireNewSalePanel(container) {
@@ -337,19 +474,24 @@ function wireNewSalePanel(container) {
 }
 
 // ----------------------------------------------------------------
-// Table (grouped by sale event)
+// Table (grouped by order)
 // ----------------------------------------------------------------
 
 function renderTable(container) {
     const wrap = container.querySelector('#sales-table-wrap');
-    const groups = visibleGroups();
+    const orders = visibleOrders();
 
-    const totalRevenue = groups.reduce((a, g) => a + g.revenue, 0);
-    const totalProfit  = groups.reduce((a, g) => a + g.profit, 0);
+    const totalRevenue = orders.reduce((a, o) => a + o.revenue, 0);
+    const totalFees    = orders.reduce((a, o) => a + o.fees + o.refund, 0);
+    const totalNet     = orders.reduce((a, o) => a + o.net, 0);
+    const anyPending   = orders.some(o => o.feesPending);
     container.querySelector('#sales-summary').textContent =
-        `${groups.length} sale${groups.length === 1 ? '' : 's'} · revenue ${formatPrice(totalRevenue)} · profit ${formatPrice(totalProfit)}`;
+        `${orders.length} order${orders.length === 1 ? '' : 's'}`
+        + ` · revenue ${formatPrice(totalRevenue)}`
+        + ` · fees ${formatPrice(totalFees)}`
+        + ` · net profit ${formatPrice(totalNet)}${anyPending ? '*' : ''}`;
 
-    if (groups.length === 0) {
+    if (orders.length === 0) {
         wrap.innerHTML = `<p style="color:var(--text-secondary)">No sales found.</p>`;
         return;
     }
@@ -357,22 +499,32 @@ function renderTable(container) {
     wrap.innerHTML = `
         <table>
             <thead><tr>
-                <th>Date</th><th>Card</th><th>Condition</th><th>Platform</th>
+                <th>Date</th><th>Order</th><th>Platform</th><th>Items</th>
                 <th style="text-align:right;">Qty</th>
-                <th style="text-align:right;">Price/ea</th>
                 <th style="text-align:right;">Revenue</th>
-                <th style="text-align:right;">Profit</th>
-                <th></th>
+                <th style="text-align:right;">Fees</th>
+                <th style="text-align:right;">Net</th>
             </tr></thead>
             <tbody>
-                ${groups.map(g => groupRowHtml(g)).join('')}
+                ${orders.map(o => orderRowHtml(o)).join('')}
             </tbody>
         </table>
+        ${anyPending ? `<p style="font-size:12px; color:var(--text-secondary); margin-top:8px;">* fees not yet synced — net shown is gross and will decrease once fees arrive.</p>` : ''}
     `;
 
-    wrap.querySelectorAll('tr[data-group-id]').forEach(tr => {
+    wrap.querySelectorAll('tr[data-order-key]').forEach(tr => {
         tr.addEventListener('click', () => {
-            const id = tr.dataset.groupId;
+            const key = tr.dataset.orderKey;
+            state.expandedOrderKey = state.expandedOrderKey === key ? null : key;
+            state.expandedGroupId = null;
+            renderTable(container);
+        });
+    });
+
+    wrap.querySelectorAll('tr[data-event-id]').forEach(tr => {
+        tr.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const id = tr.dataset.eventId;
             state.expandedGroupId = state.expandedGroupId === id ? null : id;
             renderTable(container);
         });
@@ -382,9 +534,15 @@ function renderTable(container) {
         btn.addEventListener('click', async (e) => {
             e.stopPropagation();
             const id = btn.dataset.deleteGroup;
-            const g  = groups.find(x => x.id === id);
+            const orders2 = visibleOrders();
+            let ev = null;
+            for (const o of orders2) {
+                ev = o.events.find(x => x.id === id);
+                if (ev) break;
+            }
+            if (!ev) return;
             if (!confirm(
-                `Delete this sale (${g.first.card_name}, qty ${g.qty}, ${formatPrice(g.revenue)})?\n` +
+                `Delete this sale (${ev.first.card_name}, qty ${ev.qty}, ${formatPrice(ev.revenue)})?\n` +
                 `This restores the sold quantity back to inventory.`)) return;
 
             const { error } = await supabase.rpc('delete_sale_group', { p_sale_group_id: id });
@@ -396,58 +554,200 @@ function renderTable(container) {
             await loadAndRender(container);
         });
     });
+
+    wrap.querySelectorAll('button[data-edit-field]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            startEditOrderField(container, btn.dataset.orderKey, btn.dataset.editField);
+        });
+    });
 }
 
-function groupRowHtml(g) {
-    const r = g.first;
+// Order-level fields that can be manually overridden — all cases where
+// eBay's API may never report a value (label bought off-eBay, a return
+// label the Finances feed didn't post, or a refund that doesn't map to
+// any specific card).
+const EDITABLE_ORDER_FIELDS = {
+    label_cost:        { label: 'Label',          getValue: o => o.labelCost },
+    return_label_cost: { label: 'Return label',   getValue: o => o.returnLabelCost },
+    refund_amount:     { label: 'Manual refund',  getValue: o => o.orderCatchAllRefund },
+};
+
+// Inline edit for an order-level fee/refund field — manual override for
+// cases where eBay's Finances API never reports a value, or for orders
+// with no real eBay order id at all (manually-entered "orders").
+function startEditOrderField(container, orderKey, field) {
+    const cfg = EDITABLE_ORDER_FIELDS[field];
+    const header = state.orderHeaders[orderKey] || null;
+
+    const span = container.querySelector(
+        `span[data-field-display="${field}"][data-order-key-display="${CSS.escape(orderKey)}"]`
+    );
+    if (!span) return;
+
+    const currentValue = header?.[field] ?? 0;
+    span.innerHTML = `
+        ${cfg.label}:
+        <input type="number" step="0.01" min="0" value="${currentValue.toFixed(2)}"
+               style="width:70px; margin:0 4px;" class="edit-field-input" />
+        <button class="btn btn-primary edit-field-save" style="padding:1px 8px; font-size:10px;">Save</button>
+        <button class="btn edit-field-cancel" style="padding:1px 8px; font-size:10px;">Cancel</button>
+    `;
+
+    span.querySelector('.edit-field-cancel').addEventListener('click', (e) => {
+        e.stopPropagation();
+        loadAndRender(container);  // simplest way to restore the original display
+    });
+
+    span.querySelector('.edit-field-save').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const input = span.querySelector('.edit-field-input');
+        const newValue = parseFloat(input.value);
+        if (isNaN(newValue) || newValue < 0) {
+            alert('Enter a valid, non-negative amount.');
+            return;
+        }
+
+        let error;
+        if (header) {
+            ({ error } = await supabase
+                .from('sale_orders')
+                .update({ [field]: newValue })
+                .eq('id', header.id));
+        } else {
+            // No header yet — likely a manually-entered sale (e.g. a local/test
+            // order number) that --ebay-syncfees can never create a row for,
+            // since it's not a real eBay order ID. Create a minimal header
+            // just to hold this manual value.
+            const [platform, account, platformOrderId] = orderKey.split('|');
+            ({ error } = await supabase
+                .from('sale_orders')
+                .insert({
+                    platform,
+                    account: account || null,
+                    platform_order_id: platformOrderId,
+                    [field]: newValue,
+                }));
+        }
+
+        if (error) {
+            alert('Failed to save: ' + error.message);
+            return;
+        }
+        await loadAndRender(container);
+    });
+}
+
+function orderRowHtml(o) {
+    const r = o.first;
     const dateStr = r.sold_at ? new Date(r.sold_at).toLocaleDateString() : '—';
-    const expanded = state.expandedGroupId === g.id;
-    const profitColor = g.profit > 0 ? 'var(--success)' : (g.profit < 0 ? 'var(--danger)' : 'var(--text-secondary)');
+    const expanded = state.expandedOrderKey === o.key;
+    const netColor = o.net > 0 ? 'var(--success)' : (o.net < 0 ? 'var(--danger)' : 'var(--text-secondary)');
+
+    const itemsLabel = o.events.length === 1
+        ? `<div style="font-weight:500;">${escapeHtml(r.card_name || '')}</div>
+           <div style="font-size:11px; color:var(--text-secondary);">
+               ${escapeHtml(r.set_name || '')} #${escapeHtml(r.card_number || '—')} · ${escapeHtml(variantLabel(r))}
+           </div>`
+        : `<div style="font-weight:500;">${o.events.length} cards</div>
+           <div style="font-size:11px; color:var(--text-secondary);">
+               ${escapeHtml(o.events.map(ev => ev.first.card_name).filter(Boolean).slice(0, 3).join(', '))}${o.events.length > 3 ? '…' : ''}
+           </div>`;
+
+    const feesCell = o.feesPending
+        ? `<span style="color:var(--text-secondary);" title="Fees not synced yet">—</span>`
+        : (o.isPlatformOrder || o.fees > 0 ? formatPrice(o.fees + o.refund) : `<span style="color:var(--text-secondary);">—</span>`);
 
     let html = `
-        <tr data-group-id="${g.id}" style="cursor:pointer;">
+        <tr data-order-key="${escapeHtml(o.key)}" style="cursor:pointer;">
             <td>${dateStr}</td>
-            <td>
-                <div style="font-weight:500;">${escapeHtml(r.card_name || '')}</div>
-                <div style="font-size:11px; color:var(--text-secondary);">
-                    ${escapeHtml(r.set_name || '')} #${escapeHtml(r.card_number || '—')} · ${escapeHtml(variantLabel(r))}
-                    ${g.rows.length > 1 ? ` · <span style="color:var(--accent);">${g.rows.length} lots</span>` : ''}
-                </div>
-            </td>
-            <td style="font-size:12px;">${escapeHtml(r.condition || '—')}</td>
+            <td style="font-family:monospace; font-size:11px;">${r.platform_order_id ? escapeHtml(r.platform_order_id) : '<span style="color:var(--text-secondary); font-family:inherit;">—</span>'}</td>
             <td style="font-size:12px;">${escapeHtml(r.platform || '—')}${r.account ? ` <span style="color:var(--text-secondary); font-size:11px;">(${escapeHtml(r.account)})</span>` : ''}</td>
-            <td style="text-align:right;">${g.qty}</td>
-            <td style="text-align:right;">${formatPrice(r.sale_price)}</td>
-            <td style="text-align:right;">${formatPrice(g.revenue)}</td>
-            <td style="text-align:right; color:${profitColor}; font-weight:500;"
-                ${g.hasNullCost ? 'title="Some lots have no landed cost — profit may be incomplete"' : ''}>
-                ${formatPrice(g.profit)}${g.hasNullCost ? ' <span style="color:var(--warning);">⚠</span>' : ''}
-            </td>
-            <td style="text-align:right;">
-                <button class="btn" data-delete-group="${g.id}"
-                        style="padding:2px 8px; font-size:12px;" title="Delete sale (restores stock)">🗑</button>
+            <td>${itemsLabel}</td>
+            <td style="text-align:right;">${o.qty}</td>
+            <td style="text-align:right;">${formatPrice(o.revenue)}</td>
+            <td style="text-align:right;">${feesCell}</td>
+            <td style="text-align:right; color:${netColor}; font-weight:500;"
+                ${o.hasNullCost ? 'title="Some lots have no landed cost — profit may be incomplete"' : ''}>
+                ${formatPrice(o.net)}${o.feesPending ? '*' : ''}${o.hasNullCost ? ' <span style="color:var(--warning);">⚠</span>' : ''}
             </td>
         </tr>
     `;
 
     if (expanded) {
-        html += `
-            <tr><td colspan="9" style="padding:0; background:var(--bg-secondary);">
-                <div style="padding:12px 16px;">
-                    <div style="font-size:12px; font-weight:600; color:var(--text-secondary);
-                                text-transform:uppercase; letter-spacing:0.04em; margin-bottom:8px;">
+        html += expandedOrderHtml(o);
+    }
+
+    return html;
+}
+
+function expandedOrderHtml(o) {
+    const h = o.header;
+
+    const eventRows = o.events.map(ev => {
+        const revenueShare = o.itemRevenue > 0 ? (ev.revenue / o.itemRevenue) : (1 / o.events.length);
+
+        // Real per-card FVF (from sale_line_item_fees) + this card's share of
+        // order-level label/promo/FVF-fixed, spread proportional to revenue.
+        const feeShare = ev.lineFVF + (o.spreadPool * revenueShare);
+
+        // Real per-card refund (from sale_line_item_fees) + this card's share
+        // of the return label cost — spread by refund share when any line in
+        // the order has a refund (a return label only pertains to returned
+        // cards), falling back to revenue share otherwise.
+        const refundBasis = o.lineRefundTotal > 0 ? (ev.lineRefund / o.lineRefundTotal) : revenueShare;
+        const refundShare = ev.lineRefund
+            + (o.returnLabelCost * refundBasis)
+            + (o.orderCatchAllRefund * revenueShare);
+
+        const shippingShare = o.shipping * revenueShare;
+        const evNet = ev.grossProfit + shippingShare - feeShare - refundShare;
+        const r = ev.first;
+        const lotsExpanded = state.expandedGroupId === ev.id;
+
+        let rowHtml = `
+            <tr data-event-id="${ev.id}" style="cursor:pointer;">
+                <td>
+                    <div>${escapeHtml(r.card_name || '')}</div>
+                    <div style="font-size:11px; color:var(--text-secondary);">
+                        ${escapeHtml(r.set_name || '')} #${escapeHtml(r.card_number || '—')} · ${escapeHtml(variantLabel(r))}
+                        ${ev.rows.length > 1 ? ` · <span style="color:var(--accent);">${ev.rows.length} lots</span>` : ''}
+                        ${ev.lineDiscount > 0 ? ` · <span style="color:var(--text-secondary);">discount ${formatPrice(ev.lineDiscount)}</span>` : ''}
+                    </div>
+                </td>
+                <td style="font-size:12px;">${escapeHtml(r.condition || '—')}</td>
+                <td style="text-align:right;">${ev.qty}</td>
+                <td style="text-align:right;">${formatPrice(r.sale_price)}</td>
+                <td style="text-align:right;">${ev.hasNullCost ? '—' : formatPrice(ev.landedCost)}</td>
+                <td style="text-align:right;">
+                    ${o.feesPending ? '<span style="color:var(--text-secondary);">—</span>' : formatPrice(feeShare)}
+                    ${refundShare > 0 ? `<div style="font-size:10px; color:var(--danger);">refund ${formatPrice(refundShare)}</div>` : ''}
+                </td>
+                <td style="text-align:right;">${formatPrice(evNet)}${o.feesPending ? '*' : ''}</td>
+                <td style="text-align:right;">
+                    <button class="btn" data-delete-group="${ev.id}"
+                            style="padding:2px 8px; font-size:12px;" title="Delete sale (restores stock)">🗑</button>
+                </td>
+            </tr>
+        `;
+
+        if (lotsExpanded) {
+            rowHtml += `
+                <tr><td colspan="8" style="padding:6px 12px 10px; background:var(--bg-tertiary);">
+                    <div style="font-size:11px; font-weight:600; color:var(--text-secondary);
+                                text-transform:uppercase; letter-spacing:0.04em; margin-bottom:6px;">
                         Lot breakdown (FIFO)
                     </div>
-                    <table>
+                    <table style="font-size:12px;">
                         <thead><tr>
                             <th>Lot</th>
                             <th style="text-align:right;">Qty</th>
                             <th style="text-align:right;">Landed/ea</th>
                             <th style="text-align:right;">Price/ea</th>
-                            <th style="text-align:right;">Profit</th>
+                            <th style="text-align:right;">Gross profit</th>
                         </tr></thead>
                         <tbody>
-                            ${g.rows.map(row => `
+                            ${ev.rows.map(row => `
                                 <tr>
                                     <td style="font-family:monospace; font-size:11px;">${escapeHtml(row.inventory_id)}</td>
                                     <td style="text-align:right;">${row.quantity_sold}</td>
@@ -458,14 +758,70 @@ function groupRowHtml(g) {
                             `).join('')}
                         </tbody>
                     </table>
-                    ${r.platform_order_id ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:8px;">Order #: ${escapeHtml(r.platform_order_id)}</div>` : ''}
-                    ${r.notes ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">Notes: ${escapeHtml(r.notes)}</div>` : ''}
-                </div>
-            </td></tr>
-        `;
+                </td></tr>
+            `;
+        }
+
+        return rowHtml;
+    }).join('');
+
+    const factItems = [];
+    factItems.push(`Shipping charged: ${h ? formatPrice(o.shipping) : '—'}`);
+    factItems.push(`FVF: ${o.feesPending ? '—' : formatPrice(o.lineFVFTotal + o.fvfFixed)}`);
+    factItems.push(`Promo (ads): ${o.feesPending ? '—' : formatPrice(o.promoFee)}`);
+    factItems.push(`Seller discount: ${o.promoDiscount !== 0 ? formatPrice(o.promoDiscount) : '—'} (already reflected in price)`);
+    factItems.push(`Sales tax: ${o.salesTax > 0 ? formatPrice(o.salesTax) : '—'} (collected & remitted by eBay, not a cost to you)`);
+    factItems.push(`Total refund (all sources): ${o.refund > 0 ? formatPrice(o.refund) : '—'}`);
+    if (h?.fees_synced_at) {
+        factItems.push(`Synced ${new Date(h.fees_synced_at).toLocaleString()}`);
+    } else if (o.isPlatformOrder) {
+        factItems.push(`Not synced yet`);
     }
 
-    return html;
+    // Editable order-level fields — eBay's Finances API may never report
+    // these (label bought off-eBay, a return label the feed didn't post,
+    // or a refund that doesn't map to any specific card). Always shown
+    // (not just when nonzero) so a manual value can be entered from scratch.
+    const editableFieldsHtml = o.isPlatformOrder
+        ? Object.keys(EDITABLE_ORDER_FIELDS).map(field => {
+            const cfg = EDITABLE_ORDER_FIELDS[field];
+            const val = cfg.getValue(o);
+            return `
+                <span data-field-display="${field}" data-order-key-display="${escapeHtml(o.key)}">
+                    ${cfg.label}: ${formatPrice(val)}
+                    <button class="btn" data-edit-field="${field}" data-order-key="${escapeHtml(o.key)}"
+                            style="padding:1px 6px; font-size:10px; margin-left:4px;"
+                            title="Manually set ${cfg.label.toLowerCase()}">✏️</button>
+                </span>
+            `;
+        }).join('')
+        : '';
+
+    const r = o.first;
+    return `
+        <tr><td colspan="8" style="padding:0; background:var(--bg-secondary);">
+            <div style="padding:12px 16px;">
+                <table>
+                    <thead><tr>
+                        <th>Card</th>
+                        <th>Condition</th>
+                        <th style="text-align:right;">Qty</th>
+                        <th style="text-align:right;">Price/ea</th>
+                        <th style="text-align:right;">Landed</th>
+                        <th style="text-align:right;">Fee share</th>
+                        <th style="text-align:right;">Net</th>
+                        <th></th>
+                    </tr></thead>
+                    <tbody>${eventRows}</tbody>
+                </table>
+                <div style="display:flex; gap:20px; flex-wrap:wrap; align-items:center; font-size:12px; color:var(--text-secondary); margin-top:10px;">
+                    ${editableFieldsHtml}
+                    ${factItems.map(escapeHtml).map(s => `<span>${s}</span>`).join('')}
+                </div>
+                ${r.notes ? `<div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">Notes: ${escapeHtml(r.notes)}</div>` : ''}
+            </div>
+        </td></tr>
+    `;
 }
 
 // ----------------------------------------------------------------
