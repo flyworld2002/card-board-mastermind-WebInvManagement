@@ -198,6 +198,7 @@
                         <a href="#purchases" data-page="purchases">Purchases</a>
                         <a href="#sales" data-page="sales">Sales</a>
                         <a href="#issues" data-page="issues">Issues <span id="issues-badge" class="badge badge-not_found" style="display:none;"></span></a>
+                        <a href="#picking" data-page="picking">Picking</a>
                         <a href="#catalog" data-page="catalog">Catalog</a>
                         <a href="#configuration" data-page="configuration">Configuration</a>
                         <a href="#" id="signout-link" style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px;">Sign out</a>
@@ -296,6 +297,11 @@
                     case 'issues': {
                         const { renderIssues } = await import(`./issues.js?v=${Date.now()}`);
                         await renderIssues(content);
+                        break;
+                    }
+                    case 'picking': {
+                        const { renderPicking } = await import(`./picking.js?v=${Date.now()}`);
+                        await renderPicking(content);
                         break;
                     }
                     case 'catalog': {
