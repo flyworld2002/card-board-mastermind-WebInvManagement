@@ -27,8 +27,8 @@ import { supabase } from './shared.js';
 
 // ── Config — EDIT THESE TWO for your LAN ─────────────────────────────────────
 // Desktop's reserved LAN IP + the port picking_api.py listens on.
-// const PICKING_API_URL = 'http://192.168.1.100:8765';
-const PICKING_API_URL = 'http://localhost:8765'
+const PICKING_API_URL = 'http://192.168.1.186:8765';
+// const PICKING_API_URL = 'http://localhost:8765'
 // Must equal PICKING_API_TOKEN in the desktop's .env.
 const PICKING_API_TOKEN = 'I1knbOJAve_UZJQHAFZANds9-HalgCxcRJw1GXDg404';
 // ─────────────────────────────────────────────────────────────────────────────
@@ -84,7 +84,54 @@ export async function renderPicking(container) {
     container.querySelector('#picking-refresh-btn')
         .addEventListener('click', () => refreshFromEbay(container));
 
+    setupImagePreview(container);
     await loadSnapshot(container);
+}
+
+// Hover-to-zoom preview: one shared floating element, reused across renders
+// (cached on window since index.html re-imports this module with a fresh
+// ?v= on every navigation — same class of fix as the inventory realtime
+// channel). Delegated on `container` itself, which persists across re-
+// renders (only #picking-content's innerHTML is replaced), so this only
+// needs to be wired once per tab mount, not once per render().
+function setupImagePreview(container) {
+    let preview = window.__cbmPickingPreview;
+    if (!preview) {
+        preview = document.createElement('div');
+        preview.id = 'cbm-picking-img-preview';
+        preview.style.cssText = `
+            position:fixed; pointer-events:none; z-index:9999; display:none;
+            border:1px solid var(--border); border-radius:6px; overflow:hidden;
+            box-shadow:0 8px 28px rgba(0,0,0,0.5); background:var(--bg-secondary);
+        `;
+        const img = document.createElement('img');
+        img.style.cssText = 'display:block; max-width:280px; max-height:390px;';
+        preview.appendChild(img);
+        document.body.appendChild(preview);
+        window.__cbmPickingPreview = preview;
+    }
+
+    container.addEventListener('mouseover', (e) => {
+        const t = e.target.closest('img.card-thumb');
+        if (!t || !t.src) return;
+        preview.firstChild.src = t.src;
+        preview.style.display = 'block';
+    });
+
+    container.addEventListener('mousemove', (e) => {
+        if (preview.style.display !== 'block') return;
+        const pad = 16;
+        let x = e.clientX + pad;
+        let y = e.clientY + pad;
+        if (x + 300 > window.innerWidth) x = e.clientX - 300 - pad;
+        if (y + 400 > window.innerHeight) y = Math.max(8, window.innerHeight - 400);
+        preview.style.left = `${x}px`;
+        preview.style.top = `${y}px`;
+    });
+
+    container.addEventListener('mouseout', (e) => {
+        if (e.target.closest('img.card-thumb')) preview.style.display = 'none';
+    });
 }
 
 // ----------------------------------------------------------------
@@ -320,6 +367,7 @@ function buildPickList() {
                 matched: r.matched,
                 cardNumber: r.card_number,
                 cardName: r.card_name,
+                imageUrl: r.image_url,
                 setName: r.set_name,
                 variantLabel: r.variant_label,
                 rawVariation: r.raw_variation_name,
@@ -476,6 +524,7 @@ function listingGroupHtml(L, s) {
             <tr style="background:rgba(245,166,35,0.07);">
                 <td>${c.isNew && !checked ? newTag() : ''}</td>
                 <td><input type="checkbox" data-pick-key="${escapeHtml(c.key)}" ${checked ? 'checked' : ''}></td>
+                <td>${imgPlaceholder()}</td>
                 <td style="color:var(--warning);">—</td>
                 <td style="color:var(--warning);">⚠ Unmatched: ${escapeHtml(c.rawVariation || '')}</td>
                 <td></td>
@@ -487,6 +536,7 @@ function listingGroupHtml(L, s) {
         <tr>
             <td>${c.isNew && !checked ? newTag() : ''}</td>
             <td><input type="checkbox" data-pick-key="${escapeHtml(c.key)}" ${checked ? 'checked' : ''}></td>
+            <td>${imgHtml(c.imageUrl)}</td>
             <td style="color:var(--text-secondary); font-variant-numeric:tabular-nums;">${escapeHtml(c.cardNumber || '—')}</td>
             <td style="${checked ? 'text-decoration:line-through; color:var(--text-secondary);' : ''}">
                 ${escapeHtml(c.cardName || '')}
@@ -508,6 +558,7 @@ function listingGroupHtml(L, s) {
         <table style="table-layout:fixed;">
             <thead><tr>
                 <th style="width:44px;"></th><th style="width:30px;"></th>
+                <th style="width:36px;"></th>
                 <th style="width:56px;">#</th><th>Card</th><th style="width:220px;">Set</th>
                 <th style="width:52px; text-align:center;">Qty</th><th style="width:190px;">Ship to</th>
             </tr></thead>
@@ -577,6 +628,18 @@ function shipmentHtml(sh, s) {
 // ----------------------------------------------------------------
 // Utils
 // ----------------------------------------------------------------
+
+function imgHtml(url) {
+    if (!url) return imgPlaceholder();
+    return `<img src="${escapeHtml(url)}" alt="" loading="lazy" class="card-thumb"
+                style="width:28px; height:39px; object-fit:cover; border-radius:3px; border:1px solid var(--border); cursor:zoom-in;"
+                onerror="this.replaceWith(Object.assign(document.createElement('div'),
+                    {style:'width:28px;height:39px;background:var(--bg-tertiary);border-radius:3px;border:1px solid var(--border);'}))">`;
+}
+
+function imgPlaceholder() {
+    return `<div style="width:28px; height:39px; background:var(--bg-tertiary); border-radius:3px; border:1px solid var(--border);"></div>`;
+}
 
 function newTag() {
     return `<span style="display:inline-block; background:rgba(62,207,142,0.15); color:var(--success);

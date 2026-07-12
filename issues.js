@@ -10,12 +10,17 @@ import { supabase } from './shared.js';
 let currentFilter = 'open';
 let showPreInventory = false;
 let contentEl = null;
+let issuesById = new Map();     // id -> full issue row, refreshed each load
+let refundByLineId = new Map(); // order_line_item_id -> synced refund_amount (cancelled_after_recording rows only)
+let imageByKey = new Map();     // "item_id|variation_name" -> image_url
 
 const REASON_LABELS = {
     unmatched: 'unmatched',
     insufficient_stock: 'insufficient stock',
     listing_gap: 'listing gap',
     pre_inventory: 'pre inventory',
+    cancelled: 'cancelled (no sale)',
+    cancelled_after_recording: 'cancelled — reverse?',
 };
 
 const REASON_BADGE_CLASS = {
@@ -23,6 +28,8 @@ const REASON_BADGE_CLASS = {
     insufficient_stock: 'badge-ambiguous',
     listing_gap: 'badge-listing_gap',
     pre_inventory: 'badge-matched',
+    cancelled: 'badge-matched',
+    cancelled_after_recording: 'badge-not_found',
 };
 
 export async function renderIssues(content) {
@@ -96,14 +103,43 @@ async function loadIssues() {
 
     if (!data || data.length === 0) {
         wrap.innerHTML = '<p style="color:var(--text-secondary)">No issues here.</p>';
+        issuesById.clear();
         return;
     }
+
+    issuesById = new Map(data.map(r => [r.id, r]));
+
+    // Refund cross-reference: only relevant for cancelled_after_recording rows,
+    // and only informational — it's context for the reversal decision, not a
+    // precondition (a cancelled-before-shipping order never generated a real
+    // payout to refund in the first place, so absence of synced data here
+    // doesn't mean anything's wrong).
+    const cancelledLineIds = data
+        .filter(r => r.reason === 'cancelled_after_recording')
+        .map(r => r.order_line_item_id)
+        .filter(Boolean);
+
+    refundByLineId = new Map();
+    if (cancelledLineIds.length) {
+        const { data: fees, error: feesErr } = await supabase
+            .from('sale_line_item_fees')
+            .select('order_line_item_id, refund_amount')
+            .in('order_line_item_id', cancelledLineIds);
+        if (!feesErr && fees) {
+            fees.forEach(f => {
+                if (f.refund_amount != null) refundByLineId.set(f.order_line_item_id, f.refund_amount);
+            });
+        }
+    }
+
+    imageByKey = await fetchCardImages(data);
 
     const rows = data.map(rowHtml).join('');
     wrap.innerHTML = `
         <table>
             <thead>
                 <tr>
+                    <th style="width:48px;"></th>
                     <th style="width:130px;">Reason</th>
                     <th>Listing / card</th>
                     <th style="width:130px;">Order</th>
@@ -122,6 +158,42 @@ async function loadIssues() {
     });
 }
 
+async function fetchCardImages(rows) {
+    // Two-hop client-side join, same shape as the backend's matching logic:
+    // (item_id, variation_name) -> ebay_listing_map -> variant_id -> image_url.
+    // Rows that never matched a variant (e.g. 'unmatched' issues) simply
+    // won't resolve here — the row render falls back to a placeholder.
+    const itemIds = [...new Set(rows.map(r => r.item_id).filter(Boolean))];
+    if (!itemIds.length) return new Map();
+
+    const { data: mapRows, error: mapErr } = await supabase
+        .from('ebay_listing_map')
+        .select('item_id, variation_name, variant_id')
+        .in('item_id', itemIds);
+    if (mapErr || !mapRows || !mapRows.length) return new Map();
+
+    const variantByKey = new Map(
+        mapRows.map(m => [`${m.item_id}|${m.variation_name}`, m.variant_id])
+    );
+
+    const variantIds = [...new Set(mapRows.map(m => m.variant_id).filter(Boolean))];
+    if (!variantIds.length) return new Map();
+
+    const { data: variants, error: vErr } = await supabase
+        .from('v_card_variants')
+        .select('variant_id, image_url')
+        .in('variant_id', variantIds);
+    if (vErr || !variants) return new Map();
+
+    const imageByVariant = new Map(variants.map(v => [v.variant_id, v.image_url]));
+
+    const result = new Map();
+    for (const [key, variantId] of variantByKey) {
+        if (imageByVariant.has(variantId)) result.set(key, imageByVariant.get(variantId));
+    }
+    return result;
+}
+
 function rowHtml(row) {
     const badgeClass = REASON_BADGE_CLASS[row.reason] || 'badge-ambiguous';
     const reasonLabel = REASON_LABELS[row.reason] || row.reason;
@@ -132,19 +204,40 @@ function rowHtml(row) {
     const title = row.variation_name ? `${row.title} — ${row.variation_name}` : (row.title || '');
 
     const isOpen = row.status === 'open';
+    const isReversible = row.reason === 'cancelled_after_recording' && isOpen;
+
     const actions = isOpen
         ? `
+            ${isReversible ? `<button class="btn" style="color:var(--danger); border-color:var(--danger);" data-action="reverse_sale" data-id="${row.id}">Reverse Sale</button>` : ''}
             <button class="btn btn-primary" data-action="resolve" data-id="${row.id}">Resolve</button>
             <button class="btn" data-action="ignore" data-id="${row.id}">Ignore</button>
           `
         : `<button class="btn" data-action="reopen" data-id="${row.id}">Reopen</button>`;
 
+    let refundLine = '';
+    if (row.reason === 'cancelled_after_recording') {
+        const synced = refundByLineId.get(row.order_line_item_id);
+        refundLine = synced != null
+            ? `<div style="color:var(--success); font-size:12px;">Synced refund: $${Number(synced).toFixed(2)}</div>`
+            : `<div style="color:var(--text-secondary); font-size:12px;">No refund synced yet (run --ebay-syncfees, or proceed on cancellation status alone)</div>`;
+    }
+
+    const imgUrl = imageByKey.get(`${row.item_id}|${row.variation_name}`);
+    const thumb = imgUrl
+        ? `<img src="${escapeHtml(imgUrl)}" alt="" loading="lazy"
+                style="width:40px; height:56px; object-fit:cover; border-radius:4px; border:1px solid var(--border);"
+                onerror="this.replaceWith(Object.assign(document.createElement('div'),
+                    {style:'width:40px;height:56px;background:var(--bg-tertiary);border-radius:4px;border:1px solid var(--border);'}))">`
+        : `<div style="width:40px; height:56px; background:var(--bg-tertiary); border-radius:4px; border:1px solid var(--border);"></div>`;
+
     return `
         <tr>
+            <td>${thumb}</td>
             <td><span class="badge ${badgeClass}">${reasonLabel}</span></td>
             <td>
                 <div>${escapeHtml(title)}</div>
                 ${row.detail ? `<div style="color:var(--text-secondary); font-size:12px;">${escapeHtml(row.detail)}</div>` : ''}
+                ${refundLine}
             </td>
             <td style="font-family:monospace; font-size:12px;">${escapeHtml(row.order_id || '')}</td>
             <td>${row.quantity ?? ''}</td>
@@ -156,6 +249,11 @@ function rowHtml(row) {
 }
 
 async function handleAction(id, action) {
+    if (action === 'reverse_sale') {
+        await handleReverseSale(id);
+        return;
+    }
+
     const statusMap = { resolve: 'resolved', ignore: 'ignored', reopen: 'open' };
     const newStatus = statusMap[action];
     const closed_at = newStatus === 'open' ? null : new Date().toISOString();
@@ -168,6 +266,65 @@ async function handleAction(id, action) {
     if (error) {
         alert(`Failed to update issue: ${error.message}`);
         return;
+    }
+
+    loadIssues();
+}
+
+async function handleReverseSale(id) {
+    const row = issuesById.get(id);
+    if (!row) return;
+
+    const synced = refundByLineId.get(row.order_line_item_id);
+    const refundNote = synced != null
+        ? `\nSynced refund: $${Number(synced).toFixed(2)}`
+        : `\n(No refund synced yet — proceeding on the cancellation status alone.)`;
+
+    const confirmed = confirm(
+        `Reverse this sale?\n\n` +
+        `${row.quantity ?? '?'} × ${row.title || '(untitled)'}\n` +
+        `This deletes the recorded sale and restores the quantity to inventory.${refundNote}\n\n` +
+        `This cannot be undone. Continue?`
+    );
+    if (!confirmed) return;
+
+    // Look up the sale_group_id this issue's line belongs to. If nothing
+    // comes back, the sale was likely already removed manually (e.g. via
+    // the Sales tab trash button) — nothing left to reverse here.
+    const { data: saleRows, error: saleErr } = await supabase
+        .from('sales')
+        .select('sale_group_id')
+        .eq('order_line_item_id', row.order_line_item_id)
+        .limit(1);
+
+    if (saleErr) {
+        alert(`Failed to look up the sale: ${saleErr.message}`);
+        return;
+    }
+    if (!saleRows || saleRows.length === 0) {
+        alert('No matching sale row found — it may have already been reversed or removed manually. Marking this issue resolved.');
+        await supabase
+            .from('ebay_order_issues')
+            .update({ status: 'resolved', closed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+            .eq('id', id);
+        loadIssues();
+        return;
+    }
+
+    const { error: rpcErr } = await supabase.rpc('delete_sale_group', {
+        p_sale_group_id: saleRows[0].sale_group_id,
+    });
+    if (rpcErr) {
+        alert(`Failed to reverse the sale: ${rpcErr.message}`);
+        return;
+    }
+
+    const { error: resolveErr } = await supabase
+        .from('ebay_order_issues')
+        .update({ status: 'resolved', closed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq('id', id);
+    if (resolveErr) {
+        alert(`Sale reversed, but failed to mark the issue resolved: ${resolveErr.message}`);
     }
 
     loadIssues();
