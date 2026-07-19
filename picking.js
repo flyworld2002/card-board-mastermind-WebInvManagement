@@ -392,9 +392,10 @@ function badgeFor(sh, order) {
     return { label, colors: PILE_COLORS[(sh.num - 1) % PILE_COLORS.length] };
 }
 
-function badgeHtml(b, extra = '') {
-    return `<span style="display:inline-block; padding:1px 8px; border-radius:10px;
-                 font-size:11px; font-weight:600; background:${b.colors[0]}; color:${b.colors[1]};
+function badgeHtml(b, extra = '', fontSize = 11) {
+    const padding = fontSize > 11 ? '4px 14px' : '1px 8px';
+    return `<span style="display:inline-block; padding:${padding}; border-radius:10px;
+                 font-size:${fontSize}px; font-weight:600; background:${b.colors[0]}; color:${b.colors[1]};
                  font-variant-numeric:tabular-nums; white-space:nowrap;">${escapeHtml(b.label)}${extra}</span>`;
 }
 
@@ -640,7 +641,7 @@ function listingGroupHtml(L, s, idx) {
     const rows = L.cards.map(c => {
         const checked = !!s.checked[c.key];
         const badges = c.badges.map(b =>
-            badgeHtml(b, b.qty > 1 ? ` ×${b.qty}` : '')).join(' ');
+            badgeHtml(b, b.qty > 1 ? ` ×${b.qty}` : '', 20)).join(' ');
 
         if (!c.matched) {
             return `
@@ -689,7 +690,7 @@ function listingGroupHtml(L, s, idx) {
                 <th style="width:44px;"></th><th style="width:30px;"></th>
                 <th style="width:70px;"></th>
                 <th style="width:56px;">#</th><th>Card</th><th style="width:220px;">Set</th>
-                <th style="width:52px; text-align:center;">Qty</th><th style="width:190px;">Ship to</th>
+                <th style="width:52px; text-align:center;">Qty</th><th style="width:340px;">Ship to</th>
             </tr></thead>
             <tbody>${rows}</tbody>
         </table>
