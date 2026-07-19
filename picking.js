@@ -663,9 +663,9 @@ function listingGroupHtml(L, s, idx) {
             <td style="color:var(--text-secondary); font-variant-numeric:tabular-nums;">${escapeHtml(c.cardNumber || '—')}</td>
             <td style="${checked ? 'text-decoration:line-through; color:var(--text-secondary);' : ''}">
                 ${escapeHtml(c.cardName || '')}
-                <span style="font-size:15px; font-weight:700; color:var(--danger);"> · ${escapeHtml(c.variantLabel || 'Standard')}</span>
+                <span style="font-size:17px; font-weight:700; color:var(--danger);"> · ${escapeHtml(c.variantLabel || 'Standard')}</span>
             </td>
-            <td style="font-size:11px; color:var(--text-secondary);">${escapeHtml(c.setName || '')}</td>
+            <td style="font-size:13px; color:var(--text-secondary);">${escapeHtml(c.setName || '')}</td>
             <td style="text-align:center; ${c.qty > 1 ? 'font-weight:700;' : ''}">${c.qty}</td>
             <td>${badges}</td>
         </tr>`;
@@ -684,7 +684,7 @@ function listingGroupHtml(L, s, idx) {
             <span style="flex:1;">${escapeHtml(L.title || '(untitled listing)')}</span>
             <span style="color:var(--text-secondary); font-weight:400; font-size:11px;">item ${escapeHtml(L.itemId || '—')}</span>
         </div>
-        <table style="table-layout:fixed;">
+        <table style="table-layout:fixed; font-size:15px;">
             <thead><tr>
                 <th style="width:44px;"></th><th style="width:30px;"></th>
                 <th style="width:70px;"></th>
