@@ -421,6 +421,9 @@ function renderTable(container) {
             <button class="btn batch-modify-set-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
                 Modify set
             </button>
+            <button class="btn batch-rematch-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
+                Rematch selected
+            </button>
             <button class="btn batch-clear-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
                 Clear selection
             </button>
@@ -498,6 +501,9 @@ function renderTable(container) {
 
     // Batch modify set
     wrap.querySelector('.batch-modify-set-btn')?.addEventListener('click', () => openBatchModifySetModal(container));
+
+    // Batch rematch
+    wrap.querySelector('.batch-rematch-btn')?.addEventListener('click', () => batchRematchSelected(container));
 }
 
 // ── Variant display helpers ───────────────────────────────────────────────────
@@ -1417,12 +1423,19 @@ function renderRematchResults(container, td, row, resultsEl, items, source) {
 }
 
 
-async function linkStagingToCard(container, td, row, resultsEl, item) {
-    resultsEl.innerHTML = `<p style="color:var(--text-secondary); font-size:13px;">Linking...</p>`;
-
+/**
+ * Links a staging row to a matched card (DB or API result) and writes it.
+ * DOM-free — used by both the single-row Rematch click flow and bulk
+ * rematch, so both share the exact same write instead of two copies that
+ * could drift. `fieldOverrides` lets a caller with a live edit form (the
+ * single-row flow) fold in unsaved edits to card_name/card_number/set_name;
+ * bulk rematch omits it and keeps the row's already-saved values.
+ * Returns { success: true, cardId } or { success: false, error }.
+ */
+async function linkStagingRowToItem(row, item, fieldOverrides = {}) {
     let cardId = item.card_id;
 
-    // ── API result: create card_master + card_variants in DB first ────────────
+    // ── API result: create card_master (+ card_sets if needed) in DB first ───
     if (item.source === 'api') {
         const api = item._raw;
 
@@ -1446,10 +1459,7 @@ async function linkStagingToCard(container, td, row, resultsEl, item) {
                 .select('id')
                 .single();
 
-            if (setErr) {
-                resultsEl.innerHTML = `<p style="color:var(--danger)">Failed to create set: ${escapeHtml(setErr.message)}</p>`;
-                return;
-            }
+            if (setErr) return { success: false, error: 'Failed to create set: ' + setErr.message };
             setRow = newSet;
         }
 
@@ -1467,40 +1477,43 @@ async function linkStagingToCard(container, td, row, resultsEl, item) {
             .select('id')
             .single();
 
-        if (cardErr) {
-            resultsEl.innerHTML = `<p style="color:var(--danger)">Failed to create card: ${escapeHtml(cardErr.message)}</p>`;
-            return;
-        }
+        if (cardErr) return { success: false, error: 'Failed to create card: ' + cardErr.message };
         cardId = cardRow.id;
 
         // Variant creation is deferred to push_staging_row_to_inventory
         // to avoid orphan card_variants rows with incorrect foil types.
     }
 
-    // ── Update staging row ────────────────────────────────────────────────────
-    const { error: saveErr } = await supabase.from('staging').update({
-        card_name:    td.querySelector('.edit-card-name').value.trim()   || row.card_name,
-        card_number:  td.querySelector('.edit-card-number').value.trim() || row.card_number,
-        set_name:     td.querySelector('.edit-set-name').value.trim()    || row.set_name,
+    const updates = {
         card_id:      cardId,
         match_status: 'matched',
         status:       'approved',
         updated_at:   new Date().toISOString(),
-    }).eq('id', row.staging_id);
+        ...fieldOverrides,
+    };
 
-    if (saveErr) {
-        resultsEl.innerHTML = `<p style="color:var(--danger)">Failed to link: ${escapeHtml(saveErr.message)}</p>`;
+    // ── Update staging row ────────────────────────────────────────────────────
+    const { error: saveErr } = await supabase.from('staging').update(updates).eq('id', row.staging_id);
+
+    if (saveErr) return { success: false, error: 'Failed to link: ' + saveErr.message };
+
+    Object.assign(row, updates);
+    return { success: true, cardId };
+}
+
+async function linkStagingToCard(container, td, row, resultsEl, item) {
+    resultsEl.innerHTML = `<p style="color:var(--text-secondary); font-size:13px;">Linking...</p>`;
+
+    const result = await linkStagingRowToItem(row, item, {
+        card_name:   td.querySelector('.edit-card-name').value.trim()   || row.card_name,
+        card_number: td.querySelector('.edit-card-number').value.trim() || row.card_number,
+        set_name:    td.querySelector('.edit-set-name').value.trim()    || row.set_name,
+    });
+
+    if (!result.success) {
+        resultsEl.innerHTML = `<p style="color:var(--danger)">${escapeHtml(result.error)}</p>`;
         return;
     }
-
-    Object.assign(row, {
-        card_id:      cardId,
-        match_status: 'matched',
-        status:       'approved',
-        card_name:    td.querySelector('.edit-card-name').value.trim()   || row.card_name,
-        card_number:  td.querySelector('.edit-card-number').value.trim() || row.card_number,
-        set_name:     td.querySelector('.edit-set-name').value.trim()    || row.set_name,
-    });
 
     const source = item.source === 'api' ? ' (added to catalog)' : '';
     resultsEl.innerHTML = `<p style="color:var(--success); font-size:13px;">✅ Linked${source} — ready to push to inventory.</p>`;
@@ -1510,6 +1523,125 @@ async function linkStagingToCard(container, td, row, resultsEl, item) {
     if (pushBtn) pushBtn.disabled = false;
 
     renderTable(container);
+}
+
+// ----------------------------------------------------------------
+// Bulk rematch: same DB-then-API search as the single-row Rematch button,
+// run across every selected row. Auto-writes only when the search comes
+// back with exactly one result (no confidence score exists to pick among
+// several) -- anything with zero or multiple candidates is left completely
+// untouched for manual review, same as today's default state.
+// ----------------------------------------------------------------
+
+/**
+ * Rematches one staging row: DB search first, pokemontcg.io API fallback
+ * if the DB search is empty (identical order to the single-row flow).
+ * Auto-links only on exactly one result. Never throws -- errors are
+ * returned so one bad row can't abort a batch.
+ */
+async function bulkRematchRow(row) {
+    const name    = (row.card_name || '').trim();
+    const num     = (row.card_number || '').trim();
+    const setName = (row.set_name || '').trim();
+
+    if (!name) return { staging_id: row.staging_id, outcome: 'needs_review' };
+
+    try {
+        let results = await searchDB(name, num, setName);
+        if (results.length === 0) {
+            results = await searchPokemonTcgApi(name, num, setName);
+        }
+
+        if (results.length !== 1) {
+            return { staging_id: row.staging_id, outcome: 'needs_review' };
+        }
+
+        const result = await linkStagingRowToItem(row, results[0]);
+        if (!result.success) {
+            return { staging_id: row.staging_id, outcome: 'error', reason: result.error };
+        }
+        return { staging_id: row.staging_id, outcome: 'matched' };
+    } catch (e) {
+        return { staging_id: row.staging_id, outcome: 'error', reason: e.message };
+    }
+}
+
+const BULK_REMATCH_CHUNK_SIZE = 15;
+
+/**
+ * Runs bulkRematchRow across every selected staging row, 15 at a time.
+ * Selection survives filter/page changes by design, so a selected row may
+ * not be among the currently-loaded state.rows -- those are fetched from
+ * v_staging by id first rather than silently skipped. Already-processed
+ * rows are excluded (rematching would incorrectly flip status back to
+ * 'approved'); they shouldn't be selectable in the first place, but a row
+ * could have been processed elsewhere after it was selected.
+ */
+async function batchRematchSelected(container) {
+    const ids = [...state.selectedIds];
+    if (ids.length === 0) return;
+
+    const wrap = container.querySelector('#staging-table-wrap');
+    const progressEl = wrap.querySelector('.batch-progress');
+    const pushBtn = wrap.querySelector('.batch-push-btn');
+    const deleteBtn = wrap.querySelector('.batch-delete-btn');
+    const rematchBtn = wrap.querySelector('.batch-rematch-btn');
+    const clearBtn = wrap.querySelector('.batch-clear-btn');
+
+    pushBtn.disabled = true;
+    deleteBtn.disabled = true;
+    rematchBtn.disabled = true;
+    clearBtn.disabled = true;
+
+    const loadedIds = new Set(state.rows.map(r => r.staging_id));
+    const offPageIds = ids.filter(id => !loadedIds.has(id));
+
+    let offPageRows = [];
+    if (offPageIds.length > 0) {
+        progressEl.textContent = `Loading ${offPageIds.length} selected row${offPageIds.length === 1 ? '' : 's'} from other pages...`;
+        const { data, error } = await supabase
+            .from('v_staging')
+            .select('staging_id, card_name, card_number, set_name, status, match_status')
+            .in('staging_id', offPageIds);
+        if (error) console.error('Failed to load off-page selected rows:', error);
+        offPageRows = data || [];
+    }
+
+    const allSelectedRows = ids
+        .map(id => state.rows.find(r => r.staging_id === id) || offPageRows.find(r => r.staging_id === id))
+        .filter(Boolean);
+
+    const rows = allSelectedRows.filter(r => r.status !== 'processed');
+    const skippedProcessed = allSelectedRows.length - rows.length;
+
+    let matched = 0, needsReview = 0, errored = 0;
+
+    for (let i = 0; i < rows.length; i += BULK_REMATCH_CHUNK_SIZE) {
+        const chunk = rows.slice(i, i + BULK_REMATCH_CHUNK_SIZE);
+        progressEl.textContent = `Rematching ${Math.min(i + BULK_REMATCH_CHUNK_SIZE, rows.length)} of ${rows.length}...`;
+
+        const results = await Promise.all(chunk.map(row => bulkRematchRow(row)));
+        for (const r of results) {
+            if (r.outcome === 'matched') {
+                matched++;
+                state.selectedIds.delete(r.staging_id);
+            } else if (r.outcome === 'error') {
+                errored++;
+            } else {
+                needsReview++;
+            }
+        }
+    }
+
+    const skippedNote = skippedProcessed > 0
+        ? ` (${skippedProcessed} already-processed row${skippedProcessed === 1 ? '' : 's'} skipped)`
+        : '';
+
+    progressEl.innerHTML = `<span style="color:var(--success)">
+        ${rows.length} rematched → ${matched} auto-matched, ${needsReview} need manual review${errored > 0 ? `, ${errored} errored` : ''}.${escapeHtml(skippedNote)}
+    </span>`;
+
+    await loadAndRenderRows(container);
 }
 
 
