@@ -1584,6 +1584,13 @@ async function bulkRematchRow(row) {
         }
 
         if (results.length !== 1) {
+            if (results.length > 1) {
+                console.log(
+                    `Bulk rematch: "${name}" #${num || '?'} (${setName || 'no set'}) — ` +
+                    `${results.length} ${source.toUpperCase()} candidates:`,
+                    results.map(r => `${r.name} — ${r.set_name} #${r.number} (${r.variant_label || 'n/a'})`)
+                );
+            }
             return { staging_id: row.staging_id, outcome: 'needs_review', count: results.length, source };
         }
 
