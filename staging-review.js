@@ -29,6 +29,13 @@ const state = {
     expandedRowId: null,
     selectedIds: new Set(),
     sort: { column: null, ascending: true }, // null = default order_date/card_name sort
+    // Last batch-action summary (push/delete/rematch), rendered into
+    // .batch-progress by renderTable. Needed because every batch action
+    // ends with loadAndRenderRows(), which wipes the whole table wrapper
+    // (including .batch-progress) to refetch -- without storing the
+    // message in state, it gets set and destroyed in the same tick and
+    // the user never sees it.
+    batchMessage: null,
 };
 
 export async function renderStagingReview(container) {
@@ -427,7 +434,7 @@ function renderTable(container) {
             <button class="btn batch-clear-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
                 Clear selection
             </button>
-            <div class="batch-progress" style="font-size:13px;"></div>
+            <div class="batch-progress" style="font-size:13px;">${state.batchMessage || ''}</div>
         </div>
         <table>
             <thead>
@@ -490,6 +497,7 @@ function renderTable(container) {
     // Clear selection
     wrap.querySelector('.batch-clear-btn')?.addEventListener('click', () => {
         state.selectedIds.clear();
+        state.batchMessage = null;
         renderTable(container);
     });
 
@@ -1671,7 +1679,7 @@ async function batchRematchSelected(container) {
         : '';
     const errorNote = errored > 0 && firstError ? ` First error: ${escapeHtml(firstError)}` : '';
 
-    progressEl.innerHTML = `<span style="color:var(${errored > 0 ? '--danger' : '--success'})">
+    state.batchMessage = `<span style="color:var(${errored > 0 ? '--danger' : '--success'})">
         ${rows.length} rematched → ${matched} auto-matched, ${zeroResult} zero-result, ${multiResult} multi-candidate${errored > 0 ? `, ${errored} errored` : ''}.${escapeHtml(skippedNote)}${errorNote}
         <br><span style="font-size:11px; color:var(--text-secondary);">(of the non-matches, ${dbHits} were resolved by DB search alone, never reaching the API)</span>
     </span>`;
@@ -1842,9 +1850,10 @@ async function batchPushSelected(container) {
     const skipped = allIds.length - pushable.length;
 
     if (pushable.length === 0) {
-        progressEl.innerHTML = `<span style="color:var(--danger)">
+        state.batchMessage = `<span style="color:var(--danger)">
             None of the selected rows are matched — nothing to push.
         </span>`;
+        progressEl.innerHTML = state.batchMessage;
         return;
     }
 
@@ -1876,11 +1885,11 @@ async function batchPushSelected(container) {
     const skippedNote = skipped > 0 ? ` (${skipped} unmatched row${skipped === 1 ? '' : 's'} skipped)` : '';
 
     if (failed > 0) {
-        progressEl.innerHTML = `<span style="color:var(--danger)">
+        state.batchMessage = `<span style="color:var(--danger)">
             Pushed ${succeeded} of ${pushable.length}. Stopped on error: ${escapeHtml(firstError)}${escapeHtml(skippedNote)}
         </span>`;
     } else {
-        progressEl.innerHTML = `<span style="color:var(--success)">
+        state.batchMessage = `<span style="color:var(--success)">
             Pushed ${succeeded} row${succeeded === 1 ? '' : 's'} to inventory.${escapeHtml(skippedNote)}
         </span>`;
     }
@@ -1933,11 +1942,11 @@ async function batchDeleteSelected(container) {
     }
 
     if (failed > 0) {
-        progressEl.innerHTML = `<span style="color:var(--danger)">
+        state.batchMessage = `<span style="color:var(--danger)">
             Deleted ${succeeded} of ${ids.length}. Stopped on error: ${escapeHtml(firstError)}
         </span>`;
     } else {
-        progressEl.innerHTML = `<span style="color:var(--success)">
+        state.batchMessage = `<span style="color:var(--success)">
             Deleted ${succeeded} row${succeeded === 1 ? '' : 's'} from staging.
         </span>`;
     }
