@@ -663,7 +663,7 @@ function listingGroupHtml(L, s, idx) {
             <td style="color:var(--text-secondary); font-variant-numeric:tabular-nums;">${escapeHtml(c.cardNumber || '—')}</td>
             <td style="${checked ? 'text-decoration:line-through; color:var(--text-secondary);' : ''}">
                 ${escapeHtml(c.cardName || '')}
-                <span style="font-size:11px; color:var(--text-secondary);"> · ${escapeHtml(c.variantLabel || 'Standard')}</span>
+                <span style="font-size:15px; font-weight:700; color:var(--danger);"> · ${escapeHtml(c.variantLabel || 'Standard')}</span>
             </td>
             <td style="font-size:11px; color:var(--text-secondary);">${escapeHtml(c.setName || '')}</td>
             <td style="text-align:center; ${c.qty > 1 ? 'font-weight:700;' : ''}">${c.qty}</td>
