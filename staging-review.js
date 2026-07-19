@@ -428,8 +428,8 @@ function renderTable(container) {
             <button class="btn batch-modify-set-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
                 Modify set
             </button>
-            <button class="btn batch-rematch-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
-                Rematch selected
+            <button class="btn batch-automatch-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
+                Auto-match selected
             </button>
             <button class="btn batch-clear-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
                 Clear selection
@@ -510,8 +510,8 @@ function renderTable(container) {
     // Batch modify set
     wrap.querySelector('.batch-modify-set-btn')?.addEventListener('click', () => openBatchModifySetModal(container));
 
-    // Batch rematch
-    wrap.querySelector('.batch-rematch-btn')?.addEventListener('click', () => batchRematchSelected(container));
+    // Batch auto-match
+    wrap.querySelector('.batch-automatch-btn')?.addEventListener('click', () => batchAutoMatchSelected(container));
 }
 
 // ── Variant display helpers ───────────────────────────────────────────────────
@@ -1205,10 +1205,9 @@ const POKEMON_TCG_API = 'https://api.pokemontcg.io/v2/cards';
 async function runRematch(container, td, row) {
     const btn     = td.querySelector('.rematch-btn');
     const results = td.querySelector('.rematch-results');
-    const name     = td.querySelector('.edit-card-name').value.trim();
-    const num      = td.querySelector('.edit-card-number').value.trim();
-    const setName  = td.querySelector('.edit-set-name').value.trim();
-    const foilType = getEditedAxisVal(td, 'edit-foil-type');
+    const name    = td.querySelector('.edit-card-name').value.trim();
+    const num     = td.querySelector('.edit-card-number').value.trim();
+    const setName = td.querySelector('.edit-set-name').value.trim();
 
     if (!name) {
         results.innerHTML = `<p style="color:var(--warning); font-size:13px;">Enter a card name to search.</p>`;
@@ -1220,7 +1219,7 @@ async function runRematch(container, td, row) {
     results.innerHTML = '';
 
     // ── Step 1: DB search ────────────────────────────────────────────────────
-    const dbResults = await searchDB(name, num, setName, foilType);
+    const dbResults = await searchDB(name, num, setName);
 
     if (dbResults.length > 0) {
         btn.disabled    = false;
@@ -1264,7 +1263,7 @@ async function runRematch(container, td, row) {
 }
 
 
-async function searchDB(name, num, setName, foilType = null) {
+async function searchDB(name, num, setName) {
     let q = supabase
         .from('v_card_variants')
         .select('card_id, variant_id, card_name, set_name, display_number, card_number, foil_label, pattern_label, texture_label, rarity, foil_type, foil_pattern, texture, material, size, stamp_type, source_type')
@@ -1276,7 +1275,7 @@ async function searchDB(name, num, setName, foilType = null) {
     const { data, error } = await q;
     if (error) console.error('DB search error (variants):', error);
 
-    let withVariants = (data || []).map(c => ({
+    const withVariants = (data || []).map(c => ({
         source:      'db',
         card_id:     c.card_id,
         variant_id:  c.variant_id,
@@ -1295,17 +1294,6 @@ async function searchDB(name, num, setName, foilType = null) {
         source_type:  c.source_type,
         _raw: c,
     }));
-
-    // Name+number+set alone can't tell apart e.g. a Non-Holo and Reverse
-    // Holo print of the same card -- both are legitimately separate
-    // card_variants rows. If the row already knows its own foil type,
-    // narrow to that before deciding "ambiguous". Falls back to the
-    // unnarrowed list if nothing matches (bad/missing foil_type data
-    // shouldn't silently drop otherwise-real candidates).
-    if (foilType && withVariants.length > 1) {
-        const byFoil = withVariants.filter(c => c.foil_type === foilType);
-        if (byFoil.length > 0) withVariants = byFoil;
-    }
 
     // ── Also search card_master directly, for cards with no card_variants
     // row yet (e.g. just custom-created, not pushed to inventory) — these
@@ -1567,33 +1555,67 @@ async function linkStagingToCard(container, td, row, resultsEl, item) {
 }
 
 // ----------------------------------------------------------------
-// Bulk rematch: same DB-then-API search as the single-row Rematch button,
-// run across every selected row. Auto-writes only when the search comes
-// back with exactly one result (no confidence score exists to pick among
-// several) -- anything with zero or multiple candidates is left completely
-// untouched for manual review, same as today's default state.
+// Auto-match: bulk card_master-only match, run across every selected row.
+// Deliberately ignores card_variants and the 7 axis columns entirely --
+// matching only ever needs to resolve card_id; the specific variant
+// (foil_type, pattern, texture, etc.) is resolved separately at push time
+// from the staging row's own axis columns (see
+// push_staging_row_to_inventory.sql step 3), so two card_variants rows for
+// the same card in different foils are not a real ambiguity here. This is
+// also why it's a separate function from the single-row Rematch button
+// (runRematch/searchDB), which stays variant-aware for manual use as-is.
+// Auto-writes only when the search comes back with exactly one card_master
+// hit -- anything with zero or multiple candidates is left completely
+// untouched for manual review, same as today's default state, and the 7
+// axis columns are never written by this path either way.
 // ----------------------------------------------------------------
 
 /**
- * Rematches one staging row: DB search first (narrowed by the row's own
- * foil_type when the broad search is ambiguous -- e.g. a Non-Holo and
- * Reverse Holo print of the same card are separate card_variants rows
- * that name+number+set alone can't tell apart), pokemontcg.io API
- * fallback if the DB search still isn't confidently exactly one result
- * (whether that's zero, or still ambiguous after narrowing). Auto-links
- * only on exactly one result. Never throws -- errors are returned so one
- * bad row can't abort a batch.
+ * Looks up card_master (joined to card_sets for the set name) by
+ * name+number+set, ignoring card_variants entirely. One candidate per
+ * distinct card, unlike searchDB which returns one row per variant.
  */
-async function bulkRematchRow(row) {
-    const name     = (row.card_name || '').trim();
-    const num      = (row.card_number || '').trim();
-    const setName  = (row.set_name || '').trim();
-    const foilType = row.foil_type || null;
+async function searchCardMasterOnly(name, num, setName) {
+    let q = supabase
+        .from('card_master')
+        .select('id, name, card_number, rarity, card_sets(name)')
+        .ilike('name', `%${name}%`)
+        .limit(15);
+    if (num) q = q.eq('card_number', num);
+
+    const { data, error } = await q;
+    if (error) console.error('Card master search error:', error);
+
+    const setNameLower = (setName || '').toLowerCase();
+
+    return (data || [])
+        .filter(c => !setNameLower || (c.card_sets?.name || '').toLowerCase().includes(setNameLower))
+        .map(c => ({
+            source:   'db',
+            card_id:  c.id,
+            name:     c.name,
+            number:   c.card_number,
+            set_name: c.card_sets?.name || '',
+            rarity:   c.rarity,
+        }));
+}
+
+/**
+ * Auto-matches one staging row against card_master only (searchCardMasterOnly),
+ * pokemontcg.io API fallback if that doesn't confidently resolve to exactly
+ * one hit (whether zero or multiple). Auto-links only on exactly one
+ * result. Never throws -- errors are returned so one bad row can't abort a
+ * batch.
+ */
+async function autoMatchStagingRow(row) {
+    const name    = (row.card_name || '').trim();
+    const num     = (row.card_number || '').trim();
+    const setName = (row.set_name || '').trim();
 
     if (!name) return { staging_id: row.staging_id, outcome: 'needs_review', count: 0 };
 
     try {
-        let results = await searchDB(name, num, setName, foilType);
+        let results = await searchCardMasterOnly(name, num, setName);
         let source = 'db';
         if (results.length !== 1) {
             results = await searchPokemonTcgApi(name, num, setName);
@@ -1603,9 +1625,9 @@ async function bulkRematchRow(row) {
         if (results.length !== 1) {
             if (results.length > 1) {
                 console.log(
-                    `Bulk rematch: "${name}" #${num || '?'} (${setName || 'no set'}) — ` +
+                    `Auto-match: "${name}" #${num || '?'} (${setName || 'no set'}) — ` +
                     `${results.length} ${source.toUpperCase()} candidates:`,
-                    results.map(r => `${r.name} — ${r.set_name} #${r.number} (${r.variant_label || 'n/a'})`)
+                    results.map(r => `${r.name} — ${r.set_name} #${r.number}`)
                 );
             }
             return { staging_id: row.staging_id, outcome: 'needs_review', count: results.length, source };
@@ -1613,28 +1635,29 @@ async function bulkRematchRow(row) {
 
         const result = await linkStagingRowToItem(row, results[0]);
         if (!result.success) {
-            console.error(`Bulk rematch link failed for staging row ${row.staging_id} (${name}):`, result.error);
+            console.error(`Auto-match link failed for staging row ${row.staging_id} (${name}):`, result.error);
             return { staging_id: row.staging_id, outcome: 'error', reason: result.error };
         }
         return { staging_id: row.staging_id, outcome: 'matched' };
     } catch (e) {
-        console.error(`Bulk rematch failed for staging row ${row.staging_id} (${name}):`, e);
+        console.error(`Auto-match failed for staging row ${row.staging_id} (${name}):`, e);
         return { staging_id: row.staging_id, outcome: 'error', reason: e.message };
     }
 }
 
-const BULK_REMATCH_CHUNK_SIZE = 15;
+const AUTO_MATCH_CHUNK_SIZE = 15;
 
 /**
- * Runs bulkRematchRow across every selected staging row, 15 at a time.
- * Selection survives filter/page changes by design, so a selected row may
- * not be among the currently-loaded state.rows -- those are fetched from
- * v_staging by id first rather than silently skipped. Already-processed
- * rows are excluded (rematching would incorrectly flip status back to
- * 'approved'); they shouldn't be selectable in the first place, but a row
- * could have been processed elsewhere after it was selected.
+ * Runs autoMatchStagingRow across every selected staging row, 15 at a
+ * time. Selection survives filter/page changes by design, so a selected
+ * row may not be among the currently-loaded state.rows -- those are
+ * fetched from v_staging by id first rather than silently skipped.
+ * Already-processed rows are excluded (auto-matching would incorrectly
+ * flip status back to 'approved'); they shouldn't be selectable in the
+ * first place, but a row could have been processed elsewhere after it was
+ * selected.
  */
-async function batchRematchSelected(container) {
+async function batchAutoMatchSelected(container) {
     const ids = [...state.selectedIds];
     if (ids.length === 0) return;
 
@@ -1642,12 +1665,12 @@ async function batchRematchSelected(container) {
     const progressEl = wrap.querySelector('.batch-progress');
     const pushBtn = wrap.querySelector('.batch-push-btn');
     const deleteBtn = wrap.querySelector('.batch-delete-btn');
-    const rematchBtn = wrap.querySelector('.batch-rematch-btn');
+    const autoMatchBtn = wrap.querySelector('.batch-automatch-btn');
     const clearBtn = wrap.querySelector('.batch-clear-btn');
 
     pushBtn.disabled = true;
     deleteBtn.disabled = true;
-    rematchBtn.disabled = true;
+    autoMatchBtn.disabled = true;
     clearBtn.disabled = true;
 
     const loadedIds = new Set(state.rows.map(r => r.staging_id));
@@ -1679,11 +1702,11 @@ async function batchRematchSelected(container) {
     let dbHits = 0, apiHits = 0;
     let firstError = null;
 
-    for (let i = 0; i < rows.length; i += BULK_REMATCH_CHUNK_SIZE) {
-        const chunk = rows.slice(i, i + BULK_REMATCH_CHUNK_SIZE);
-        progressEl.textContent = `Rematching ${Math.min(i + BULK_REMATCH_CHUNK_SIZE, rows.length)} of ${rows.length}...`;
+    for (let i = 0; i < rows.length; i += AUTO_MATCH_CHUNK_SIZE) {
+        const chunk = rows.slice(i, i + AUTO_MATCH_CHUNK_SIZE);
+        progressEl.textContent = `Auto-matching ${Math.min(i + AUTO_MATCH_CHUNK_SIZE, rows.length)} of ${rows.length}...`;
 
-        const results = await Promise.all(chunk.map(row => bulkRematchRow(row)));
+        const results = await Promise.all(chunk.map(row => autoMatchStagingRow(row)));
         for (const r of results) {
             if (r.outcome === 'matched') {
                 matched++;
@@ -1704,8 +1727,8 @@ async function batchRematchSelected(container) {
     const errorNote = errored > 0 && firstError ? ` First error: ${escapeHtml(firstError)}` : '';
 
     state.batchMessage = `<span style="color:var(${errored > 0 ? '--danger' : '--success'})">
-        ${rows.length} rematched → ${matched} auto-matched, ${zeroResult} zero-result, ${multiResult} multi-candidate${errored > 0 ? `, ${errored} errored` : ''}.${escapeHtml(skippedNote)}${errorNote}
-        <br><span style="font-size:11px; color:var(--text-secondary);">(of the non-matches, ${dbHits} were resolved by DB search alone, never reaching the API)</span>
+        ${rows.length} auto-matched → ${matched} matched, ${zeroResult} zero-result, ${multiResult} multi-candidate${errored > 0 ? `, ${errored} errored` : ''}.${escapeHtml(skippedNote)}${errorNote}
+        <br><span style="font-size:11px; color:var(--text-secondary);">(of the non-matches, ${dbHits} were resolved by the catalog search alone, never reaching the API)</span>
     </span>`;
 
     await loadAndRenderRows(container);
@@ -2703,7 +2726,6 @@ function openNewLocalPurchaseModal(container) {
             const name = nameInput.value.trim();
             const num  = numInput.value.trim();
             const setN = setInput.value.trim();
-            const foilType = formDiv.querySelector('.nlp-edit-foil-type').value || null;
 
             if (!name) {
                 resultsEl.innerHTML = `<p style="color:var(--warning); font-size:13px;">Enter a card name to search.</p>`;
@@ -2714,7 +2736,7 @@ function openNewLocalPurchaseModal(container) {
             btn.textContent = 'Searching DB...';
             resultsEl.innerHTML = '';
 
-            const dbResults = await searchDB(name, num, setN, foilType);
+            const dbResults = await searchDB(name, num, setN);
 
             if (dbResults.length > 0) {
                 btn.disabled = false;
