@@ -1222,7 +1222,15 @@ async function runRematch(container, td, row) {
 
     // ── Step 2: pokemontcg.io API fallback ───────────────────────────────────
     btn.textContent = 'Not in DB — searching API...';
-    const apiResults = await searchPokemonTcgApi(name, num, setName);
+    let apiResults;
+    try {
+        apiResults = await searchPokemonTcgApi(name, num, setName);
+    } catch (e) {
+        btn.disabled    = false;
+        btn.textContent = '🔍 Rematch';
+        results.innerHTML = `<p style="color:var(--danger); font-size:13px;">pokemontcg.io API error: ${escapeHtml(e.message)}. Try again.</p>`;
+        return;
+    }
 
     btn.disabled    = false;
     btn.textContent = '🔍 Rematch';
@@ -1323,40 +1331,45 @@ async function searchDB(name, num, setName) {
 }
 
 
+/**
+ * Throws on any failure (network error, non-2xx status, bad JSON) instead
+ * of swallowing it -- a failed request must never look like a genuine
+ * zero-result search to the caller. This matters most for bulk rematch,
+ * which fires real concurrent requests against pokemontcg.io's anonymous
+ * tier: those calls can legitimately take 30s+ under load (verified
+ * directly against the live API), and any that fail need to show up as
+ * "errored," not silently count as "not found." Every call site below
+ * catches this explicitly.
+ */
 async function searchPokemonTcgApi(name, num, setName) {
-    try {
-        // Build query — pokemontcg.io uses Lucene syntax
-        let q = `name:"${name}"`;
-        if (num) q += ` number:${num}`;
-        // Note: we don't filter by set name here because the API set name may differ
-        // from what's stored (e.g. "151" vs "Scarlet & Violet 151"). Better to show
-        // all results and let the user pick the right one.
+    // Build query — pokemontcg.io uses Lucene syntax
+    let q = `name:"${name}"`;
+    if (num) q += ` number:${num}`;
+    // Note: we don't filter by set name here because the API set name may differ
+    // from what's stored (e.g. "151" vs "Scarlet & Violet 151"). Better to show
+    // all results and let the user pick the right one.
 
-        const url = `${POKEMON_TCG_API}?q=${encodeURIComponent(q)}&pageSize=12`;
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`API returned ${resp.status}`);
-        const json = await resp.json();
+    const url = `${POKEMON_TCG_API}?q=${encodeURIComponent(q)}&pageSize=12`;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`pokemontcg.io API returned ${resp.status}`);
+    const json = await resp.json();
 
-        return (json.data || []).map(c => ({
-            source:         'api',
-            card_id:        null,   // not yet in DB
-            variant_id:     null,
-            name:           c.name,
-            number:         c.number,
-            set_name:       c.set?.name || '',
-            set_id:         c.set?.id || '',
-            set_code:       c.set?.id || '',
-            set_total:      c.set?.total,
-            rarity:         c.rarity || '',
-            image_url:      c.images?.large || c.images?.small || null,
-            external_id:    c.id,
-            variant_label:  'Non-Holo',  // API doesn't know the variant; user can adjust
-            _raw:           c,
-        }));
-    } catch (e) {
-        console.error('pokemontcg.io API error:', e);
-        return [];
-    }
+    return (json.data || []).map(c => ({
+        source:         'api',
+        card_id:        null,   // not yet in DB
+        variant_id:     null,
+        name:           c.name,
+        number:         c.number,
+        set_name:       c.set?.name || '',
+        set_id:         c.set?.id || '',
+        set_code:       c.set?.id || '',
+        set_total:      c.set?.total,
+        rarity:         c.rarity || '',
+        image_url:      c.images?.large || c.images?.small || null,
+        external_id:    c.id,
+        variant_label:  'Non-Holo',  // API doesn't know the variant; user can adjust
+        _raw:           c,
+    }));
 }
 
 
@@ -1402,7 +1415,15 @@ function renderRematchResults(container, td, row, resultsEl, items, source) {
         btn.textContent = 'Searching API...';
         resultsEl.innerHTML = '';
 
-        const apiResults = await searchPokemonTcgApi(name, num, setName);
+        let apiResults;
+        try {
+            apiResults = await searchPokemonTcgApi(name, num, setName);
+        } catch (e) {
+            btn.disabled    = false;
+            btn.textContent = '🔍 Rematch';
+            resultsEl.innerHTML = `<p style="color:var(--danger); font-size:13px;">pokemontcg.io API error: ${escapeHtml(e.message)}. Try again.</p>`;
+            return;
+        }
         btn.disabled    = false;
         btn.textContent = '🔍 Rematch';
 
@@ -1637,7 +1658,7 @@ async function batchRematchSelected(container) {
         ? ` (${skippedProcessed} already-processed row${skippedProcessed === 1 ? '' : 's'} skipped)`
         : '';
 
-    progressEl.innerHTML = `<span style="color:var(--success)">
+    progressEl.innerHTML = `<span style="color:var(${errored > 0 ? '--danger' : '--success'})">
         ${rows.length} rematched → ${matched} auto-matched, ${needsReview} need manual review${errored > 0 ? `, ${errored} errored` : ''}.${escapeHtml(skippedNote)}
     </span>`;
 
@@ -2650,7 +2671,15 @@ function openNewLocalPurchaseModal(container) {
             }
 
             btn.textContent = 'Not in DB — searching API...';
-            const apiResults = await searchPokemonTcgApi(name, num, setN);
+            let apiResults;
+            try {
+                apiResults = await searchPokemonTcgApi(name, num, setN);
+            } catch (e) {
+                btn.disabled = false;
+                btn.textContent = '🔍 Rematch';
+                resultsEl.innerHTML = `<p style="color:var(--danger); font-size:13px;">pokemontcg.io API error: ${escapeHtml(e.message)}. Try again.</p>`;
+                return;
+            }
             btn.disabled = false;
             btn.textContent = '🔍 Rematch';
 
@@ -2809,7 +2838,13 @@ function openNewLocalPurchaseModal(container) {
 
         resultsEl.querySelector('.nlp-try-api-btn')?.addEventListener('click', async () => {
             resultsEl.innerHTML = `<p style="font-size:13px; color:var(--text-secondary);">Searching pokemontcg.io...</p>`;
-            const apiResults = await searchPokemonTcgApi(name, num, setN);
+            let apiResults;
+            try {
+                apiResults = await searchPokemonTcgApi(name, num, setN);
+            } catch (e) {
+                resultsEl.innerHTML = `<p style="color:var(--danger); font-size:13px;">pokemontcg.io API error: ${escapeHtml(e.message)}. Try again.</p>`;
+                return;
+            }
             if (apiResults.length === 0) {
                 resultsEl.innerHTML = `<p style="color:var(--warning); font-size:13px;">Not found on pokemontcg.io either.</p>`;
                 return;
