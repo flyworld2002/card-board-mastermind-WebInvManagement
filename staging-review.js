@@ -1565,24 +1565,28 @@ async function bulkRematchRow(row) {
     const num     = (row.card_number || '').trim();
     const setName = (row.set_name || '').trim();
 
-    if (!name) return { staging_id: row.staging_id, outcome: 'needs_review' };
+    if (!name) return { staging_id: row.staging_id, outcome: 'needs_review', count: 0 };
 
     try {
         let results = await searchDB(name, num, setName);
+        let source = 'db';
         if (results.length === 0) {
             results = await searchPokemonTcgApi(name, num, setName);
+            source = 'api';
         }
 
         if (results.length !== 1) {
-            return { staging_id: row.staging_id, outcome: 'needs_review' };
+            return { staging_id: row.staging_id, outcome: 'needs_review', count: results.length, source };
         }
 
         const result = await linkStagingRowToItem(row, results[0]);
         if (!result.success) {
+            console.error(`Bulk rematch link failed for staging row ${row.staging_id} (${name}):`, result.error);
             return { staging_id: row.staging_id, outcome: 'error', reason: result.error };
         }
         return { staging_id: row.staging_id, outcome: 'matched' };
     } catch (e) {
+        console.error(`Bulk rematch failed for staging row ${row.staging_id} (${name}):`, e);
         return { staging_id: row.staging_id, outcome: 'error', reason: e.message };
     }
 }
@@ -1635,7 +1639,13 @@ async function batchRematchSelected(container) {
     const rows = allSelectedRows.filter(r => r.status !== 'processed');
     const skippedProcessed = allSelectedRows.length - rows.length;
 
-    let matched = 0, needsReview = 0, errored = 0;
+    // Split "needs review" into zero-result vs multi-candidate, and track
+    // which step (db/api) each came from -- this is the only way to tell
+    // "genuinely nothing found" apart from "found too many to auto-pick"
+    // without opening devtools, since both looked identical as one bucket.
+    let matched = 0, zeroResult = 0, multiResult = 0, errored = 0;
+    let dbHits = 0, apiHits = 0;
+    let firstError = null;
 
     for (let i = 0; i < rows.length; i += BULK_REMATCH_CHUNK_SIZE) {
         const chunk = rows.slice(i, i + BULK_REMATCH_CHUNK_SIZE);
@@ -1648,8 +1658,10 @@ async function batchRematchSelected(container) {
                 state.selectedIds.delete(r.staging_id);
             } else if (r.outcome === 'error') {
                 errored++;
+                if (!firstError) firstError = r.reason;
             } else {
-                needsReview++;
+                if (r.count === 0) zeroResult++; else multiResult++;
+                if (r.source === 'db') dbHits++; else if (r.source === 'api') apiHits++;
             }
         }
     }
@@ -1657,9 +1669,11 @@ async function batchRematchSelected(container) {
     const skippedNote = skippedProcessed > 0
         ? ` (${skippedProcessed} already-processed row${skippedProcessed === 1 ? '' : 's'} skipped)`
         : '';
+    const errorNote = errored > 0 && firstError ? ` First error: ${escapeHtml(firstError)}` : '';
 
     progressEl.innerHTML = `<span style="color:var(${errored > 0 ? '--danger' : '--success'})">
-        ${rows.length} rematched → ${matched} auto-matched, ${needsReview} need manual review${errored > 0 ? `, ${errored} errored` : ''}.${escapeHtml(skippedNote)}
+        ${rows.length} rematched → ${matched} auto-matched, ${zeroResult} zero-result, ${multiResult} multi-candidate${errored > 0 ? `, ${errored} errored` : ''}.${escapeHtml(skippedNote)}${errorNote}
+        <br><span style="font-size:11px; color:var(--text-secondary);">(of the non-matches, ${dbHits} were resolved by DB search alone, never reaching the API)</span>
     </span>`;
 
     await loadAndRenderRows(container);
