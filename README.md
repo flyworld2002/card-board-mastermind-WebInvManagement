@@ -12,11 +12,13 @@ card-board-mastermind-web/
 ├── index.html          # App shell: nav, auth gate, page router
 ├── shared.js           # Supabase client, auth helpers, small utilities
 ├── staging-review.js   # Staging Review page (filter/edit/resolve/push)
-├── dashboard.js         # (planned)
-├── inventory.js         # (planned)
-├── card-catalog.js      # (planned)
-├── sets.js               # (planned)
-└── pricing.js            # (planned)
+├── inventory.js         # Inventory page (browse/search/filter/manage stock)
+├── purchases.js          # Purchases page (POs, linked inventory lots, merge)
+├── sales.js               # Sales page (record sales, order-level history)
+├── issues.js              # Issues page (ebay_order_issues triage)
+├── picking.js             # Picking page (batch pick list + pack-by-shipment)
+├── catalog.js             # Catalog page (card_master + card_variants browser)
+└── configuration.js       # Configuration (sets, games, pricing rules, templates)
 ```
 
 Each page is its own ES module, imported on demand by `index.html`'s router.
@@ -54,7 +56,20 @@ read/write.
   ambiguous/unmatched cards (with local catalog dedup search before
   creating new `card_master` rows), and push approved rows to
   inventory via the RPC above.
-- Dashboard, Inventory, Card Catalog, Sets, Pricing — planned.
+- **Inventory** — browse, search, sort, and filter inventory stock;
+  manage platform listings inline via modals.
+- **Purchases** — browse purchase orders, create POs, view linked
+  inventory lots, and merge one PO's lots into another.
+- **Sales** — record sales (FIFO depletion via the `record_sale` RPC)
+  and browse sale history grouped at order level.
+- **Issues** — triage `ebay_order_issues` rows (unmatched, insufficient
+  stock, listing gaps, cancellations); resolve/ignore bookkeeping only.
+- **Picking** — batch pick list and pack-by-shipment view over
+  `picking_queue`, refreshed via a LAN-local pull endpoint.
+- **Catalog** — browse `card_master`, expand a card to view/edit its
+  `card_variants` rows (the seven-axis variant system).
+- **Configuration** — manage Sets, Card games, Pricing rules, Listing
+  templates, and the variant attribute lookup tables.
 
 ## Security notes
 
