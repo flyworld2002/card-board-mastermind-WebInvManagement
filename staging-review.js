@@ -1205,9 +1205,10 @@ const POKEMON_TCG_API = 'https://api.pokemontcg.io/v2/cards';
 async function runRematch(container, td, row) {
     const btn     = td.querySelector('.rematch-btn');
     const results = td.querySelector('.rematch-results');
-    const name    = td.querySelector('.edit-card-name').value.trim();
-    const num     = td.querySelector('.edit-card-number').value.trim();
-    const setName = td.querySelector('.edit-set-name').value.trim();
+    const name     = td.querySelector('.edit-card-name').value.trim();
+    const num      = td.querySelector('.edit-card-number').value.trim();
+    const setName  = td.querySelector('.edit-set-name').value.trim();
+    const foilType = getEditedAxisVal(td, 'edit-foil-type');
 
     if (!name) {
         results.innerHTML = `<p style="color:var(--warning); font-size:13px;">Enter a card name to search.</p>`;
@@ -1219,7 +1220,7 @@ async function runRematch(container, td, row) {
     results.innerHTML = '';
 
     // ── Step 1: DB search ────────────────────────────────────────────────────
-    const dbResults = await searchDB(name, num, setName);
+    const dbResults = await searchDB(name, num, setName, foilType);
 
     if (dbResults.length > 0) {
         btn.disabled    = false;
@@ -1263,7 +1264,7 @@ async function runRematch(container, td, row) {
 }
 
 
-async function searchDB(name, num, setName) {
+async function searchDB(name, num, setName, foilType = null) {
     let q = supabase
         .from('v_card_variants')
         .select('card_id, variant_id, card_name, set_name, display_number, card_number, foil_label, pattern_label, texture_label, rarity, foil_type, foil_pattern, texture, material, size, stamp_type, source_type')
@@ -1275,7 +1276,7 @@ async function searchDB(name, num, setName) {
     const { data, error } = await q;
     if (error) console.error('DB search error (variants):', error);
 
-    const withVariants = (data || []).map(c => ({
+    let withVariants = (data || []).map(c => ({
         source:      'db',
         card_id:     c.card_id,
         variant_id:  c.variant_id,
@@ -1294,6 +1295,17 @@ async function searchDB(name, num, setName) {
         source_type:  c.source_type,
         _raw: c,
     }));
+
+    // Name+number+set alone can't tell apart e.g. a Non-Holo and Reverse
+    // Holo print of the same card -- both are legitimately separate
+    // card_variants rows. If the row already knows its own foil type,
+    // narrow to that before deciding "ambiguous". Falls back to the
+    // unnarrowed list if nothing matches (bad/missing foil_type data
+    // shouldn't silently drop otherwise-real candidates).
+    if (foilType && withVariants.length > 1) {
+        const byFoil = withVariants.filter(c => c.foil_type === foilType);
+        if (byFoil.length > 0) withVariants = byFoil;
+    }
 
     // ── Also search card_master directly, for cards with no card_variants
     // row yet (e.g. just custom-created, not pushed to inventory) — these
@@ -1563,22 +1575,27 @@ async function linkStagingToCard(container, td, row, resultsEl, item) {
 // ----------------------------------------------------------------
 
 /**
- * Rematches one staging row: DB search first, pokemontcg.io API fallback
- * if the DB search is empty (identical order to the single-row flow).
- * Auto-links only on exactly one result. Never throws -- errors are
- * returned so one bad row can't abort a batch.
+ * Rematches one staging row: DB search first (narrowed by the row's own
+ * foil_type when the broad search is ambiguous -- e.g. a Non-Holo and
+ * Reverse Holo print of the same card are separate card_variants rows
+ * that name+number+set alone can't tell apart), pokemontcg.io API
+ * fallback if the DB search still isn't confidently exactly one result
+ * (whether that's zero, or still ambiguous after narrowing). Auto-links
+ * only on exactly one result. Never throws -- errors are returned so one
+ * bad row can't abort a batch.
  */
 async function bulkRematchRow(row) {
-    const name    = (row.card_name || '').trim();
-    const num     = (row.card_number || '').trim();
-    const setName = (row.set_name || '').trim();
+    const name     = (row.card_name || '').trim();
+    const num      = (row.card_number || '').trim();
+    const setName  = (row.set_name || '').trim();
+    const foilType = row.foil_type || null;
 
     if (!name) return { staging_id: row.staging_id, outcome: 'needs_review', count: 0 };
 
     try {
-        let results = await searchDB(name, num, setName);
+        let results = await searchDB(name, num, setName, foilType);
         let source = 'db';
-        if (results.length === 0) {
+        if (results.length !== 1) {
             results = await searchPokemonTcgApi(name, num, setName);
             source = 'api';
         }
@@ -1709,15 +1726,20 @@ async function getGameId() {
 // Actions: save, resolve, push, skip
 // ----------------------------------------------------------------
 
-async function saveRowChanges(container, td, row) {
-    function getAxisVal(cls) {
-        const sel = td.querySelector(`.${cls}-select`);
-        const inp = td.querySelector(`.${cls}-custom`);
-        if (!sel) return null;
-        const v = sel.value === '__custom__' ? (inp ? inp.value.trim() : '') : sel.value;
-        return v || null;
-    }
+/**
+ * Reads a variant axis <select>+custom-<input> pair's current value from
+ * an expanded row's edit form (see renderAxesInputs' `sel()`). Shared by
+ * saveRowChanges and runRematch so both read live edits the same way.
+ */
+function getEditedAxisVal(td, cls) {
+    const sel = td.querySelector(`.${cls}-select`);
+    const inp = td.querySelector(`.${cls}-custom`);
+    if (!sel) return null;
+    const v = sel.value === '__custom__' ? (inp ? inp.value.trim() : '') : sel.value;
+    return v || null;
+}
 
+async function saveRowChanges(container, td, row) {
     const updates = {
         card_name:    td.querySelector('.edit-card-name')?.value.trim()   || row.card_name,
         card_number:  td.querySelector('.edit-card-number')?.value.trim() || row.card_number,
@@ -1728,13 +1750,13 @@ async function saveRowChanges(container, td, row) {
         listing_price: td.querySelector('.edit-listing-price').value !== ''
                        ? Number(td.querySelector('.edit-listing-price').value)
                        : null,
-        foil_type:    getAxisVal('edit-foil-type'),
-        foil_pattern: getAxisVal('edit-foil-pattern'),
-        texture:      getAxisVal('edit-texture'),
-        material:     getAxisVal('edit-material'),
-        size:         getAxisVal('edit-size'),
-        stamp_type:   getAxisVal('edit-stamp-type'),
-        source_type:  getAxisVal('edit-source-type'),
+        foil_type:    getEditedAxisVal(td, 'edit-foil-type'),
+        foil_pattern: getEditedAxisVal(td, 'edit-foil-pattern'),
+        texture:      getEditedAxisVal(td, 'edit-texture'),
+        material:     getEditedAxisVal(td, 'edit-material'),
+        size:         getEditedAxisVal(td, 'edit-size'),
+        stamp_type:   getEditedAxisVal(td, 'edit-stamp-type'),
+        source_type:  getEditedAxisVal(td, 'edit-source-type'),
         notes:        td.querySelector('.edit-notes').value || null,
         updated_at:   new Date().toISOString(),
     };
@@ -2681,6 +2703,7 @@ function openNewLocalPurchaseModal(container) {
             const name = nameInput.value.trim();
             const num  = numInput.value.trim();
             const setN = setInput.value.trim();
+            const foilType = formDiv.querySelector('.nlp-edit-foil-type').value || null;
 
             if (!name) {
                 resultsEl.innerHTML = `<p style="color:var(--warning); font-size:13px;">Enter a card name to search.</p>`;
@@ -2691,7 +2714,7 @@ function openNewLocalPurchaseModal(container) {
             btn.textContent = 'Searching DB...';
             resultsEl.innerHTML = '';
 
-            const dbResults = await searchDB(name, num, setN);
+            const dbResults = await searchDB(name, num, setN, foilType);
 
             if (dbResults.length > 0) {
                 btn.disabled = false;
