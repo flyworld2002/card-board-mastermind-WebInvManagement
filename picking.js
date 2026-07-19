@@ -19,9 +19,16 @@
 // this module with a cache-busting ?v= on every navigation, so module-level
 // variables reset each visit — session state therefore lives on
 // window.__cbmPickingSession (same class of fix as
-// window.__cbmInventoryChannel in inventory.js). Badge numbers are stable
-// across refreshes within a session: shipments keep their number, orders
-// keep their letter, retired numbers are never reused.
+// window.__cbmInventoryChannel in inventory.js). Badge numbers: on every
+// refresh, piles whose shipments have fully shipped release their numbers,
+// and all *unlocked* piles resequence from 1 in paid order. A pile is
+// "locked" (keeps its number untouched) while it has at least one checked
+// card in the pick list — a check means physical packing is in progress and
+// the physical pile label must stay valid. Shipped piles' checks are dead
+// and release the lock along with the number. Order letters (1a/1b) keep
+// the old stable-forever behavior — never resequenced. Any renumbering is
+// surfaced in the post-refresh diff banner so physical piles can be
+// relabeled before packing continues.
 
 import { supabase } from './shared.js';
 
@@ -138,7 +145,7 @@ function setupImagePreview(container) {
 // Data
 // ----------------------------------------------------------------
 
-async function loadSnapshot(container) {
+async function loadSnapshot(container, resequence = false) {
     const { data, error } = await supabase
         .from('picking_queue')
         .select('*')
@@ -152,7 +159,7 @@ async function loadSnapshot(container) {
 
     state.rows = data || [];
     state.pulledAt = state.rows.length ? state.rows[0].pulled_at : null;
-    computeShipments();
+    computeShipments(resequence);
     render(container);
 }
 
@@ -199,7 +206,7 @@ async function refreshFromEbay(container) {
     }
 
     s.prevLineIds = prevIds;
-    await loadSnapshot(container);  // re-reads the fresh snapshot, recomputes shipments
+    await loadSnapshot(container, true);  // re-reads fresh snapshot, resequences unlocked piles
 
     // Diff summary (uses freshly computed state)
     const newIds = new Set(state.rows.map(r => r.order_line_item_id));
@@ -213,9 +220,22 @@ async function refreshFromEbay(container) {
         sh.zone !== 'S' &&
         prevShipmentsMeta.some(m => m.key === sh.key && m.isSingles));
 
+    // Surviving piles whose number changed in the resequence — the user
+    // must relabel the physical piles before packing continues.
+    const renumbered = [];
+    for (const m of prevShipmentsMeta) {
+        if (m.isSingles || !m.num) continue;
+        const now = state.shipments.find(sh => sh.key === m.key);
+        if (now && now.zone !== 'S' && now.num !== m.num) {
+            renumbered.push({ from: m.num, to: now.num });
+        }
+    }
+    renumbered.sort((a, b) => a.to - b.to);
+
     s.lastDiff = {
         addedCount: addedOrders.size,
         removedPiles: removedShipments.map(m => m.num),
+        renumbered,
         graduated: graduated.map(sh => ({
             num: sh.num,
             buyer: sh.buyer,
@@ -239,7 +259,17 @@ function shipmentKeyOf(r) {
         .map(x => (x || '').toLowerCase().trim()).join('|');
 }
 
-function computeShipments() {
+// Identity of a pick-list row (checkbox key). Shared between buildPickList
+// (aggregation) and computeShipments (lock detection) — must stay identical
+// in both places or checks stop mapping back to their piles.
+function cardKeyOf(r) {
+    const listingKey = r.ebay_item_id || r.listing_title || '?';
+    return r.matched
+        ? `${listingKey}|${r.card_number}|${r.card_name}|${r.variant_label}`
+        : `${listingKey}|UNMATCHED|${r.raw_variation_name}`;
+}
+
+function computeShipments(resequence = false) {
     const s = session();
 
     // Group rows: shipment -> orders -> lines
@@ -251,6 +281,38 @@ function computeShipments() {
         if (!orders.has(r.platform_order_id)) orders.set(r.platform_order_id, []);
         orders.get(r.platform_order_id).push(r);
     }
+
+    // Resequence pass (refresh only — plain tab mounts keep numbers as-is):
+    // shipped piles release their numbers and dead checks; every surviving
+    // UNLOCKED pile is renumbered from 1 in paid order below. A pile is
+    // locked while any of its cards is checked — packing in progress, the
+    // physical pile label must not change under it.
+    if (resequence) {
+        // Which current card keys exist, and which shipments are locked.
+        const validCardKeys = new Set();
+        const lockedKeys = new Set();
+        for (const r of state.rows) {
+            const ck = cardKeyOf(r);
+            validCardKeys.add(ck);
+            if (s.checked[ck]) lockedKeys.add(shipmentKeyOf(r));
+        }
+        // Dead checks (card no longer anywhere in the queue) are purged so
+        // they can't lock a resurrected buyer/address key later.
+        for (const k of Object.keys(s.checked)) {
+            if (!validCardKeys.has(k)) delete s.checked[k];
+        }
+        // Departed shipments release their keys entirely; surviving
+        // unlocked piles release their numbers for reassignment.
+        for (const k of Object.keys(s.shipmentNums)) {
+            if (!byShipment.has(k) || !lockedKeys.has(k)) delete s.shipmentNums[k];
+        }
+        s.nextNum = 1;  // refill from the bottom, skipping locked numbers
+    }
+
+    // Numbers currently in use (locked survivors during a resequence; all
+    // assignments otherwise) — assignment below always skips these, which
+    // makes filling gaps around locked piles safe in every mode.
+    const usedNums = new Set(Object.values(s.shipmentNums));
 
     const shipments = [];
     for (const [key, ordersMap] of byShipment) {
@@ -283,9 +345,13 @@ function computeShipments() {
             sh.num = null;
         } else {
             sh.zone = 'pile';
-            // Stable number: keep an existing assignment, else next unused.
+            // Keep an existing assignment (locked pile, or no resequence
+            // this pass), else the lowest number not already in use.
             if (!s.shipmentNums[key]) {
-                s.shipmentNums[key] = s.nextNum++;
+                while (usedNums.has(s.nextNum)) s.nextNum++;
+                s.shipmentNums[key] = s.nextNum;
+                usedNums.add(s.nextNum);
+                s.nextNum++;
             }
             sh.num = s.shipmentNums[key];
             // Stable letters (only meaningful when >1 order)
@@ -342,6 +408,17 @@ function cardSortKey(num) {
     return [m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER, num || ''];
 }
 
+// Unmatched lines have no card_number (only the matcher populates that), but
+// eBay variation names consistently lead with it, e.g.
+// "110/084 Iron Defender" or "062/084 Bastiodon RH Reverse Holo". Pull it out
+// so unmatched rows can share the same cardSortKey() ordering as matched
+// ones instead of all tying and falling back to snapshot/insertion order.
+// Returns null (not sortable) if the variation name doesn't start with it.
+function extractCardNumberFromVariation(rawVariation) {
+    const m = /^(\d+\/\d+)/.exec((rawVariation || '').trim());
+    return m ? m[1] : null;
+}
+
 function buildPickList() {
     const s = session();
     // shipment/order lookups per line
@@ -357,15 +434,13 @@ function buildPickList() {
         if (!listings.has(listingKey)) {
             listings.set(listingKey, { title: r.listing_title, itemId: r.ebay_item_id, cards: new Map() });
         }
-        const cardKey = r.matched
-            ? `${listingKey}|${r.card_number}|${r.card_name}|${r.variant_label}`
-            : `${listingKey}|UNMATCHED|${r.raw_variation_name}`;
+        const cardKey = cardKeyOf(r);
         const L = listings.get(listingKey);
         if (!L.cards.has(cardKey)) {
             L.cards.set(cardKey, {
                 key: cardKey,
                 matched: r.matched,
-                cardNumber: r.card_number,
+                cardNumber: r.matched ? r.card_number : extractCardNumberFromVariation(r.raw_variation_name),
                 cardName: r.card_name,
                 imageUrl: r.image_url,
                 setName: r.set_name,
@@ -394,7 +469,32 @@ function buildPickList() {
         });
         out.push({ title: L.title, itemId: L.itemId, cards });
     }
-    out.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
+
+    // Listing groups sort by set first (most common set_name among the
+    // group's matched cards, ties alphabetical), then title — so two
+    // listings selling the same set sit adjacent in the pick list even
+    // when their titles don't alphabetize together. Groups with no
+    // matched cards have no set and sort last.
+    for (const L of out) {
+        const counts = new Map();
+        for (const c of L.cards) {
+            if (c.matched && c.setName) {
+                counts.set(c.setName, (counts.get(c.setName) || 0) + 1);
+            }
+        }
+        L.setKey = null;
+        for (const [name, n] of counts) {
+            if (!L.setKey || n > counts.get(L.setKey) ||
+                (n === counts.get(L.setKey) && name < L.setKey)) {
+                L.setKey = name;
+            }
+        }
+    }
+    out.sort((a, b) => {
+        if (!a.setKey !== !b.setKey) return a.setKey ? -1 : 1;
+        return (a.setKey || '').localeCompare(b.setKey || '')
+            || (a.title || '').localeCompare(b.title || '');
+    });
 
     // attach badge info per order entry
     for (const L of out) {
@@ -445,7 +545,7 @@ function render(container) {
     content.innerHTML = `
         <div style="font-size:11px; font-weight:600; color:var(--text-secondary);
                     text-transform:uppercase; letter-spacing:0.04em; margin-bottom:8px;">Pick list</div>
-        ${pickList.map(L => listingGroupHtml(L, s)).join('')}
+        ${pickList.map((L, i) => listingGroupHtml(L, s, i)).join('')}
 
         <div style="font-size:11px; font-weight:600; color:var(--text-secondary);
                     text-transform:uppercase; letter-spacing:0.04em; margin:24px 0 8px;">Pack by shipment</div>
@@ -458,6 +558,24 @@ function render(container) {
             const key = cb.dataset.pickKey;
             if (cb.checked) s.checked[key] = true;
             else delete s.checked[key];
+            render(container);
+        });
+    });
+
+    // listing header check-all: checks/unchecks every card in the group.
+    // indeterminate is a JS-only property, so it's applied post-render.
+    content.querySelectorAll('input[data-listing-check]').forEach(cb => {
+        if (cb.dataset.indeterminate) cb.indeterminate = true;
+        cb.addEventListener('change', () => {
+            const L = pickList[Number(cb.dataset.listingCheck)];
+            if (!L) return;
+            // If everything was checked, uncheck all; otherwise check all
+            // (a partial group fills in the rest rather than clearing).
+            const allChecked = L.cards.every(c => !!s.checked[c.key]);
+            for (const c of L.cards) {
+                if (allChecked) delete s.checked[c.key];
+                else s.checked[c.key] = true;
+            }
             render(container);
         });
     });
@@ -499,6 +617,11 @@ function renderBanners(container) {
         parts.push(d.addedCount ? `+${d.addedCount} new order${d.addedCount === 1 ? '' : 's'}` : 'no new orders');
         if (d.removedPiles.length) parts.push(`shipped: pile${d.removedPiles.length === 1 ? '' : 's'} ${d.removedPiles.join(', ')} removed`);
         let gradHtml = '';
+        if (d.renumbered && d.renumbered.length) {
+            gradHtml += `<div style="margin-top:4px;">⟲ <b>Renumbered:</b>
+                ${d.renumbered.map(x => `${x.from}→${x.to}`).join(', ')}
+                — relabel these piles before continuing</div>`;
+        }
         for (const g of d.graduated) {
             gradHtml += `<div style="margin-top:4px;">⚠ <b>S → ${g.num}</b>: ${escapeHtml(g.buyer || '')} now has multiple cards —
                 move ${escapeHtml(g.cards.join(', '))} from singles to pile ${g.num}</div>`;
@@ -513,7 +636,7 @@ function renderBanners(container) {
     el.innerHTML = html;
 }
 
-function listingGroupHtml(L, s) {
+function listingGroupHtml(L, s, idx) {
     const rows = L.cards.map(c => {
         const checked = !!s.checked[c.key];
         const badges = c.badges.map(b =>
@@ -525,7 +648,7 @@ function listingGroupHtml(L, s) {
                 <td>${c.isNew && !checked ? newTag() : ''}</td>
                 <td><input type="checkbox" data-pick-key="${escapeHtml(c.key)}" ${checked ? 'checked' : ''}></td>
                 <td>${imgPlaceholder()}</td>
-                <td style="color:var(--warning);">—</td>
+                <td style="color:var(--warning); font-variant-numeric:tabular-nums;">${escapeHtml(c.cardNumber || '—')}</td>
                 <td style="color:var(--warning);">⚠ Unmatched: ${escapeHtml(c.rawVariation || '')}</td>
                 <td></td>
                 <td style="text-align:center; color:var(--warning);">${c.qty}</td>
@@ -548,17 +671,23 @@ function listingGroupHtml(L, s) {
         </tr>`;
     }).join('');
 
+    const allChecked = L.cards.length > 0 && L.cards.every(c => !!s.checked[c.key]);
+    const someChecked = L.cards.some(c => !!s.checked[c.key]);
+
     return `
     <div style="border:1px solid var(--border); border-radius:8px; overflow:hidden; margin-bottom:12px;">
         <div style="padding:8px 12px; background:var(--bg-secondary); font-size:13px; font-weight:600;
-                    display:flex; justify-content:space-between;">
-            <span>${escapeHtml(L.title || '(untitled listing)')}</span>
+                    display:flex; align-items:center; gap:10px;">
+            <input type="checkbox" data-listing-check="${idx}" ${allChecked ? 'checked' : ''}
+                   ${!allChecked && someChecked ? 'data-indeterminate="1"' : ''}
+                   title="Check/uncheck all cards in this listing">
+            <span style="flex:1;">${escapeHtml(L.title || '(untitled listing)')}</span>
             <span style="color:var(--text-secondary); font-weight:400; font-size:11px;">item ${escapeHtml(L.itemId || '—')}</span>
         </div>
         <table style="table-layout:fixed;">
             <thead><tr>
                 <th style="width:44px;"></th><th style="width:30px;"></th>
-                <th style="width:36px;"></th>
+                <th style="width:70px;"></th>
                 <th style="width:56px;">#</th><th>Card</th><th style="width:220px;">Set</th>
                 <th style="width:52px; text-align:center;">Qty</th><th style="width:190px;">Ship to</th>
             </tr></thead>
@@ -632,13 +761,13 @@ function shipmentHtml(sh, s) {
 function imgHtml(url) {
     if (!url) return imgPlaceholder();
     return `<img src="${escapeHtml(url)}" alt="" loading="lazy" class="card-thumb"
-                style="width:28px; height:39px; object-fit:cover; border-radius:3px; border:1px solid var(--border); cursor:zoom-in;"
+                style="width:60px; height:84px; object-fit:cover; border-radius:3px; border:1px solid var(--border); cursor:zoom-in;"
                 onerror="this.replaceWith(Object.assign(document.createElement('div'),
-                    {style:'width:28px;height:39px;background:var(--bg-tertiary);border-radius:3px;border:1px solid var(--border);'}))">`;
+                    {style:'width:60px;height:84px;background:var(--bg-tertiary);border-radius:3px;border:1px solid var(--border);'}))">`;
 }
 
 function imgPlaceholder() {
-    return `<div style="width:28px; height:39px; background:var(--bg-tertiary); border-radius:3px; border:1px solid var(--border);"></div>`;
+    return `<div style="width:60px; height:84px; background:var(--bg-tertiary); border-radius:3px; border:1px solid var(--border);"></div>`;
 }
 
 function newTag() {
