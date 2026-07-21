@@ -332,7 +332,6 @@ function renderFilters(container) {
             <option value="all">All statuses</option>
             <option value="unlisted" ${f.status === 'unlisted' ? 'selected' : ''}>Unlisted</option>
             <option value="draft"       ${f.status === 'draft'       ? 'selected' : ''}>Draft</option>
-            <option value="do_not_sync" ${f.status === 'do_not_sync' ? 'selected' : ''}>Do Not Sync</option>
             <option value="listed"      ${f.status === 'listed'      ? 'selected' : ''}>Listed</option>
         </select>
         <select id="inv-filter-source">
@@ -523,7 +522,6 @@ function statusBadge(status) {
         unlisted:    { color: 'var(--text-secondary)', bg: 'rgba(255,255,255,0.05)' },
         listed:      { color: 'var(--accent)',          bg: 'rgba(74,140,255,0.12)'  },
         draft:       { color: 'var(--warning)',          bg: 'rgba(245,166,35,0.12)'  },
-        do_not_sync: { color: '#a78bfa',                bg: 'rgba(167,139,250,0.12)' },
     };
     const s = map[status] || map.unlisted;
     return `<span style="display:inline-block; padding:2px 8px; border-radius:10px;
@@ -666,8 +664,7 @@ function renderRow(container, row) {
             // Only active/listed count toward displayed qty
             const active   = ps.filter(l => l.status === 'active' || l.status === 'listed');
             const totalQty = active.reduce((a, l) => a + (l.quantity_listed || 0), 0);
-            const hasNoSync = ps.some(l => l.status === 'do_not_sync');
-            const c = active.length > 0 ? 'var(--accent)' : hasNoSync ? '#a78bfa' : 'var(--warning)';
+            const c = active.length > 0 ? 'var(--accent)' : 'var(--warning)';
             const subline = active.length > 1 ? `${active.length} listings`
                           : active.length === 1 ? formatPrice(active[0].list_price)
                           : ps.length > 1 ? `${ps.length} (inactive)` : 'inactive';
@@ -740,8 +737,7 @@ function renderDetailPanel(container, row, td) {
 
     const listingRows = listings.length > 0
         ? listings.map(l => {
-            const statusColor = (l.status === 'active' || l.status === 'listed') ? 'var(--accent)'
-                              : l.status === 'do_not_sync' ? '#a78bfa' : 'var(--warning)';
+            const statusColor = (l.status === 'active' || l.status === 'listed') ? 'var(--accent)' : 'var(--warning)';
             return `
             <div class="detail-listing-row" data-id="${l.id}" style="
                 display:flex; align-items:center; gap:12px;
@@ -854,7 +850,6 @@ function openInlineListingEdit(container, row, l, triggerBtn) {
                 <select class="ile-status" style="margin-top:2px; display:block;">
                     <option value="active"      ${l.status === 'active'      ? 'selected' : ''}>active</option>
                     <option value="draft"       ${l.status === 'draft'       ? 'selected' : ''}>draft</option>
-                    <option value="do_not_sync" ${l.status === 'do_not_sync' ? 'selected' : ''}>do_not_sync</option>
                     <option value="delisted"    ${l.status === 'delisted'    ? 'selected' : ''}>delisted</option>
                 </select>
             </label>
@@ -1490,7 +1485,6 @@ function openListModal(container, row) {
             <div style="display:flex; gap:8px; margin-top:16px;">
                 <button class="btn btn-primary list-save-btn" data-status="active">Create listing</button>
                 <button class="btn list-draft-btn" data-status="draft" style="border-color:var(--warning); color:var(--warning);">Save as draft</button>
-                <button class="btn list-nosync-btn" data-status="do_not_sync" style="border-color:#a78bfa; color:#a78bfa;">Do not sync</button>
                 <button class="btn list-cancel-btn">Cancel</button>
             </div>
         </div>
@@ -1609,7 +1603,6 @@ function openListModal(container, row) {
 
     overlay.querySelector('.list-save-btn').addEventListener('click', () => handleListSave('active'));
     overlay.querySelector('.list-draft-btn').addEventListener('click', () => handleListSave('draft'));
-    overlay.querySelector('.list-nosync-btn').addEventListener('click', () => handleListSave('do_not_sync'));
 }
 
 // ----------------------------------------------------------------
@@ -1649,7 +1642,7 @@ async function openListingsModal(container, row) {
         .from('platform_listings')
         .select('*')
         .eq('variant_id', row.variant_id)
-        .in('status', ['active', 'draft', 'do_not_sync'])
+        .in('status', ['active', 'draft'])
         .order('listed_at', { ascending: false });
 
     const listEl = overlay.querySelector('#listings-list');
@@ -1671,7 +1664,6 @@ async function openListingsModal(container, row) {
         const statusColor = {
             active:      'var(--success)',
             draft:       'var(--warning)',
-            do_not_sync: '#a78bfa',
             delisted:    'var(--danger)',
         }[l.status] || 'var(--text-secondary)';
 
@@ -1728,7 +1720,6 @@ async function openListingsModal(container, row) {
                         <select class="edit-status" style="margin-top:2px; display:block;">
                             <option value="active"      ${l.status === 'active'      ? 'selected' : ''}>active</option>
                             <option value="draft"       ${l.status === 'draft'       ? 'selected' : ''}>draft</option>
-                            <option value="do_not_sync" ${l.status === 'do_not_sync' ? 'selected' : ''}>do_not_sync</option>
                             <option value="delisted"    ${l.status === 'delisted'    ? 'selected' : ''}>delisted</option>
                         </select>
                     </label>
