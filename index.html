@@ -200,6 +200,7 @@
                         <a href="#issues" data-page="issues">Issues <span id="issues-badge" class="badge badge-not_found" style="display:none;"></span></a>
                         <a href="#picking" data-page="picking">Picking</a>
                         <a href="#catalog" data-page="catalog">Catalog</a>
+                        <a href="#listing-pricing" data-page="listing-pricing">Listing pricing</a>
                         <a href="#configuration" data-page="configuration">Configuration</a>
                         <a href="#" id="signout-link" style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px;">Sign out</a>
                     </nav>
@@ -307,6 +308,11 @@
                     case 'catalog': {
                         const { renderCatalog } = await import(`./catalog.js?v=${Date.now()}`);
                         await renderCatalog(content);
+                        break;
+                    }
+                    case 'listing-pricing': {
+                        const { renderListingPricing } = await import(`./listing-pricing.js?v=${Date.now()}`);
+                        await renderListingPricing(content);
                         break;
                     }
                     case 'configuration':

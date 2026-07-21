@@ -41,6 +41,10 @@ let syncControlsState = {
     statuses: [],
 };
 
+let profilesState = {
+    profiles: [],
+};
+
 // The 7 variant lookup tables card_variants references by `code` — all
 // share the identical (code, display_name, sort_order) shape, so one
 // generic CRUD component handles all of them instead of 7 near-copies.
@@ -93,6 +97,11 @@ export async function renderConfiguration(container, initialKey = 'sets') {
         container.innerHTML = configShell(syncControlsSectionHTML());
         wireConfigNav(container, 'sync-controls');
         await loadSyncControls(container);
+    } else if (initialKey === 'pricing-profiles') {
+        profilesState = { profiles: [] };
+        container.innerHTML = configShell(profilesSectionHTML());
+        wireConfigNav(container, 'pricing-profiles');
+        await loadProfiles(container);
     } else {
         container.innerHTML = configShell(`<p style="color:var(--text-secondary)">${labelFor(initialKey)} coming soon.</p>`);
         wireConfigNav(container, initialKey);
@@ -112,6 +121,7 @@ function configShell(bodyHTML) {
                 <a href="#card-games" data-config-nav="card-games" class="config-nav-item">Card games</a>
                 <a href="#pricing-rules" data-config-nav="pricing-rules" class="config-nav-item">Pricing rules</a>
                 <a href="#listing-templates" data-config-nav="listing-templates" class="config-nav-item">Listing templates</a>
+                <a href="#pricing-profiles" data-config-nav="pricing-profiles" class="config-nav-item">Pricing profiles</a>
                 <a href="#variant-attributes" data-config-nav="variant-attributes" class="config-nav-item">Variant attributes</a>
                 <a href="#sync-controls" data-config-nav="sync-controls" class="config-nav-item">Sync controls</a>
             </div>
@@ -154,6 +164,8 @@ function wireConfigNav(container, activeKey) {
                 await renderConfiguration(container, 'variant-attributes');
             } else if (key === 'sync-controls') {
                 await renderConfiguration(container, 'sync-controls');
+            } else if (key === 'pricing-profiles') {
+                await renderConfiguration(container, 'pricing-profiles');
             } else {
                 // Other configuration sub-pages land here later.
                 container.innerHTML = configShell(`<p style="color:var(--text-secondary)">${labelFor(key)} coming soon.</p>`);
@@ -169,6 +181,7 @@ function labelFor(key) {
         'pricing-rules': 'Pricing rules',
         'listing-templates': 'Listing templates',
         'sync-controls': 'Sync controls',
+        'pricing-profiles': 'Pricing profiles',
     }[key] || key;
 }
 
@@ -1088,6 +1101,253 @@ function openTemplateModal(container, templateId) {
         } catch (err) {
             console.error(err);
             errBox.textContent = err.message || 'Failed to save listing template.';
+        }
+    });
+}
+
+// ── Pricing profiles section (docs/plans/listing-pricing-system.md) ────────
+// A profile is a named, reusable tier table (e.g. 'double_rare_rh_ur':
+// market < $1 -> 3.99, >= $1 -> 4.99). Listing pricing rules (assigned on
+// the Listing pricing page, not here) map a card's rarity/foil_type/set/
+// card to one of these profiles. Tier management is a nested view within
+// the profile's own modal to keep this screen focused, mirroring how the
+// rest of this file uses one modal per concern.
+
+function profilesSectionHTML() {
+    return `
+        <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
+            Profiles are pure tier tables — they don't know about listings
+            or platforms. Assign a profile to a listing via a pricing rule
+            on that listing's Listing pricing page.
+        </p>
+        <div class="filters-bar" style="justify-content:flex-end;">
+            <button class="btn btn-primary" id="new-profile-btn">+ New profile</button>
+        </div>
+        <div id="profiles-table-wrap"><p>Loading...</p></div>
+        <div id="profiles-modal-root"></div>
+    `;
+}
+
+async function loadProfiles(container) {
+    const wrap = container.querySelector('#profiles-table-wrap');
+    try {
+        const { data: profiles, error: pErr } = await supabase.from('pricing_profiles').select('*').order('name');
+        if (pErr) throw pErr;
+        const { data: tiers, error: tErr } = await supabase.from('pricing_profile_tiers').select('*').order('min_market');
+        if (tErr) throw tErr;
+
+        const tiersByProfile = {};
+        for (const t of tiers || []) {
+            (tiersByProfile[t.profile_id] ??= []).push(t);
+        }
+        profilesState.profiles = (profiles || []).map(p => ({ ...p, tiers: tiersByProfile[p.id] || [] }));
+
+        renderProfilesTable(container);
+    } catch (err) {
+        console.error(err);
+        wrap.innerHTML = `<p style="color:var(--danger)">Failed to load pricing profiles: ${err.message}</p>`;
+    }
+}
+
+function tiersSummary(tiers) {
+    if (!tiers.length) return '<span style="color:var(--text-secondary);">no tiers</span>';
+    return tiers.map(t => {
+        const range = t.max_market == null ? `≥ ${formatPrice(t.min_market)}` : `${formatPrice(t.min_market)}–${formatPrice(t.max_market)}`;
+        return `${range} → ${formatPrice(t.list_price)}`;
+    }).join(', ');
+}
+
+function renderProfilesTable(container) {
+    const wrap = container.querySelector('#profiles-table-wrap');
+    const rows = profilesState.profiles;
+
+    if (!rows.length) {
+        wrap.innerHTML = `<p style="color:var(--text-secondary)">No pricing profiles yet.</p>`;
+    } else {
+        wrap.innerHTML = `
+            <table>
+                <thead><tr>
+                    <th>Name</th><th>Tiers</th><th>Default low-stock qty</th><th>Notes</th><th style="width:140px;"></th>
+                </tr></thead>
+                <tbody>
+                    ${rows.map(p => `
+                        <tr>
+                            <td>${escapeHTML(p.name)}</td>
+                            <td style="font-size:12px; color:var(--text-secondary);">${tiersSummary(p.tiers)}</td>
+                            <td>${p.default_low_stock_qty ?? '-'}</td>
+                            <td style="color:var(--text-secondary);">${escapeHTML(p.notes || '-')}</td>
+                            <td>
+                                <button class="btn edit-profile-btn" data-id="${p.id}">Edit</button>
+                                <button class="btn manage-tiers-btn" data-id="${p.id}">Tiers</button>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+    }
+
+    container.querySelector('#new-profile-btn').addEventListener('click', () => openProfileModal(container, null));
+    wrap.querySelectorAll('.edit-profile-btn').forEach(btn => {
+        btn.addEventListener('click', () => openProfileModal(container, btn.dataset.id));
+    });
+    wrap.querySelectorAll('.manage-tiers-btn').forEach(btn => {
+        btn.addEventListener('click', () => openProfileTiersModal(container, btn.dataset.id));
+    });
+}
+
+function openProfileModal(container, profileId) {
+    const isEdit = !!profileId;
+    const existing = isEdit ? profilesState.profiles.find(p => p.id === profileId) : null;
+    const root = container.querySelector('#profiles-modal-root');
+
+    root.innerHTML = modalShell(isEdit ? 'Edit pricing profile' : 'New pricing profile', `
+        <div style="display:flex; flex-direction:column; gap:10px;">
+            ${field('Name', 'text', 'name', existing?.name || '', 'e.g. double_rare_rh_ur')}
+            ${field('Notes', 'text', 'notes', existing?.notes || '', '', '', true)}
+            ${field('Default low-stock qty', 'number', 'default_low_stock_qty', existing?.default_low_stock_qty ?? '', 'holds back this many units from being pushed', '', true)}
+        </div>
+        ${!isEdit ? '<p style="color:var(--text-secondary); font-size:12px; margin-top:10px;">Add tiers after creating the profile, via the "Tiers" button.</p>' : ''}
+    `, isEdit, 'profile');
+
+    root.querySelector('#modal-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+    if (isEdit) {
+        root.querySelector('#modal-delete').addEventListener('click', async () => {
+            root.innerHTML = '';
+            await confirmDelete(container, 'pricing_profiles', profileId, `this pricing profile`, () => loadProfiles(container));
+        });
+    }
+    root.querySelector('#modal-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#modal-error');
+        errBox.textContent = '';
+        const fd = new FormData(e.target);
+        const payload = {
+            name: fd.get('name').trim(),
+            notes: fd.get('notes').trim() || null,
+            default_low_stock_qty: fd.get('default_low_stock_qty') ? parseInt(fd.get('default_low_stock_qty'), 10) : null,
+        };
+        try {
+            const { error } = isEdit
+                ? await supabase.from('pricing_profiles').update(payload).eq('id', profileId)
+                : await supabase.from('pricing_profiles').insert(payload);
+            if (error) throw error;
+            root.innerHTML = '';
+            await loadProfiles(container);
+        } catch (err) {
+            console.error(err);
+            const isDupe = err.code === '23505';
+            errBox.textContent = isDupe ? `"${payload.name}" already exists.` : (err.message || 'Failed to save pricing profile.');
+        }
+    });
+}
+
+// -- Tier management (nested within one profile) --
+
+function openProfileTiersModal(container, profileId) {
+    const profile = profilesState.profiles.find(p => p.id === profileId);
+    if (!profile) return;
+    const root = container.querySelector('#profiles-modal-root');
+    renderTiersModalBody(root, container, profileId);
+}
+
+function renderTiersModalBody(root, container, profileId, editingTierId = null) {
+    const profile = profilesState.profiles.find(p => p.id === profileId);
+    const tiers = profile.tiers;
+    const editingTier = editingTierId ? tiers.find(t => t.id === editingTierId) : (editingTierId === 'new' ? {} : null);
+    const isFormOpen = editingTierId !== null;
+
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:460px; max-width:90vw; max-height:85vh; overflow-y:auto;">
+                <h3 style="margin:0 0 4px;">Tiers — ${escapeHTML(profile.name)}</h3>
+                <p style="color:var(--text-secondary); font-size:12px; margin:0 0 14px;">
+                    Market price brackets: min is inclusive, max is exclusive (blank max = open-ended top tier).
+                </p>
+                ${tiers.length ? `
+                    <table style="margin-bottom:12px;">
+                        <thead><tr><th>Min market</th><th>Max market</th><th>List price</th><th style="width:110px;"></th></tr></thead>
+                        <tbody>
+                            ${tiers.map(t => `
+                                <tr>
+                                    <td>${formatPrice(t.min_market)}</td>
+                                    <td>${t.max_market == null ? '(open-ended)' : formatPrice(t.max_market)}</td>
+                                    <td>${formatPrice(t.list_price)}</td>
+                                    <td>
+                                        <button type="button" class="btn edit-tier-row-btn" data-id="${t.id}" style="padding:2px 8px; font-size:12px;">Edit</button>
+                                        <button type="button" class="btn delete-tier-row-btn" data-id="${t.id}" style="padding:2px 8px; font-size:12px; color:var(--danger);">×</button>
+                                    </td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                ` : `<p style="color:var(--text-secondary); font-size:13px;">No tiers yet.</p>`}
+
+                ${isFormOpen ? `
+                    <form id="tier-form" style="border-top:1px solid var(--border); padding-top:12px; display:flex; flex-direction:column; gap:10px;">
+                        <div style="display:flex; gap:10px;">
+                            ${field('Min market ($, inclusive)', 'number', 'min_market', editingTier?.min_market ?? '0.00', '', '0.01')}
+                            ${field('Max market ($, exclusive; blank = open-ended)', 'number', 'max_market', editingTier?.max_market ?? '', '', '0.01', true)}
+                        </div>
+                        ${field('List price ($)', 'number', 'list_price', editingTier?.list_price ?? '', '', '0.01')}
+                        <div id="tier-form-error" style="color:var(--danger); font-size:12px;"></div>
+                        <div style="display:flex; gap:8px;">
+                            <button type="submit" class="btn btn-primary">${editingTierId === 'new' ? 'Add tier' : 'Save tier'}</button>
+                            <button type="button" class="btn" id="tier-form-cancel">Cancel</button>
+                        </div>
+                    </form>
+                ` : `<button type="button" class="btn btn-primary" id="add-tier-btn">+ Add tier</button>`}
+
+                <div style="display:flex; justify-content:flex-end; margin-top:16px;">
+                    <button type="button" class="btn" id="tiers-modal-close">Close</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    root.querySelector('#tiers-modal-close').addEventListener('click', () => { root.innerHTML = ''; });
+
+    if (!isFormOpen) {
+        root.querySelector('#add-tier-btn').addEventListener('click', () => renderTiersModalBody(root, container, profileId, 'new'));
+        root.querySelectorAll('.edit-tier-row-btn').forEach(btn => {
+            btn.addEventListener('click', () => renderTiersModalBody(root, container, profileId, btn.dataset.id));
+        });
+        root.querySelectorAll('.delete-tier-row-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                if (!window.confirm('Delete this tier?')) return;
+                const { error } = await supabase.from('pricing_profile_tiers').delete().eq('id', btn.dataset.id);
+                if (error) { window.alert(`Failed to delete: ${error.message}`); return; }
+                await loadProfiles(container);
+                renderTiersModalBody(root, container, profileId);
+            });
+        });
+        return;
+    }
+
+    root.querySelector('#tier-form-cancel').addEventListener('click', () => renderTiersModalBody(root, container, profileId));
+    root.querySelector('#tier-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#tier-form-error');
+        errBox.textContent = '';
+        const fd = new FormData(e.target);
+        const payload = {
+            profile_id: profileId,
+            min_market: parseFloat(fd.get('min_market')),
+            max_market: fd.get('max_market') ? parseFloat(fd.get('max_market')) : null,
+            list_price: parseFloat(fd.get('list_price')),
+        };
+        try {
+            const { error } = editingTierId === 'new'
+                ? await supabase.from('pricing_profile_tiers').insert(payload)
+                : await supabase.from('pricing_profile_tiers').update(payload).eq('id', editingTierId);
+            if (error) throw error;
+            await loadProfiles(container);
+            renderTiersModalBody(root, container, profileId);
+        } catch (err) {
+            console.error(err);
+            // The DB trigger raises a plain RAISE EXCEPTION message for overlaps —
+            // surface it directly, it's already human-readable.
+            errBox.textContent = err.message || 'Failed to save tier.';
         }
     });
 }
