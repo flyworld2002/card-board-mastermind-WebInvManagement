@@ -20,17 +20,25 @@ let gameState = {
 };
 
 let pricingState = {
-    tab: 'tiers',          // 'tiers' | 'set-config' | 'overrides'
+    tab: 'tiers',          // 'tiers' | 'set-config' | 'overrides' | 'card-type-mapping'
     tiers: [],
     setConfigs: [],
     overrides: [],
+    cardTypeMappings: [],
     sets: [],
     cardSearch: '',
     cardResults: [],
 };
 
+// tier_card_type domain used by both price_tiers and card_type_mapping
+const TIER_CARD_TYPES = ['common', 'holo', 'reverse_holo', 'ultra_rare_rule'];
+
 let templatesState = {
     templates: [],
+};
+
+let syncControlsState = {
+    statuses: [],
 };
 
 // The 7 variant lookup tables card_variants references by `code` — all
@@ -65,7 +73,7 @@ export async function renderConfiguration(container, initialKey = 'sets') {
         wireConfigNav(container, 'card-games');
         await loadGames(container);
     } else if (initialKey === 'pricing-rules') {
-        pricingState = { tab: 'tiers', tiers: [], setConfigs: [], overrides: [], sets: [], cardSearch: '', cardResults: [] };
+        pricingState = { tab: 'tiers', tiers: [], setConfigs: [], overrides: [], cardTypeMappings: [], sets: [], cardSearch: '', cardResults: [] };
         container.innerHTML = configShell(pricingSectionHTML());
         wireConfigNav(container, 'pricing-rules');
         await loadPricing(container);
@@ -80,6 +88,11 @@ export async function renderConfiguration(container, initialKey = 'sets') {
         wireConfigNav(container, 'variant-attributes');
         wireAttrTabs(container);
         await loadAttrTable(container);
+    } else if (initialKey === 'sync-controls') {
+        syncControlsState = { statuses: [] };
+        container.innerHTML = configShell(syncControlsSectionHTML());
+        wireConfigNav(container, 'sync-controls');
+        await loadSyncControls(container);
     } else {
         container.innerHTML = configShell(`<p style="color:var(--text-secondary)">${labelFor(initialKey)} coming soon.</p>`);
         wireConfigNav(container, initialKey);
@@ -100,6 +113,7 @@ function configShell(bodyHTML) {
                 <a href="#pricing-rules" data-config-nav="pricing-rules" class="config-nav-item">Pricing rules</a>
                 <a href="#listing-templates" data-config-nav="listing-templates" class="config-nav-item">Listing templates</a>
                 <a href="#variant-attributes" data-config-nav="variant-attributes" class="config-nav-item">Variant attributes</a>
+                <a href="#sync-controls" data-config-nav="sync-controls" class="config-nav-item">Sync controls</a>
             </div>
             <div style="flex:1; min-width:0;" id="config-body">
                 ${bodyHTML}
@@ -138,6 +152,8 @@ function wireConfigNav(container, activeKey) {
                 await renderConfiguration(container, 'listing-templates');
             } else if (key === 'variant-attributes') {
                 await renderConfiguration(container, 'variant-attributes');
+            } else if (key === 'sync-controls') {
+                await renderConfiguration(container, 'sync-controls');
             } else {
                 // Other configuration sub-pages land here later.
                 container.innerHTML = configShell(`<p style="color:var(--text-secondary)">${labelFor(key)} coming soon.</p>`);
@@ -152,6 +168,7 @@ function labelFor(key) {
         'card-games': 'Card games',
         'pricing-rules': 'Pricing rules',
         'listing-templates': 'Listing templates',
+        'sync-controls': 'Sync controls',
     }[key] || key;
 }
 
@@ -425,6 +442,7 @@ function pricingSectionHTML() {
             <button class="pricing-tab-btn" data-tab="tiers">Price tiers</button>
             <button class="pricing-tab-btn" data-tab="set-config">Set pricing</button>
             <button class="pricing-tab-btn" data-tab="overrides">Card overrides</button>
+            <button class="pricing-tab-btn" data-tab="card-type-mapping">Card type mapping</button>
         </div>
         <div id="pricing-tab-content"><p>Loading...</p></div>
         <div id="pricing-modal-root"></div>
@@ -444,20 +462,24 @@ async function loadPricing(container) {
     const wrap = container.querySelector('#pricing-tab-content');
     try {
         const [{ data: tiers, error: tiersErr }, { data: setConfigs, error: scErr },
-               { data: overrides, error: ovErr }, { data: sets, error: setsErr }] = await Promise.all([
+               { data: overrides, error: ovErr }, { data: mappings, error: mapErr },
+               { data: sets, error: setsErr }] = await Promise.all([
             supabase.from('price_tiers').select('*').order('platform').order('card_type').order('sort_order'),
             supabase.from('set_pricing_config').select('*').order('created_at', { ascending: false }),
             supabase.from('card_pricing_overrides').select('*').order('updated_at', { ascending: false }),
+            supabase.from('card_type_mapping').select('*').order('platform').order('rarity', { nullsFirst: true }),
             supabase.from('card_sets').select('id, name'),
         ]);
         if (tiersErr) throw tiersErr;
         if (scErr) throw scErr;
         if (ovErr) throw ovErr;
+        if (mapErr) throw mapErr;
         if (setsErr) throw setsErr;
 
         pricingState.tiers = tiers || [];
         pricingState.setConfigs = setConfigs || [];
         pricingState.overrides = overrides || [];
+        pricingState.cardTypeMappings = mappings || [];
         pricingState.sets = sets || [];
 
         wirePricingTabs(container);
@@ -482,6 +504,7 @@ function wirePricingTabs(container) {
 function renderPricingTab(container) {
     if (pricingState.tab === 'tiers') renderTiersTab(container);
     else if (pricingState.tab === 'set-config') renderSetConfigTab(container);
+    else if (pricingState.tab === 'card-type-mapping') renderCardTypeMappingTab(container);
     else renderOverridesTab(container);
 }
 
@@ -781,6 +804,112 @@ function openOverrideModal(container, overrideId) {
     });
 }
 
+// -- Card type mapping (rarity + variant_key -> tier_card_type) --------------
+// Resolved most-specific-first by importer/ebay_listing_sync.py's
+// resolve_tier_card_type(): a row with BOTH rarity and variant_key set
+// beats a row with only one set, which beats the all-NULL wildcard.
+// `--ebay-recalc-prices --dry-run` flags any card that only matched the
+// wildcard row, so new/unmapped rarities don't silently price as common.
+
+function renderCardTypeMappingTab(container) {
+    const wrap = container.querySelector('#pricing-tab-content');
+    const rows = pricingState.cardTypeMappings;
+
+    wrap.innerHTML = `
+        <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
+            Maps a card's rarity (and optionally a variant_key pattern, for
+            overrides like reverse-holo) to a pricing tier. Most-specific
+            match wins: rarity + variant_key beats rarity-only beats the
+            wildcard (blank rarity, blank variant_key) row. Cards that only
+            match the wildcard are flagged in <code>--ebay-recalc-prices
+            --dry-run</code> output — add a row here for any rarity that
+            keeps showing up flagged.
+        </p>
+        <div style="display:flex; justify-content:flex-end; margin-bottom:12px;">
+            <button class="btn btn-primary" id="new-mapping-btn">+ New mapping</button>
+        </div>
+        ${rows.length ? `
+        <table>
+            <thead><tr>
+                <th>Platform</th><th>Account</th><th>Rarity</th><th>Variant key pattern</th><th>Tier</th><th>Priority</th><th style="width:60px;"></th>
+            </tr></thead>
+            <tbody>
+                ${rows.map(m => `
+                    <tr>
+                        <td>${escapeHTML(m.platform)}</td>
+                        <td>${m.account ? escapeHTML(m.account) : '<span style="color:var(--text-secondary);">All accounts</span>'}</td>
+                        <td>${m.rarity ? escapeHTML(m.rarity) : '<span style="color:var(--text-secondary);">Any (wildcard)</span>'}</td>
+                        <td><code>${m.variant_key ? escapeHTML(m.variant_key) : '(any)'}</code></td>
+                        <td>${escapeHTML(m.tier_card_type)}</td>
+                        <td>${m.priority}</td>
+                        <td><button class="btn edit-mapping-btn" data-id="${m.id}">Edit</button></td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>` : `<p style="color:var(--text-secondary)">No card type mappings yet.</p>`}
+    `;
+
+    wrap.querySelector('#new-mapping-btn').addEventListener('click', () => openCardTypeMappingModal(container, null));
+    wrap.querySelectorAll('.edit-mapping-btn').forEach(btn => {
+        btn.addEventListener('click', () => openCardTypeMappingModal(container, btn.dataset.id));
+    });
+}
+
+function openCardTypeMappingModal(container, mappingId) {
+    const isEdit = !!mappingId;
+    const existing = isEdit ? pricingState.cardTypeMappings.find(m => m.id === mappingId) : null;
+    const root = container.querySelector('#pricing-modal-root');
+
+    root.innerHTML = modalShell(isEdit ? 'Edit card type mapping' : 'New card type mapping', `
+        <div style="display:flex; flex-direction:column; gap:10px;">
+            ${field('Platform', 'text', 'platform', existing?.platform || 'ebay')}
+            ${field('Account (blank = applies to all accounts)', 'text', 'account', existing?.account || '', 'e.g. BIGGYFISH', '', true)}
+            ${field('Rarity (blank = wildcard, matches any)', 'text', 'rarity', existing?.rarity || '', 'e.g. Illustration Rare', '', true)}
+            ${field('Variant key pattern (blank = any; % wildcards allowed)', 'text', 'variant_key', existing?.variant_key || '', 'e.g. %reverse_holo%', '', true)}
+            <label style="font-size:12px; color:var(--text-secondary);">
+                Tier
+                <select name="tier_card_type" required style="width:100%; margin-top:4px;">
+                    ${TIER_CARD_TYPES.map(v => `<option value="${v}" ${existing?.tier_card_type === v ? 'selected' : ''}>${v}</option>`).join('')}
+                </select>
+            </label>
+            ${field('Priority (tie-break within equal specificity — higher wins)', 'number', 'priority', existing?.priority ?? '10')}
+        </div>
+    `, isEdit, 'mapping');
+
+    root.querySelector('#modal-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+    if (isEdit) {
+        root.querySelector('#modal-delete').addEventListener('click', async () => {
+            root.innerHTML = '';
+            await confirmDelete(container, 'card_type_mapping', mappingId, `this card type mapping`, () => loadPricing(container));
+        });
+    }
+    root.querySelector('#modal-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#modal-error');
+        errBox.textContent = '';
+        const fd = new FormData(e.target);
+        const payload = {
+            platform: fd.get('platform').trim(),
+            account: fd.get('account').trim() || null,
+            rarity: fd.get('rarity').trim() || null,
+            variant_key: fd.get('variant_key').trim() || null,
+            tier_card_type: fd.get('tier_card_type'),
+            priority: parseInt(fd.get('priority'), 10) || 10,
+        };
+        try {
+            const { error } = isEdit
+                ? await supabase.from('card_type_mapping').update(payload).eq('id', mappingId)
+                : await supabase.from('card_type_mapping').insert(payload);
+            if (error) throw error;
+            root.innerHTML = '';
+            await loadPricing(container);
+        } catch (err) {
+            console.error(err);
+            errBox.textContent = err.message || 'Failed to save card type mapping.';
+        }
+    });
+}
+
 // ── Listing templates section ───────────────────────────────────────────────
 
 function templatesSectionHTML() {
@@ -816,7 +945,7 @@ function renderTemplatesTable(container) {
         wrap.innerHTML = `
             <table>
                 <thead><tr>
-                    <th>Name</th><th>Platform</th><th>Account</th><th>Included types</th><th>Card # range</th><th>Shipping</th><th>Max qty</th><th style="width:60px;"></th>
+                    <th>Name</th><th>Platform</th><th>Account</th><th>Kind</th><th>Included types</th><th>Card # range</th><th>Shipping</th><th>Max qty</th><th>Base price</th><th>Priority / Display sort</th><th style="width:60px;"></th>
                 </tr></thead>
                 <tbody>
                     ${rows.map(t => `
@@ -824,10 +953,13 @@ function renderTemplatesTable(container) {
                             <td>${escapeHTML(t.name)}</td>
                             <td>${escapeHTML(t.platform)}</td>
                             <td>${t.account ? escapeHTML(t.account) : '<span style="color:var(--text-secondary);">All accounts</span>'}</td>
+                            <td>${escapeHTML(t.listing_kind || 'variation')}</td>
                             <td style="color:var(--text-secondary); font-size:12px;">${(t.included_types || []).map(escapeHTML).join(', ') || '-'}</td>
                             <td>${t.card_num_min ?? '-'} – ${t.card_num_max ?? '-'}</td>
                             <td>${formatPrice(t.shipping_base)} + ${formatPrice(t.shipping_per_card)}/card</td>
                             <td>${t.max_quantity}</td>
+                            <td>${formatPrice(t.base_price)}</td>
+                            <td style="color:var(--text-secondary); font-size:12px;">${escapeHTML(t.priority_rule || 'card_number')} / ${escapeHTML(t.display_sort || 'card_number')}</td>
                             <td><button class="btn edit-template-btn" data-id="${t.id}">Edit</button></td>
                         </tr>
                     `).join('')}
@@ -864,6 +996,44 @@ function openTemplateModal(container, templateId) {
                 ${field('Shipping per card ($)', 'number', 'shipping_per_card', existing?.shipping_per_card ?? '0.00', '', '0.01')}
             </div>
             ${field('Max quantity', 'number', 'max_quantity', existing?.max_quantity ?? '250')}
+
+            <div style="border-top:1px solid var(--border); margin-top:4px; padding-top:10px;">
+                <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.03em; color:var(--text-secondary); margin-bottom:8px;">
+                    Sync engine settings (docs/plans/ebay-listing-sync.md)
+                </div>
+                <div style="display:flex; flex-direction:column; gap:10px;">
+                    <label style="font-size:12px; color:var(--text-secondary);">
+                        Listing kind
+                        <select name="listing_kind" style="width:100%; margin-top:4px;">
+                            <option value="variation" ${(existing?.listing_kind || 'variation') === 'variation' ? 'selected' : ''}>variation (multi-variation listing)</option>
+                            <option value="single" ${existing?.listing_kind === 'single' ? 'selected' : ''}>single (one card per listing)</option>
+                        </select>
+                    </label>
+                    ${field('Base price ($) — sync price floor, raise-only', 'number', 'base_price', existing?.base_price ?? '', '', '0.01', true)}
+                    ${field('Default quantity limit (per variation)', 'number', 'default_quantity_limit', existing?.default_quantity_limit ?? '', '', '', true)}
+                    <div style="display:flex; gap:10px;">
+                        ${field('Low-stock threshold', 'number', 'low_stock_threshold', existing?.low_stock_threshold ?? '8', '', '', true)}
+                        ${field('Low-stock bump ($)', 'number', 'low_stock_bump', existing?.low_stock_bump ?? '1', '', '0.01', true)}
+                    </div>
+                    <label style="font-size:12px; color:var(--text-secondary);">
+                        Promotion priority (250-cap queue order)
+                        <select name="priority_rule" style="width:100%; margin-top:4px;">
+                            <option value="card_number" ${(existing?.priority_rule || 'card_number') === 'card_number' ? 'selected' : ''}>card_number (plain numeric)</option>
+                            <option value="rh_then_number_holo_last" ${existing?.priority_rule === 'rh_then_number_holo_last' ? 'selected' : ''}>rh_then_number_holo_last (reverse holo first, then number, holo last)</option>
+                        </select>
+                    </label>
+                    <label style="font-size:12px; color:var(--text-secondary);">
+                        Display sort (buyer-facing dropdown order)
+                        <select name="display_sort" style="width:100%; margin-top:4px;">
+                            <option value="card_number" ${(existing?.display_sort || 'card_number') === 'card_number' ? 'selected' : ''}>card_number</option>
+                            <option value="alpha" ${existing?.display_sort === 'alpha' ? 'selected' : ''}>alpha</option>
+                            <option value="release_date" ${existing?.display_sort === 'release_date' ? 'selected' : ''}>release_date (reserved — future themed listings)</option>
+                        </select>
+                    </label>
+                    ${field('Name format', 'text', 'name_format', existing?.name_format || '{number}/{set_total} {name} {suffix}', '', '', true)}
+                    ${field('Card type filter (comma-separated tier types; blank = all)', 'text', 'card_type_filter', (existing?.card_type_filter || []).join(', '), 'common, holo, reverse_holo, ultra_rare_rule', '', true)}
+                </div>
+            </div>
         </div>
     `, isEdit, 'template');
 
@@ -883,6 +1053,8 @@ function openTemplateModal(container, templateId) {
             const raw = fd.get(name).trim();
             return raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
         };
+        const num = (name) => fd.get(name) ? parseFloat(fd.get(name)) : null;
+        const int = (name) => fd.get(name) ? parseInt(fd.get(name), 10) : null;
         const payload = {
             platform: fd.get('platform').trim(),
             account: fd.get('account').trim() || null,
@@ -895,6 +1067,16 @@ function openTemplateModal(container, templateId) {
             shipping_base: parseFloat(fd.get('shipping_base')) || 0,
             shipping_per_card: parseFloat(fd.get('shipping_per_card')) || 0,
             max_quantity: parseInt(fd.get('max_quantity'), 10) || 250,
+            listing_kind: fd.get('listing_kind') || 'variation',
+            base_price: num('base_price'),
+            default_quantity_limit: int('default_quantity_limit'),
+            low_stock_threshold: int('low_stock_threshold') ?? 8,
+            low_stock_bump: num('low_stock_bump') ?? 1,
+            priority_rule: fd.get('priority_rule') || 'card_number',
+            display_sort: fd.get('display_sort') || 'card_number',
+            name_format: fd.get('name_format').trim() || '{number}/{set_total} {name} {suffix}',
+            card_type_filter: splitList('card_type_filter'),
+            updated_at: new Date().toISOString(),
         };
         try {
             const { error } = isEdit
@@ -906,6 +1088,131 @@ function openTemplateModal(container, templateId) {
         } catch (err) {
             console.error(err);
             errBox.textContent = err.message || 'Failed to save listing template.';
+        }
+    });
+}
+
+// ── Sync controls section (platform_sync_status kill switches) ─────────────
+// Emergency freeze for a whole platform or one account. Rows are opt-in —
+// a platform/account with NO row here is fully enabled by default; a row
+// only exists to turn something OFF (or to explicitly re-confirm it's on).
+// This is separate from (and layered UNDER) the per-listing sync_enabled
+// toggle on each platform_listings row — both must pass for a listing to
+// be touched by --ebay-recalc-prices / --ebay-push-listings.
+
+function syncControlsSectionHTML() {
+    return `
+        <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
+            Emergency kill switch for the eBay listing sync engine. A
+            platform-wide row (blank account) freezes sync for every
+            account at once; an account-specific row freezes just that
+            account. No row for a platform/account = sync fully enabled —
+            rows only exist to turn something OFF.
+        </p>
+        <div class="filters-bar" style="justify-content:flex-end;">
+            <button class="btn btn-primary" id="new-syncstatus-btn">+ New kill switch</button>
+        </div>
+        <div id="syncstatus-table-wrap"><p>Loading...</p></div>
+        <div id="syncstatus-modal-root"></div>
+    `;
+}
+
+async function loadSyncControls(container) {
+    const wrap = container.querySelector('#syncstatus-table-wrap');
+    try {
+        const { data, error } = await supabase.from('platform_sync_status').select('*').order('platform').order('account', { nullsFirst: true });
+        if (error) throw error;
+        syncControlsState.statuses = data || [];
+        renderSyncControlsTable(container);
+    } catch (err) {
+        console.error(err);
+        wrap.innerHTML = `<p style="color:var(--danger)">Failed to load sync controls: ${err.message}</p>`;
+    }
+}
+
+function renderSyncControlsTable(container) {
+    const wrap = container.querySelector('#syncstatus-table-wrap');
+    const rows = syncControlsState.statuses;
+
+    if (!rows.length) {
+        wrap.innerHTML = `<p style="color:var(--text-secondary)">No kill switches configured — sync is fully enabled everywhere.</p>`;
+    } else {
+        wrap.innerHTML = `
+            <table>
+                <thead><tr>
+                    <th>Platform</th><th>Account</th><th>Sync enabled</th><th>Disabled at</th><th>Notes</th><th style="width:60px;"></th>
+                </tr></thead>
+                <tbody>
+                    ${rows.map(s => `
+                        <tr>
+                            <td>${escapeHTML(s.platform)}</td>
+                            <td>${s.account ? escapeHTML(s.account) : '<span style="color:var(--text-secondary);">Whole platform</span>'}</td>
+                            <td>${s.sync_enabled
+                                ? '<span style="color:var(--success);">Enabled</span>'
+                                : '<span style="color:var(--danger); font-weight:600;">DISABLED</span>'}</td>
+                            <td style="color:var(--text-secondary); font-size:12px;">${s.disabled_at ? new Date(s.disabled_at).toLocaleString() : '-'}</td>
+                            <td style="color:var(--text-secondary);">${escapeHTML(s.notes || '-')}</td>
+                            <td><button class="btn edit-syncstatus-btn" data-id="${s.id}">Edit</button></td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+    }
+
+    container.querySelector('#new-syncstatus-btn').addEventListener('click', () => openSyncStatusModal(container, null));
+    wrap.querySelectorAll('.edit-syncstatus-btn').forEach(btn => {
+        btn.addEventListener('click', () => openSyncStatusModal(container, btn.dataset.id));
+    });
+}
+
+function openSyncStatusModal(container, statusId) {
+    const isEdit = !!statusId;
+    const existing = isEdit ? syncControlsState.statuses.find(s => s.id === statusId) : null;
+    const root = container.querySelector('#syncstatus-modal-root');
+
+    root.innerHTML = modalShell(isEdit ? 'Edit kill switch' : 'New kill switch', `
+        <div style="display:flex; flex-direction:column; gap:10px;">
+            ${field('Platform', 'text', 'platform', existing?.platform || 'ebay')}
+            ${field('Account (blank = whole platform, all accounts)', 'text', 'account', existing?.account || '', 'e.g. BIGGYFISH', '', true)}
+            <label style="font-size:12px; color:var(--text-secondary); display:flex; align-items:center; gap:8px;">
+                <input type="checkbox" name="sync_enabled" ${existing ? (existing.sync_enabled ? 'checked' : '') : 'checked'} />
+                Sync enabled (uncheck to freeze sync for this platform/account)
+            </label>
+            ${field('Notes', 'text', 'notes', existing?.notes || '', 'why this was turned off', '', true)}
+        </div>
+    `, isEdit, 'syncstatus');
+
+    root.querySelector('#modal-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+    if (isEdit) {
+        root.querySelector('#modal-delete').addEventListener('click', async () => {
+            root.innerHTML = '';
+            await confirmDelete(container, 'platform_sync_status', statusId, `this kill switch`, () => loadSyncControls(container));
+        });
+    }
+    root.querySelector('#modal-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#modal-error');
+        errBox.textContent = '';
+        const fd = new FormData(e.target);
+        const syncEnabled = fd.get('sync_enabled') === 'on';
+        const payload = {
+            platform: fd.get('platform').trim(),
+            account: fd.get('account').trim() || null,
+            sync_enabled: syncEnabled,
+            disabled_at: syncEnabled ? null : new Date().toISOString(),
+            notes: fd.get('notes').trim() || null,
+        };
+        try {
+            const { error } = isEdit
+                ? await supabase.from('platform_sync_status').update(payload).eq('id', statusId)
+                : await supabase.from('platform_sync_status').insert(payload);
+            if (error) throw error;
+            root.innerHTML = '';
+            await loadSyncControls(container);
+        } catch (err) {
+            console.error(err);
+            errBox.textContent = err.message || 'Failed to save kill switch.';
         }
     });
 }

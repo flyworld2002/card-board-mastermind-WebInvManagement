@@ -38,6 +38,7 @@ const state = {
     sets: [],
     visiblePlatforms: loadVisiblePlatforms(),
     expandedVariantId: null,
+    listingTemplates: [],   // cached listing_templates rows for the sync-engine template dropdown
 };
 
 export async function renderInventory(container) {
@@ -52,6 +53,7 @@ export async function renderInventory(container) {
     `;
 
     await loadSets();
+    await loadListingTemplates();
     await loadAxisOptions();  // Inventory only reads AXIS_DISPLAY, no dropdowns needed
     renderFilters(container);
     await loadAndRender(container);
@@ -130,6 +132,23 @@ async function loadSets() {
         .select('name')
         .order('name', { ascending: true });
     state.sets = (data || []).map(r => r.name);
+}
+
+async function loadListingTemplates() {
+    const { data } = await supabase
+        .from('listing_templates')
+        .select('id, name, platform, account')
+        .order('name');
+    state.listingTemplates = data || [];
+}
+
+function templateOptionsHTML(selectedId) {
+    return `<option value="" ${!selectedId ? 'selected' : ''}>(none)</option>`
+        + state.listingTemplates.map(t => `
+            <option value="${t.id}" ${t.id === selectedId ? 'selected' : ''}>
+                ${escapeHtml(t.name)}${t.account ? ' (' + escapeHtml(t.account) + ')' : ''}
+            </option>
+        `).join('');
 }
 
 async function loadAndRender(container) {
@@ -327,6 +346,12 @@ function renderFilters(container) {
             Show out of stock
         </label>
         <button id="inv-platform-settings" class="btn" title="Configure platform columns" style="margin-left:4px;">⚙ Platforms</button>
+        ${f.set_name !== 'all' ? `
+            <button id="inv-bulk-enable-sync" class="btn" style="border-color:var(--accent); color:var(--accent);"
+                    title="Turn on sync_enabled for every eBay listing in ${escapeHtml(f.set_name)}">
+                Enable sync for "${escapeHtml(f.set_name)}"
+            </button>
+        ` : ''}
         <select id="inv-page-size" style="margin-left:auto;">
             ${PAGE_SIZES.map(s =>
                 `<option value="${s}" ${s === state.pageSize ? 'selected' : ''}>${s} per page</option>`
@@ -341,6 +366,7 @@ function renderFilters(container) {
 
     bar.querySelector('#inv-filter-set').addEventListener('change', async (e) => {
         state.filters.set_name = e.target.value; state.page = 0;
+        renderFilters(container); // re-render so the "Enable sync for <set>" button shows/hides
         await loadAndRender(container);
     });
     bar.querySelector('#inv-filter-condition').addEventListener('change', async (e) => {
@@ -373,6 +399,73 @@ function renderFilters(container) {
     bar.querySelector('#inv-platform-settings').addEventListener('click', () => {
         openPlatformSettings(container);
     });
+
+    const bulkEnableBtn = bar.querySelector('#inv-bulk-enable-sync');
+    if (bulkEnableBtn) {
+        bulkEnableBtn.addEventListener('click', () => bulkEnableSyncForSet(container, state.filters.set_name));
+    }
+}
+
+// ----------------------------------------------------------------
+// Bulk enable sync for every eBay listing in one set (Configuration UI
+// deliverable from docs/plans/ebay-listing-sync.md — the "rollout dial"
+// is per-listing sync_enabled, but a whole set's worth of listings is
+// tedious to flip one at a time once a set has proven out).
+// ----------------------------------------------------------------
+
+async function bulkEnableSyncForSet(container, setName) {
+    const { data: matching, error: fetchErr } = await supabase
+        .from('v_inventory_all')
+        .select('variant_id')
+        .eq('set_name', setName);
+
+    if (fetchErr) {
+        window.alert(`Failed to look up "${setName}"'s cards: ${fetchErr.message}`);
+        return;
+    }
+
+    const variantIds = [...new Set((matching || []).map(r => r.variant_id).filter(Boolean))];
+    if (!variantIds.length) {
+        window.alert(`No cards with a variant found for "${setName}".`);
+        return;
+    }
+
+    const { data: listings, error: listingsErr } = await supabase
+        .from('platform_listings')
+        .select('id, sync_enabled')
+        .eq('platform', 'ebay')
+        .in('variant_id', variantIds);
+
+    if (listingsErr) {
+        window.alert(`Failed to look up listings for "${setName}": ${listingsErr.message}`);
+        return;
+    }
+
+    const toEnable = (listings || []).filter(l => !l.sync_enabled);
+    if (!toEnable.length) {
+        window.alert(`All ${listings?.length || 0} eBay listing(s) in "${setName}" already have sync enabled.`);
+        return;
+    }
+
+    const confirmed = window.confirm(
+        `Enable sync for ${toEnable.length} eBay listing${toEnable.length === 1 ? '' : 's'} in "${setName}"?\n\n`
+        + `This lets --ebay-recalc-prices / --ebay-push-listings touch them going forward `
+        + `(they still each need status='active' to actually be synced).`
+    );
+    if (!confirmed) return;
+
+    const { error: updateErr } = await supabase
+        .from('platform_listings')
+        .update({ sync_enabled: true })
+        .in('id', toEnable.map(l => l.id));
+
+    if (updateErr) {
+        window.alert(`Failed to enable sync: ${updateErr.message}`);
+        return;
+    }
+
+    window.alert(`Enabled sync for ${toEnable.length} listing${toEnable.length === 1 ? '' : 's'} in "${setName}".`);
+    await loadAndRender(container);
 }
 
 function openPlatformSettings(container) {
@@ -765,6 +858,20 @@ function openInlineListingEdit(container, row, l, triggerBtn) {
                     <option value="delisted"    ${l.status === 'delisted'    ? 'selected' : ''}>delisted</option>
                 </select>
             </label>
+            <label style="font-size:12px; color:var(--text-secondary);">Template
+                <select class="ile-template" style="margin-top:2px; display:block;">
+                    ${templateOptionsHTML(l.template_id)}
+                </select>
+            </label>
+        </div>
+        <div style="margin-bottom:10px;">
+            <label style="font-size:12px; color:var(--text-secondary); display:flex; align-items:center; gap:6px;">
+                <input type="checkbox" class="ile-sync-enabled" ${l.sync_enabled ? 'checked' : ''} />
+                Sync enabled
+                <span style="color:var(--text-secondary); font-size:11px;">
+                    (allows <code>--ebay-recalc-prices</code> / <code>--ebay-push-listings</code> to touch this listing — still requires status=active)
+                </span>
+            </label>
         </div>
         <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:10px;">Description
             <textarea class="ile-description" rows="2"
@@ -795,6 +902,8 @@ function openInlineListingEdit(container, row, l, triggerBtn) {
         const extId   = editPanel.querySelector('.ile-external-id').value.trim() || null;
         const account = editPanel.querySelector('.ile-account').value.trim() || null;
         const status  = editPanel.querySelector('.ile-status').value;
+        const templateId = editPanel.querySelector('.ile-template').value || null;
+        const syncEnabled = editPanel.querySelector('.ile-sync-enabled').checked;
         const desc    = editPanel.querySelector('.ile-description').value.trim() || null;
         const msg     = editPanel.querySelector('.ile-msg');
 
@@ -808,6 +917,8 @@ function openInlineListingEdit(container, row, l, triggerBtn) {
                 external_id:     extId,
                 account,
                 status,
+                template_id:     templateId,
+                sync_enabled:    syncEnabled,
                 description:     desc,
                 synced_at:       new Date().toISOString(),
             })
@@ -1621,7 +1732,16 @@ async function openListingsModal(container, row) {
                             <option value="delisted"    ${l.status === 'delisted'    ? 'selected' : ''}>delisted</option>
                         </select>
                     </label>
+                    <label style="font-size:12px; color:var(--text-secondary);">Template
+                        <select class="edit-template" style="margin-top:2px; display:block;">
+                            ${templateOptionsHTML(l.template_id)}
+                        </select>
+                    </label>
                 </div>
+                <label style="font-size:12px; color:var(--text-secondary); display:flex; align-items:center; gap:6px; margin-bottom:8px;">
+                    <input type="checkbox" class="edit-sync-enabled" ${l.sync_enabled ? 'checked' : ''} />
+                    Sync enabled
+                </label>
                 <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:8px;">Description
                     <textarea class="edit-description" rows="2"
                               style="width:100%; margin-top:2px; background:var(--bg-tertiary);
@@ -1659,6 +1779,8 @@ async function openListingsModal(container, row) {
             const listId   = div.querySelector('.edit-listing-id').value.trim() || null;
             const extId    = div.querySelector('.edit-external-id').value.trim() || null;
             const status   = div.querySelector('.edit-status').value;
+            const templateId = div.querySelector('.edit-template').value || null;
+            const syncEnabled = div.querySelector('.edit-sync-enabled').checked;
             const desc     = div.querySelector('.edit-description').value.trim() || null;
             const msg      = div.querySelector('.listing-msg');
 
@@ -1671,6 +1793,8 @@ async function openListingsModal(container, row) {
                     listing_id:      listId,
                     external_id:     extId,
                     status,
+                    template_id:     templateId,
+                    sync_enabled:    syncEnabled,
                     description:     desc,
                     synced_at:       new Date().toISOString(),
                 })
