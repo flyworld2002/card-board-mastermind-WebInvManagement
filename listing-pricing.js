@@ -129,7 +129,7 @@ async function loadListing(container) {
         const variantIds = [...new Set(resolved.map(r => r.variant_id).filter(Boolean))];
 
         const [{ data: listingRows, error: lErr }, { data: variants, error: vErr }, { data: rules, error: ruErr }] = await Promise.all([
-            supabase.from('platform_listings').select('id, external_id, manual_price, pushed_price, pushed_qty, pushed_at').in('id', rowIds),
+            supabase.from('platform_listings').select('id, external_id, manual_price, pushed_price, pushed_qty, pushed_at, sync_enabled, status').in('id', rowIds),
             supabase.from('card_variants').select('id, foil_type, card_id').in('id', variantIds),
             supabase.from('listing_pricing_rules').select('*').eq('platform', state.platform).eq('listing_id', state.listingId),
         ]);
@@ -192,16 +192,20 @@ function plainRuleFor(rarity, foilType) {
 function renderBody(container) {
     const body = container.querySelector('#lp-body');
     const groups = groupByLabel();
-    const pendingCount = state.resolvedRows.filter(r => needsPush(r)).length;
+    const pending = state.resolvedRows.filter(r => needsPush(r));
+    const pendingGated = pending.filter(r => isGatedIn(r));
+    const pendingNotGated = pending.length - pendingGated.length;
 
     body.innerHTML = `
         <div style="display:flex; align-items:center; gap:16px; margin:16px 0;">
             <div style="font-size:13px; color:var(--text-secondary);">
                 ${state.resolvedRows.length} line(s) across ${groups.length} label group(s)
-                ${pendingCount > 0 ? ` · <span style="color:var(--warning);">${pendingCount} need push</span>` : ' · in sync'}
+                ${pendingGated.length > 0 ? ` · <span style="color:var(--warning);">${pendingGated.length} need push</span>` : ''}
+                ${pendingNotGated > 0 ? ` · <span style="color:var(--text-secondary);">${pendingNotGated} changed but not sync-enabled (won't push)</span>` : ''}
+                ${pending.length === 0 ? ' · in sync' : ''}
             </div>
-            <button class="btn btn-primary" id="lp-push-btn" style="margin-left:auto;" ${pendingCount === 0 ? 'disabled' : ''}>
-                Push ${pendingCount > 0 ? `(${pendingCount})` : ''}
+            <button class="btn btn-primary" id="lp-push-btn" style="margin-left:auto;" ${pendingGated.length === 0 ? 'disabled' : ''}>
+                Push ${pendingGated.length > 0 ? `(${pendingGated.length})` : ''}
             </button>
             <button class="btn" id="lp-push-dryrun-btn">Dry-run</button>
         </div>
@@ -234,6 +238,16 @@ function needsPush(r) {
     return priceDiff || qtyDiff;
 }
 
+// Client-side approximation of the server-side push gate (sync_enabled +
+// status='active') — doesn't check the platform_sync_status kill switch,
+// which isn't loaded here, but covers the common case so the grid isn't
+// silent about why a row with pending changes won't actually get pushed.
+function isGatedIn(r) {
+    const row = state.listingRows[r.row_id];
+    if (!row) return false;
+    return !!row.sync_enabled && row.status === 'active';
+}
+
 function sourceBadge(source) {
     if (source === 'pin') return `<span class="badge" style="background:rgba(167,139,250,0.15); color:#a78bfa;">pinned</span>`;
     if (source === 'default') return `<span class="badge badge-ambiguous">default</span>`;
@@ -264,7 +278,7 @@ function groupHTML(g) {
             ` : ''}
             <table>
                 <thead><tr>
-                    <th>Variation</th><th>Market</th><th>Resolved</th><th>Source</th><th>Available</th><th>Low-stock qty</th><th>Manual pin</th>
+                    <th>Variation</th><th>Market</th><th>Resolved</th><th>Source</th><th>Synced?</th><th>Available</th><th>Low-stock qty</th><th>Manual pin</th>
                 </tr></thead>
                 <tbody>
                     ${g.rows.map(r => rowHTML(r)).join('')}
@@ -283,6 +297,9 @@ function rowHTML(r) {
             <td>${r.market_price != null ? formatPrice(r.market_price) : '-'}</td>
             <td style="font-weight:600;">${formatPrice(r.resolved_price)}</td>
             <td>${sourceBadge(r.price_source)}</td>
+            <td>${isGatedIn(r)
+                ? '<span style="color:var(--success); font-size:12px;">yes</span>'
+                : '<span style="color:var(--text-secondary); font-size:12px;" title="sync_enabled=false or status != active">no</span>'}</td>
             <td>${r.available_qty ?? '-'}</td>
             <td>
                 <input type="number" class="lp-low-stock-input" data-row-id="${r.row_id}"
@@ -371,6 +388,15 @@ async function doPush(container, dryRun) {
     const msg = body.querySelector('#lp-push-msg');
     const pushBtn = body.querySelector('#lp-push-btn');
     const dryBtn = body.querySelector('#lp-push-dryrun-btn');
+
+    if (!dryRun) {
+        const confirmed = window.confirm(
+            `This will send live price/quantity changes to eBay listing ${state.listingId}. `
+            + `Only rows with sync_enabled=true and status='active' will actually be pushed — `
+            + `run Dry-run first if you haven't already. Continue?`
+        );
+        if (!confirmed) return;
+    }
 
     pushBtn.disabled = true;
     dryBtn.disabled = true;
