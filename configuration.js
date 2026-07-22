@@ -972,8 +972,16 @@ function tiersSummary(tiers) {
     if (!tiers.length) return '<span style="color:var(--text-secondary);">no tiers</span>';
     return tiers.map(t => {
         const range = t.max_market == null ? `≥ ${formatPrice(t.min_market)}` : `${formatPrice(t.min_market)}–${formatPrice(t.max_market)}`;
-        return `${range} → ${formatPrice(t.list_price)}`;
+        return `${range} → ${tierPriceLabel(t)}`;
     }).join(', ');
+}
+
+// A tier is either a flat list_price or a market*multiplier+plus formula
+// (migration 007) — never both, enforced by chk_tier_price_or_formula.
+function tierPriceLabel(t) {
+    if (t.list_price != null) return formatPrice(t.list_price);
+    const plusPart = t.plus ? ` + ${formatPrice(t.plus)}` : '';
+    return `market × ${t.multiplier}${plusPart}`;
 }
 
 function renderProfilesTable(container) {
@@ -1075,6 +1083,7 @@ function renderTiersModalBody(root, container, profileId, editingTierId = null) 
     const tiers = profile.tiers;
     const editingTier = editingTierId ? tiers.find(t => t.id === editingTierId) : (editingTierId === 'new' ? {} : null);
     const isFormOpen = editingTierId !== null;
+    const tierMode = editingTier && editingTier.list_price == null && editingTier.multiplier != null ? 'formula' : 'flat';
 
     root.innerHTML = `
         <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
@@ -1091,7 +1100,7 @@ function renderTiersModalBody(root, container, profileId, editingTierId = null) 
                                 <tr>
                                     <td>${formatPrice(t.min_market)}</td>
                                     <td>${t.max_market == null ? '(open-ended)' : formatPrice(t.max_market)}</td>
-                                    <td>${formatPrice(t.list_price)}</td>
+                                    <td>${tierPriceLabel(t)}</td>
                                     <td>
                                         <button type="button" class="btn edit-tier-row-btn" data-id="${t.id}" style="padding:2px 8px; font-size:12px;">Edit</button>
                                         <button type="button" class="btn delete-tier-row-btn" data-id="${t.id}" style="padding:2px 8px; font-size:12px; color:var(--danger);">×</button>
@@ -1108,7 +1117,19 @@ function renderTiersModalBody(root, container, profileId, editingTierId = null) 
                             ${field('Min market ($, inclusive)', 'number', 'min_market', editingTier?.min_market ?? '0.00', '', '0.01')}
                             ${field('Max market ($, exclusive; blank = open-ended)', 'number', 'max_market', editingTier?.max_market ?? '', '', '0.01', true)}
                         </div>
-                        ${field('List price ($)', 'number', 'list_price', editingTier?.list_price ?? '', '', '0.01')}
+                        <label style="font-size:12px; color:var(--text-secondary);">Pricing
+                            <select id="tier-pricing-mode" name="pricing_mode" style="width:100%; margin-top:4px;">
+                                <option value="flat" ${tierMode === 'flat' ? 'selected' : ''}>Flat price</option>
+                                <option value="formula" ${tierMode === 'formula' ? 'selected' : ''}>Formula (market × multiplier + plus)</option>
+                            </select>
+                        </label>
+                        <div id="tier-flat-fields" style="${tierMode === 'flat' ? '' : 'display:none;'}">
+                            ${field('List price ($)', 'number', 'list_price', editingTier?.list_price ?? '', '', '0.01', true)}
+                        </div>
+                        <div id="tier-formula-fields" style="display:flex; gap:10px; ${tierMode === 'formula' ? '' : 'display:none;'}">
+                            ${field('Multiplier', 'number', 'multiplier', editingTier?.multiplier ?? '', 'e.g. 2', '0.01', true)}
+                            ${field('Plus ($)', 'number', 'plus', editingTier?.plus ?? '', 'e.g. 1.00', '0.01', true)}
+                        </div>
                         <div id="tier-form-error" style="color:var(--danger); font-size:12px;"></div>
                         <div style="display:flex; gap:8px;">
                             <button type="submit" class="btn btn-primary">${editingTierId === 'new' ? 'Add tier' : 'Save tier'}</button>
@@ -1143,17 +1164,34 @@ function renderTiersModalBody(root, container, profileId, editingTierId = null) 
         return;
     }
 
+    root.querySelector('#tier-pricing-mode').addEventListener('change', (e) => {
+        const isFormula = e.target.value === 'formula';
+        root.querySelector('#tier-flat-fields').style.display = isFormula ? 'none' : '';
+        root.querySelector('#tier-formula-fields').style.display = isFormula ? 'flex' : 'none';
+    });
+
     root.querySelector('#tier-form-cancel').addEventListener('click', () => renderTiersModalBody(root, container, profileId));
     root.querySelector('#tier-form').addEventListener('submit', async (e) => {
         e.preventDefault();
         const errBox = root.querySelector('#tier-form-error');
         errBox.textContent = '';
         const fd = new FormData(e.target);
+        const mode = fd.get('pricing_mode');
+        if (mode === 'flat' && !fd.get('list_price')) {
+            errBox.textContent = 'List price is required for a flat tier.';
+            return;
+        }
+        if (mode === 'formula' && !fd.get('multiplier')) {
+            errBox.textContent = 'Multiplier is required for a formula tier.';
+            return;
+        }
         const payload = {
             profile_id: profileId,
             min_market: parseFloat(fd.get('min_market')),
             max_market: fd.get('max_market') ? parseFloat(fd.get('max_market')) : null,
-            list_price: parseFloat(fd.get('list_price')),
+            list_price: mode === 'flat' ? parseFloat(fd.get('list_price')) : null,
+            multiplier: mode === 'formula' ? parseFloat(fd.get('multiplier')) : null,
+            plus: mode === 'formula' && fd.get('plus') ? parseFloat(fd.get('plus')) : null,
         };
         try {
             const { error } = editingTierId === 'new'

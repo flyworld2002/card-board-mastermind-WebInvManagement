@@ -273,7 +273,7 @@ async function loadListing(container) {
         if (plIds.length) {
             const { data: listingRows } = await supabase
                 .from('platform_listings')
-                .select('id, external_id, manual_price, pushed_price, pushed_qty, pushed_at, sync_enabled, status')
+                .select('id, external_id, manual_price, quantity_limit, pushed_price, pushed_qty, pushed_at, sync_enabled, status')
                 .in('id', plIds);
             state.listingRowsByPLId = Object.fromEntries((listingRows || []).map(r => [r.id, r]));
         } else {
@@ -334,10 +334,15 @@ function needsPush(r) {
     if (!row) return false;
     if (row.pushed_at == null) return true;
     const priceDiff = row.pushed_price == null || Math.abs(Number(row.pushed_price) - Number(r.resolved_price)) >= 0.005;
-    const available = r.available_qty ?? 0;
-    const gated = r.low_stock_qty == null ? available : Math.max(available - r.low_stock_qty, 0);
-    const qtyDiff = row.pushed_qty == null || row.pushed_qty !== gated;
+    const qtyDiff = row.pushed_qty == null || row.pushed_qty !== resolvedQty(r);
     return priceDiff || qtyDiff;
+}
+
+function resolvedQty(r) {
+    const available = r.available_qty ?? 0;
+    let qty = r.low_stock_qty != null ? Math.max(available - r.low_stock_qty, 0) : available;
+    if (r.quantity_limit != null) qty = Math.min(qty, r.quantity_limit);
+    return qty;
 }
 
 function isGatedIn(r) {
@@ -444,7 +449,7 @@ function groupSectionHTML(group, rows) {
             ${rows.length ? `
                 <table>
                     <thead><tr>
-                        <th style="width:24px;"></th><th>Variation</th><th>Status</th><th>Market</th><th>Resolved</th><th>Source</th><th>Synced?</th><th>Available</th><th>Low-stock qty</th><th>Manual pin</th>
+                        <th style="width:24px;"></th><th>Variation</th><th>Status</th><th>Market</th><th>Resolved</th><th>Source</th><th>Synced?</th><th>Available</th><th>Resolved Qty</th><th>Low-stock qty</th><th>Manual pin</th><th>Qty Limit pin</th>
                     </tr></thead>
                     <tbody>${rows.map(r => rowHTML(r)).join('')}</tbody>
                 </table>
@@ -469,10 +474,13 @@ function rowHTML(r) {
                 ? (isGatedIn(r) ? '<span style="color:var(--success); font-size:12px;">yes</span>' : '<span style="color:var(--text-secondary); font-size:12px;">no</span>')
                 : '<span style="color:var(--text-secondary); font-size:12px;">n/a</span>'}</td>
             <td>${r.available_qty ?? '-'}</td>
+            <td>${isActive ? resolvedQty(r) : '-'}</td>
             <td><input type="number" class="lp-low-stock-input" data-row-id="${r.row_id}" data-pl-id="${r.platform_listing_id || ''}"
                        value="${r.low_stock_qty ?? ''}" placeholder="-" style="width:60px;" ${isActive ? '' : 'disabled title="only editable once live"'} /></td>
             <td><input type="number" step="0.01" class="lp-pin-input" data-pl-id="${r.platform_listing_id || ''}"
                        value="${listingRow.manual_price ?? ''}" placeholder="${isActive ? 'unpinned' : 'n/a'}" style="width:80px;" ${isActive ? '' : 'disabled'} /></td>
+            <td><input type="number" class="lp-qty-limit-input" data-pl-id="${r.platform_listing_id || ''}"
+                       value="${listingRow.quantity_limit ?? ''}" placeholder="${isActive ? 'default' : 'n/a'}" style="width:70px;" ${isActive ? '' : 'disabled'} /></td>
         </tr>
     `;
 }
@@ -578,6 +586,18 @@ function wireControls(container, body) {
             const lowStockQty = raw === '' ? null : parseInt(raw, 10);
             const { error } = await supabase.from('platform_listings').update({ low_stock_qty: lowStockQty }).eq('id', plId);
             if (error) { window.alert(`Failed to save low-stock qty: ${error.message}`); return; }
+            await loadListing(container);
+        });
+    });
+
+    body.querySelectorAll('.lp-qty-limit-input').forEach(input => {
+        input.addEventListener('change', async () => {
+            const plId = input.dataset.plId;
+            if (!plId) return;
+            const raw = input.value.trim();
+            const quantityLimit = raw === '' ? null : parseInt(raw, 10);
+            const { error } = await supabase.from('platform_listings').update({ quantity_limit: quantityLimit }).eq('id', plId);
+            if (error) { window.alert(`Failed to save qty limit pin: ${error.message}`); return; }
             await loadListing(container);
         });
     });
@@ -732,16 +752,34 @@ function openNewProfileModal(container, body, groupId) {
     let tierCount = 1;
 
     const tierRowHTML = (i) => `
-        <div class="lp-new-profile-tier-row" data-i="${i}" style="display:flex; gap:8px; align-items:flex-end; margin-bottom:6px;">
-            <label style="font-size:11px; color:var(--text-secondary); flex:1;">Min market ($)
-                <input type="number" step="0.01" class="lp-tier-min" value="0.00" style="width:100%; margin-top:2px;" />
-            </label>
-            <label style="font-size:11px; color:var(--text-secondary); flex:1;">Max market ($, blank=open-ended)
-                <input type="number" step="0.01" class="lp-tier-max" style="width:100%; margin-top:2px;" />
-            </label>
-            <label style="font-size:11px; color:var(--text-secondary); flex:1;">List price ($)
-                <input type="number" step="0.01" class="lp-tier-price" style="width:100%; margin-top:2px;" />
-            </label>
+        <div class="lp-new-profile-tier-row" data-i="${i}" style="border:1px solid var(--border); border-radius:6px; padding:8px; margin-bottom:6px;">
+            <div style="display:flex; gap:8px; align-items:flex-end;">
+                <label style="font-size:11px; color:var(--text-secondary); flex:1;">Min market ($)
+                    <input type="number" step="0.01" class="lp-tier-min" value="0.00" style="width:100%; margin-top:2px;" />
+                </label>
+                <label style="font-size:11px; color:var(--text-secondary); flex:1;">Max market ($, blank=open-ended)
+                    <input type="number" step="0.01" class="lp-tier-max" style="width:100%; margin-top:2px;" />
+                </label>
+                <label style="font-size:11px; color:var(--text-secondary); flex:1;">Pricing
+                    <select class="lp-tier-mode" style="width:100%; margin-top:2px;">
+                        <option value="flat">Flat price</option>
+                        <option value="formula">Formula</option>
+                    </select>
+                </label>
+            </div>
+            <div class="lp-tier-flat-fields" style="display:flex; gap:8px; align-items:flex-end; margin-top:6px;">
+                <label style="font-size:11px; color:var(--text-secondary); flex:1;">List price ($)
+                    <input type="number" step="0.01" class="lp-tier-price" style="width:100%; margin-top:2px;" />
+                </label>
+            </div>
+            <div class="lp-tier-formula-fields" style="display:none; gap:8px; align-items:flex-end; margin-top:6px;">
+                <label style="font-size:11px; color:var(--text-secondary); flex:1;">Multiplier (× market)
+                    <input type="number" step="0.01" class="lp-tier-multiplier" style="width:100%; margin-top:2px;" />
+                </label>
+                <label style="font-size:11px; color:var(--text-secondary); flex:1;">Plus ($)
+                    <input type="number" step="0.01" class="lp-tier-plus" style="width:100%; margin-top:2px;" />
+                </label>
+            </div>
         </div>
     `;
 
@@ -773,6 +811,15 @@ function openNewProfileModal(container, body, groupId) {
         root.querySelector('#lp-new-profile-tiers').insertAdjacentHTML('beforeend', tierRowHTML(tierCount++));
     });
 
+    // Delegated listener so it keeps working for rows added later via + Add tier.
+    root.querySelector('#lp-new-profile-tiers').addEventListener('change', (e) => {
+        if (!e.target.classList.contains('lp-tier-mode')) return;
+        const rowEl = e.target.closest('.lp-new-profile-tier-row');
+        const isFormula = e.target.value === 'formula';
+        rowEl.querySelector('.lp-tier-flat-fields').style.display = isFormula ? 'none' : 'flex';
+        rowEl.querySelector('.lp-tier-formula-fields').style.display = isFormula ? 'flex' : 'none';
+    });
+
     root.querySelector('#lp-new-profile-cancel').addEventListener('click', async () => {
         root.innerHTML = '';
         // The <select> was left on "__new__" — reload to reset it to whatever's actually assigned.
@@ -785,13 +832,20 @@ function openNewProfileModal(container, body, groupId) {
         const name = root.querySelector('#lp-new-profile-name').value.trim();
         if (!name) { errBox.textContent = 'Enter a name.'; return; }
 
-        const tierRows = [...root.querySelectorAll('.lp-new-profile-tier-row')].map(rowEl => ({
-            min_market: parseFloat(rowEl.querySelector('.lp-tier-min').value),
-            max_market: rowEl.querySelector('.lp-tier-max').value ? parseFloat(rowEl.querySelector('.lp-tier-max').value) : null,
-            list_price: parseFloat(rowEl.querySelector('.lp-tier-price').value),
-        })).filter(t => !isNaN(t.min_market) && !isNaN(t.list_price));
+        const tierRows = [...root.querySelectorAll('.lp-new-profile-tier-row')].map(rowEl => {
+            const isFormula = rowEl.querySelector('.lp-tier-mode').value === 'formula';
+            const multiplierRaw = rowEl.querySelector('.lp-tier-multiplier').value;
+            const plusRaw = rowEl.querySelector('.lp-tier-plus').value;
+            return {
+                min_market: parseFloat(rowEl.querySelector('.lp-tier-min').value),
+                max_market: rowEl.querySelector('.lp-tier-max').value ? parseFloat(rowEl.querySelector('.lp-tier-max').value) : null,
+                list_price: isFormula ? null : parseFloat(rowEl.querySelector('.lp-tier-price').value),
+                multiplier: isFormula && multiplierRaw ? parseFloat(multiplierRaw) : null,
+                plus: isFormula && plusRaw ? parseFloat(plusRaw) : null,
+            };
+        }).filter(t => !isNaN(t.min_market) && (t.list_price != null ? !isNaN(t.list_price) : t.multiplier != null));
 
-        if (!tierRows.length) { errBox.textContent = 'Add at least one complete tier (min market + list price).'; return; }
+        if (!tierRows.length) { errBox.textContent = 'Add at least one complete tier (min market + a list price or multiplier).'; return; }
 
         // Generate the id client-side (standard crypto.randomUUID()) rather
         // than relying on reading it back after insert — keeps this to the
