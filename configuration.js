@@ -41,6 +41,11 @@ let profilesState = {
     profiles: [],
 };
 
+let groupsState = {
+    groups: [],
+    templates: [],
+};
+
 // The 7 variant lookup tables card_variants references by `code` — all
 // share the identical (code, display_name, sort_order) shape, so one
 // generic CRUD component handles all of them instead of 7 near-copies.
@@ -93,6 +98,11 @@ export async function renderConfiguration(container, initialKey = 'sets') {
         container.innerHTML = configShell(profilesSectionHTML());
         wireConfigNav(container, 'pricing-profiles');
         await loadProfiles(container);
+    } else if (initialKey === 'groups') {
+        groupsState = { groups: [], templates: [] };
+        container.innerHTML = configShell(groupsSectionHTML());
+        wireConfigNav(container, 'groups');
+        await loadGroups(container);
     } else {
         container.innerHTML = configShell(`<p style="color:var(--text-secondary)">${labelFor(initialKey)} coming soon.</p>`);
         wireConfigNav(container, initialKey);
@@ -112,6 +122,7 @@ function configShell(bodyHTML) {
                 <a href="#card-games" data-config-nav="card-games" class="config-nav-item">Card games</a>
                 <a href="#pricing-rules" data-config-nav="pricing-rules" class="config-nav-item">Pricing rules</a>
                 <a href="#pricing-profiles" data-config-nav="pricing-profiles" class="config-nav-item">Pricing profiles</a>
+                <a href="#groups" data-config-nav="groups" class="config-nav-item">Groups</a>
                 <a href="#variant-attributes" data-config-nav="variant-attributes" class="config-nav-item">Variant attributes</a>
                 <a href="#sync-controls" data-config-nav="sync-controls" class="config-nav-item">Sync controls</a>
             </div>
@@ -154,6 +165,8 @@ function wireConfigNav(container, activeKey) {
                 await renderConfiguration(container, 'sync-controls');
             } else if (key === 'pricing-profiles') {
                 await renderConfiguration(container, 'pricing-profiles');
+            } else if (key === 'groups') {
+                await renderConfiguration(container, 'groups');
             } else {
                 // Other configuration sub-pages land here later.
                 container.innerHTML = configShell(`<p style="color:var(--text-secondary)">${labelFor(key)} coming soon.</p>`);
@@ -169,6 +182,7 @@ function labelFor(key) {
         'pricing-rules': 'Pricing rules',
         'sync-controls': 'Sync controls',
         'pricing-profiles': 'Pricing profiles',
+        'groups': 'Groups',
     }[key] || key;
 }
 
@@ -1153,6 +1167,140 @@ function renderTiersModalBody(root, container, profileId, editingTierId = null) 
             // The DB trigger raises a plain RAISE EXCEPTION message for overlaps —
             // surface it directly, it's already human-readable.
             errBox.textContent = err.message || 'Failed to save tier.';
+        }
+    });
+}
+
+// ── Groups section (listing_card_groups — read/manage from Configuration
+// too, per Fei's request; day-to-day group creation still happens inline
+// on the Listing pricing page). Groups stay listing-scoped by design —
+// see docs/plans/listing-pricing-system.md — this table shows which
+// template/listing each group belongs to and lets you rename/reassign a
+// profile/delete without opening that listing.
+// ────────────────────────────────────────────────────────────────────────
+
+function groupsSectionHTML() {
+    return `
+        <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
+            Groups are listing-scoped — the same name can be reused across
+            listings (suggested when creating one), but each is a separate
+            group with its own profile assignment. Day-to-day group
+            creation happens on the Listing pricing page; this is for
+            renaming/reassigning/deleting without opening that listing.
+        </p>
+        <div id="groups-table-wrap"><p>Loading...</p></div>
+        <div id="groups-modal-root"></div>
+    `;
+}
+
+async function loadGroups(container) {
+    const wrap = container.querySelector('#groups-table-wrap');
+    try {
+        // Load profiles here too (not just relying on profilesState from a
+        // prior visit to the Pricing profiles tab — that may never have
+        // happened this session).
+        const [{ data: groups, error: gErr }, { data: templates, error: tErr },
+               { data: profiles, error: pErr }] = await Promise.all([
+            supabase.from('listing_card_groups').select('*').order('name'),
+            supabase.from('listing_templates').select('id, name, listing_id'),
+            supabase.from('pricing_profiles').select('*').order('name'),
+        ]);
+        if (gErr) throw gErr;
+        if (tErr) throw tErr;
+        if (pErr) throw pErr;
+        groupsState.groups = groups || [];
+        groupsState.templates = templates || [];
+        profilesState.profiles = profiles || [];
+        renderGroupsTable(container);
+    } catch (err) {
+        console.error(err);
+        wrap.innerHTML = `<p style="color:var(--danger)">Failed to load groups: ${err.message}</p>`;
+    }
+}
+
+function renderGroupsTable(container) {
+    const wrap = container.querySelector('#groups-table-wrap');
+    const rows = groupsState.groups;
+    const templateById = Object.fromEntries(groupsState.templates.map(t => [t.id, t]));
+
+    if (!rows.length) {
+        wrap.innerHTML = `<p style="color:var(--text-secondary)">No groups yet — create one on the Listing pricing page.</p>`;
+    } else {
+        wrap.innerHTML = `
+            <table>
+                <thead><tr>
+                    <th>Group name</th><th>Listing (template)</th><th>eBay Item #</th><th>Profile</th><th style="width:60px;"></th>
+                </tr></thead>
+                <tbody>
+                    ${rows.map(g => {
+                        const t = templateById[g.template_id];
+                        const profile = g.profile_id ? profilesState.profiles.find(p => p.id === g.profile_id) : null;
+                        return `
+                        <tr>
+                            <td>${escapeHTML(g.name)}</td>
+                            <td>${t ? escapeHTML(t.name) : '<span style="color:var(--text-secondary);">(unknown template)</span>'}</td>
+                            <td>${t?.listing_id ? escapeHTML(t.listing_id) : '<span style="color:var(--text-secondary);">-</span>'}</td>
+                            <td>${profile ? escapeHTML(profile.name) : '<span style="color:var(--text-secondary);">none</span>'}</td>
+                            <td><button class="btn edit-group-btn" data-id="${g.id}">Edit</button></td>
+                        </tr>
+                    `;
+                    }).join('')}
+                </tbody>
+            </table>
+        `;
+    }
+
+    wrap.querySelectorAll('.edit-group-btn').forEach(btn => {
+        btn.addEventListener('click', () => openGroupModal(container, btn.dataset.id));
+    });
+}
+
+function openGroupModal(container, groupId) {
+    const existing = groupsState.groups.find(g => g.id === groupId);
+    if (!existing) return;
+    const root = container.querySelector('#groups-modal-root');
+
+    root.innerHTML = modalShell('Edit group', `
+        <div style="display:flex; flex-direction:column; gap:10px;">
+            <p style="font-size:12px; color:var(--text-secondary); margin:0;">
+                Listing: ${escapeHTML(groupsState.templates.find(t => t.id === existing.template_id)?.name || 'unknown')}
+                (can't be moved to a different listing here — delete and recreate on that listing's page if needed)
+            </p>
+            ${field('Name', 'text', 'name', existing.name)}
+            <label style="font-size:12px; color:var(--text-secondary);">
+                Profile
+                <select name="profile_id" style="width:100%; margin-top:4px;">
+                    <option value="">(none — falls to platform default)</option>
+                    ${profilesState.profiles.map(p => `<option value="${p.id}" ${existing.profile_id === p.id ? 'selected' : ''}>${escapeHTML(p.name)}</option>`).join('')}
+                </select>
+            </label>
+        </div>
+    `, true, 'group');
+
+    root.querySelector('#modal-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+    root.querySelector('#modal-delete').addEventListener('click', async () => {
+        root.innerHTML = '';
+        await confirmDelete(container, 'listing_card_groups', groupId,
+            `this group (cards in it become ungrouped, not deleted)`, () => loadGroups(container));
+    });
+    root.querySelector('#modal-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#modal-error');
+        errBox.textContent = '';
+        const fd = new FormData(e.target);
+        const payload = {
+            name: fd.get('name').trim(),
+            profile_id: fd.get('profile_id') || null,
+        };
+        try {
+            const { error } = await supabase.from('listing_card_groups').update(payload).eq('id', groupId);
+            if (error) throw error;
+            root.innerHTML = '';
+            await loadGroups(container);
+        } catch (err) {
+            console.error(err);
+            errBox.textContent = err.code === '23505' ? `A group named "${payload.name}" already exists on this listing.`
+                : (err.message || 'Failed to save group.');
         }
     });
 }

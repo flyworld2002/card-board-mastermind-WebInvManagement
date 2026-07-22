@@ -41,6 +41,11 @@ let state = {
     selected: new Set(),     // selected listing_card_assignments.row_id values
 };
 
+// Shift-click range-select anchor — index into the flat, top-to-bottom
+// checkbox list (spans group boundaries), not part of `state` since it's
+// pure UI interaction state, not data.
+let lastClickedCheckboxIndex = null;
+
 export async function renderListingPricing(container) {
     container.innerHTML = shellHTML();
     const { data } = await supabase.from('pricing_profiles').select('*').order('name');
@@ -478,10 +483,26 @@ function rowHTML(r) {
 function wireControls(container, body) {
     body.querySelector('#lp-back-to-templates-btn').addEventListener('click', () => renderTemplatesList(container));
 
-    body.querySelectorAll('.lp-row-checkbox').forEach(cb => {
-        cb.addEventListener('change', () => {
-            if (cb.checked) state.selected.add(cb.dataset.rowId);
-            else state.selected.delete(cb.dataset.rowId);
+    // Shift-click range select: click (not change, so we can read e.shiftKey)
+    // on a checkbox with shift held toggles every checkbox between it and
+    // the last one clicked, matching the state the just-clicked box ended
+    // up in — same convention as file-manager-style multi-select.
+    const checkboxes = [...body.querySelectorAll('.lp-row-checkbox')];
+    checkboxes.forEach((cb, index) => {
+        cb.addEventListener('click', (e) => {
+            if (e.shiftKey && lastClickedCheckboxIndex !== null) {
+                const [start, end] = [lastClickedCheckboxIndex, index].sort((a, b) => a - b);
+                const checked = cb.checked;
+                for (let i = start; i <= end; i++) {
+                    checkboxes[i].checked = checked;
+                    if (checked) state.selected.add(checkboxes[i].dataset.rowId);
+                    else state.selected.delete(checkboxes[i].dataset.rowId);
+                }
+            } else {
+                if (cb.checked) state.selected.add(cb.dataset.rowId);
+                else state.selected.delete(cb.dataset.rowId);
+            }
+            lastClickedCheckboxIndex = index;
             renderBody(container);
         });
     });
@@ -609,10 +630,14 @@ async function importExisting(container) {
 
 // ----------------------------------------------------------------
 // New group — group NAMES are reusable/consistent across listings (a
-// datalist of every name used anywhere suggests existing ones), but each
-// pick always creates a separate row scoped to THIS template, with its
-// own profile assignment. This intentionally does NOT share pricing
-// across listings — see the conversation in the plan doc for why.
+// custom dropdown, expanded on focus, suggests every name used anywhere),
+// but each pick always creates a separate row scoped to THIS template,
+// with its own profile assignment. This intentionally does NOT share
+// pricing across listings — see the conversation in the plan doc for why.
+//
+// Uses a hand-rolled dropdown instead of a native <datalist>: datalists
+// only reliably show suggestions once you start typing in most browsers,
+// and Fei specifically wants the full list on focus.
 // ----------------------------------------------------------------
 
 async function openNewGroupModal(container, body) {
@@ -628,10 +653,12 @@ async function openNewGroupModal(container, body) {
                     Type a new name or pick a name you've used on another listing to stay consistent —
                     this always creates a separate group scoped to this listing, with its own profile.
                 </p>
-                <input type="text" id="lp-new-group-name" list="lp-group-name-suggestions" placeholder="e.g. Bulk Holos" style="width:100%;" />
-                <datalist id="lp-group-name-suggestions">
-                    ${names.map(n => `<option value="${escapeHtml(n)}"></option>`).join('')}
-                </datalist>
+                <div style="position:relative;">
+                    <input type="text" id="lp-new-group-name" placeholder="e.g. Bulk Holos" autocomplete="off" style="width:100%;" />
+                    <div id="lp-group-name-dropdown" style="display:none; position:absolute; top:100%; left:0; right:0;
+                         background:var(--bg-tertiary); border:1px solid var(--border); border-radius:4px;
+                         max-height:180px; overflow-y:auto; z-index:10;"></div>
+                </div>
                 <div id="lp-new-group-error" style="color:var(--danger); font-size:12px; margin-top:8px;"></div>
                 <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
                     <button type="button" class="btn" id="lp-new-group-cancel">Cancel</button>
@@ -641,9 +668,37 @@ async function openNewGroupModal(container, body) {
         </div>
     `;
 
+    const input = root.querySelector('#lp-new-group-name');
+    const dropdown = root.querySelector('#lp-group-name-dropdown');
+
+    function showSuggestions(filterText) {
+        const filtered = filterText
+            ? names.filter(n => n.toLowerCase().includes(filterText.toLowerCase()))
+            : names;
+        if (!filtered.length) { dropdown.style.display = 'none'; return; }
+        dropdown.innerHTML = filtered.map(n => `
+            <div class="lp-group-suggestion" data-name="${escapeHtml(n)}"
+                 style="padding:6px 10px; cursor:pointer; font-size:13px;">${escapeHtml(n)}</div>
+        `).join('');
+        dropdown.style.display = 'block';
+        dropdown.querySelectorAll('.lp-group-suggestion').forEach(el => {
+            // mousedown (not click) fires before the input's blur, so the
+            // selection registers before we hide the dropdown on blur.
+            el.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                input.value = el.dataset.name;
+                dropdown.style.display = 'none';
+            });
+        });
+    }
+
+    input.addEventListener('focus', () => showSuggestions(input.value));
+    input.addEventListener('input', () => showSuggestions(input.value));
+    input.addEventListener('blur', () => setTimeout(() => { dropdown.style.display = 'none'; }, 150));
+
     root.querySelector('#lp-new-group-cancel').addEventListener('click', () => { root.innerHTML = ''; });
     root.querySelector('#lp-new-group-create').addEventListener('click', async () => {
-        const name = root.querySelector('#lp-new-group-name').value.trim();
+        const name = input.value.trim();
         const errBox = root.querySelector('#lp-new-group-error');
         if (!name) { errBox.textContent = 'Enter a name.'; return; }
 
