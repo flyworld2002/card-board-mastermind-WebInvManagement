@@ -434,6 +434,7 @@ function groupSectionHTML(group, rows) {
                         <select class="lp-group-profile-picker" data-group-id="${group.id}" style="margin-left:6px;">
                             <option value="">(none — falls to platform default)</option>
                             ${state.profiles.map(p => `<option value="${p.id}" ${profile && profile.id === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
+                            <option value="__new__">+ New profile...</option>
                         </select>
                     </label>
                     <button class="btn lp-rename-group-btn" data-group-id="${group.id}" style="font-size:12px; padding:3px 8px;">Rename</button>
@@ -546,6 +547,10 @@ function wireControls(container, body) {
 
     body.querySelectorAll('.lp-group-profile-picker').forEach(sel => {
         sel.addEventListener('change', async () => {
+            if (sel.value === '__new__') {
+                openNewProfileModal(container, body, sel.dataset.groupId);
+                return;
+            }
             const { error } = await supabase.from('listing_card_groups')
                 .update({ profile_id: sel.value || null }).eq('id', sel.dataset.groupId);
             if (error) { window.alert(`Failed to assign profile: ${error.message}`); return; }
@@ -709,6 +714,115 @@ async function openNewGroupModal(container, body) {
             errBox.textContent = error.code === '23505' ? `A group named "${name}" already exists on this listing.` : error.message;
             return;
         }
+        root.innerHTML = '';
+        await loadListing(container);
+    });
+}
+
+// ----------------------------------------------------------------
+// New profile — quick inline creation so you don't have to leave the
+// page to set up pricing for a new group. Includes at least one tier
+// (a profile with none would silently fall through to the platform
+// default formula, which is technically safe but a confusing result
+// right after creating and assigning it).
+// ----------------------------------------------------------------
+
+function openNewProfileModal(container, body, groupId) {
+    const root = body.querySelector('#lp-modal-root');
+    let tierCount = 1;
+
+    const tierRowHTML = (i) => `
+        <div class="lp-new-profile-tier-row" data-i="${i}" style="display:flex; gap:8px; align-items:flex-end; margin-bottom:6px;">
+            <label style="font-size:11px; color:var(--text-secondary); flex:1;">Min market ($)
+                <input type="number" step="0.01" class="lp-tier-min" value="0.00" style="width:100%; margin-top:2px;" />
+            </label>
+            <label style="font-size:11px; color:var(--text-secondary); flex:1;">Max market ($, blank=open-ended)
+                <input type="number" step="0.01" class="lp-tier-max" style="width:100%; margin-top:2px;" />
+            </label>
+            <label style="font-size:11px; color:var(--text-secondary); flex:1;">List price ($)
+                <input type="number" step="0.01" class="lp-tier-price" style="width:100%; margin-top:2px;" />
+            </label>
+        </div>
+    `;
+
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:460px; max-width:90vw; max-height:85vh; overflow-y:auto;">
+                <h3 style="margin:0 0 12px;">New pricing profile</h3>
+                <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:10px;">Name
+                    <input type="text" id="lp-new-profile-name" placeholder="e.g. double_rare_common" style="width:100%; margin-top:4px;" />
+                </label>
+                <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:10px;">Default low-stock qty (optional)
+                    <input type="number" id="lp-new-profile-lowstock" style="width:100%; margin-top:4px;" />
+                </label>
+                <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.03em; color:var(--text-secondary); margin:12px 0 6px;">
+                    Tiers (min inclusive, max exclusive)
+                </div>
+                <div id="lp-new-profile-tiers">${tierRowHTML(0)}</div>
+                <button type="button" class="btn" id="lp-add-tier-row-btn" style="font-size:12px; margin-top:6px;">+ Add tier</button>
+                <div id="lp-new-profile-error" style="color:var(--danger); font-size:12px; margin-top:10px;"></div>
+                <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+                    <button type="button" class="btn" id="lp-new-profile-cancel">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="lp-new-profile-create">Create & assign</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    root.querySelector('#lp-add-tier-row-btn').addEventListener('click', () => {
+        root.querySelector('#lp-new-profile-tiers').insertAdjacentHTML('beforeend', tierRowHTML(tierCount++));
+    });
+
+    root.querySelector('#lp-new-profile-cancel').addEventListener('click', async () => {
+        root.innerHTML = '';
+        // The <select> was left on "__new__" — reload to reset it to whatever's actually assigned.
+        await loadListing(container);
+    });
+
+    root.querySelector('#lp-new-profile-create').addEventListener('click', async () => {
+        const errBox = root.querySelector('#lp-new-profile-error');
+        errBox.textContent = '';
+        const name = root.querySelector('#lp-new-profile-name').value.trim();
+        if (!name) { errBox.textContent = 'Enter a name.'; return; }
+
+        const tierRows = [...root.querySelectorAll('.lp-new-profile-tier-row')].map(rowEl => ({
+            min_market: parseFloat(rowEl.querySelector('.lp-tier-min').value),
+            max_market: rowEl.querySelector('.lp-tier-max').value ? parseFloat(rowEl.querySelector('.lp-tier-max').value) : null,
+            list_price: parseFloat(rowEl.querySelector('.lp-tier-price').value),
+        })).filter(t => !isNaN(t.min_market) && !isNaN(t.list_price));
+
+        if (!tierRows.length) { errBox.textContent = 'Add at least one complete tier (min market + list price).'; return; }
+
+        // Generate the id client-side (standard crypto.randomUUID()) rather
+        // than relying on reading it back after insert — keeps this to the
+        // plain insert-with-no-return-value pattern used everywhere else in
+        // this codebase instead of an unproven .select().single() chain.
+        const profileId = crypto.randomUUID();
+        const lowStockRaw = root.querySelector('#lp-new-profile-lowstock').value;
+        const { error: profileErr } = await supabase.from('pricing_profiles').insert({
+            id: profileId,
+            name,
+            default_low_stock_qty: lowStockRaw ? parseInt(lowStockRaw, 10) : null,
+        });
+        if (profileErr) {
+            errBox.textContent = profileErr.code === '23505' ? `A profile named "${name}" already exists.` : profileErr.message;
+            return;
+        }
+
+        const { error: tiersErr } = await supabase.from('pricing_profile_tiers')
+            .insert(tierRows.map(t => ({ ...t, profile_id: profileId })));
+        if (tiersErr) {
+            errBox.textContent = tiersErr.message;
+            return;
+        }
+
+        const { error: assignErr } = await supabase.from('listing_card_groups')
+            .update({ profile_id: profileId }).eq('id', groupId);
+        if (assignErr) {
+            errBox.textContent = `Profile created, but failed to assign it: ${assignErr.message}`;
+            return;
+        }
+
         root.innerHTML = '';
         await loadListing(container);
     });
