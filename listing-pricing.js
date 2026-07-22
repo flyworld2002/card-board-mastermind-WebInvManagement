@@ -31,7 +31,8 @@ let state = {
     platform: 'ebay',
     listingId: '',
     accountNum: 1,
-    template: null,          // listing_templates row, or null if none exists yet
+    templates: [],           // all listing_templates rows (landing view)
+    template: null,          // the one currently open, or null when on the landing view
     resolvedRows: [],        // resolve_listing_prices() output
     listingRowsByPLId: {},   // platform_listing_id -> platform_listings row (sync_enabled/status/manual_price/etc.)
     groups: [],              // listing_card_groups for this template
@@ -42,9 +43,9 @@ let state = {
 
 export async function renderListingPricing(container) {
     container.innerHTML = shellHTML();
-    wireShell(container);
     const { data } = await supabase.from('pricing_profiles').select('*').order('name');
     state.profiles = data || [];
+    await renderTemplatesList(container);
 }
 
 function shellHTML() {
@@ -54,44 +55,181 @@ function shellHTML() {
             docs/plans/listing-pricing-system.md — a template IS the listing;
             cards belong to it via an explicit roster, grouped however you like.
         </p>
-        <div class="filters-bar">
-            <label style="font-size:13px;">Platform
-                <select id="lp-platform" style="margin-left:6px;">
-                    <option value="ebay" selected>ebay</option>
-                </select>
-            </label>
-            <label style="font-size:13px;">eBay Item # (listing_id)
-                <input type="text" id="lp-listing-id" placeholder="e.g. 336691917730"
-                       value="${escapeHtml(state.listingId)}" style="margin-left:6px; width:160px;" />
-            </label>
-            <label style="font-size:13px;">Account #
-                <input type="number" id="lp-account" value="${state.accountNum}" min="1"
-                       style="margin-left:6px; width:60px;" />
-            </label>
-            <button class="btn btn-primary" id="lp-load-btn">Load</button>
-        </div>
         <div id="lp-body"></div>
     `;
 }
 
-function wireShell(container) {
-    container.querySelector('#lp-load-btn').addEventListener('click', async () => {
-        state.listingId = container.querySelector('#lp-listing-id').value.trim();
-        state.accountNum = parseInt(container.querySelector('#lp-account').value, 10) || 1;
-        state.platform = container.querySelector('#lp-platform').value;
-        if (!state.listingId) {
-            window.alert('Enter an eBay Item # first.');
-            return;
-        }
-        await loadListing(container);
+// ----------------------------------------------------------------
+// Landing view — list of templates (= listings). Click one to open its
+// roster/groups view; "+ New template" to create one.
+// ----------------------------------------------------------------
+
+async function renderTemplatesList(container) {
+    const body = container.querySelector('#lp-body');
+    body.innerHTML = '<p>Loading templates...</p>';
+    state.template = null;
+
+    const { data, error } = await supabase.from('listing_templates').select('*').order('platform').order('name');
+    if (error) {
+        body.innerHTML = `<p style="color:var(--danger)">Failed to load templates: ${escapeHtml(error.message)}</p>`;
+        return;
+    }
+    state.templates = data || [];
+
+    body.innerHTML = `
+        <div class="filters-bar" style="justify-content:flex-end;">
+            <button class="btn btn-primary" id="lp-new-template-btn">+ New template</button>
+        </div>
+        ${state.templates.length ? `
+            <table>
+                <thead><tr>
+                    <th>Name</th><th>eBay Item #</th><th>Platform</th><th>Account</th><th>Kind</th><th style="width:60px;"></th>
+                </tr></thead>
+                <tbody>
+                    ${state.templates.map(t => `
+                        <tr class="lp-template-row" data-id="${t.id}" style="cursor:pointer;">
+                            <td>${escapeHtml(t.name)}</td>
+                            <td>${t.listing_id ? escapeHtml(t.listing_id) : '<span style="color:var(--text-secondary);">(draft — no listing yet)</span>'}</td>
+                            <td>${escapeHtml(t.platform)}</td>
+                            <td>${t.account ? escapeHtml(t.account) : '<span style="color:var(--text-secondary);">All accounts</span>'}</td>
+                            <td>${escapeHtml(t.listing_kind || 'variation')}</td>
+                            <td><button class="btn lp-edit-template-btn" data-id="${t.id}">Edit</button></td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        ` : `<p style="color:var(--text-secondary)">No listing templates yet.</p>`}
+        <div id="lp-modal-root"></div>
+    `;
+
+    body.querySelector('#lp-new-template-btn').addEventListener('click', () => openTemplateModal(container, null));
+    body.querySelectorAll('.lp-edit-template-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => { e.stopPropagation(); openTemplateModal(container, btn.dataset.id); });
     });
-    container.querySelector('#lp-listing-id').addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') container.querySelector('#lp-load-btn').click();
+    body.querySelectorAll('.lp-template-row').forEach(tr => {
+        tr.addEventListener('click', () => openTemplate(container, tr.dataset.id));
+    });
+}
+
+async function openTemplate(container, templateId) {
+    const t = state.templates.find(x => x.id === templateId);
+    if (!t) return;
+    state.platform = t.platform;
+    state.listingId = t.listing_id || '';
+    if (!state.listingId) {
+        window.alert('This template has no eBay Item # (listing_id) yet — edit it first to set one.');
+        return;
+    }
+    await loadListing(container);
+}
+
+function openTemplateModal(container, templateId) {
+    const isEdit = !!templateId;
+    const existing = isEdit ? state.templates.find(t => t.id === templateId) : null;
+    const root = container.querySelector('#lp-modal-root');
+    const f = (label, type, name, value, placeholder = '', step = '', optional = false) => `
+        <label style="font-size:12px; color:var(--text-secondary); flex:${optional ? '1' : 'initial'};">
+            ${label}
+            <input type="${type}" name="${name}" ${step ? `step="${step}"` : ''} ${optional ? '' : (type === 'number' ? '' : 'required')}
+                   value="${escapeHtml(value ?? '')}" placeholder="${escapeHtml(placeholder)}" style="width:100%; margin-top:4px;" />
+        </label>
+    `;
+
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:460px; max-width:90vw; max-height:85vh; overflow-y:auto;">
+                <h3 style="margin:0 0 16px;">${isEdit ? 'Edit listing template' : 'New listing template'}</h3>
+                <form id="lp-template-form">
+                    <div style="display:flex; flex-direction:column; gap:10px;">
+                        ${f('Platform', 'text', 'platform', existing?.platform || 'ebay')}
+                        ${f('Account (blank = applies to all accounts)', 'text', 'account', existing?.account || '', 'e.g. BIGGYFISH', '', true)}
+                        ${f('Name', 'text', 'name', existing?.name || '', 'e.g. commons')}
+                        ${f('eBay Item # (listing_id) — this template IS that listing', 'text', 'listing_id', existing?.listing_id || '', 'e.g. 336691917730', '', true)}
+                        ${f('Description', 'text', 'description', existing?.description || '', '', '', true)}
+                        <label style="font-size:12px; color:var(--text-secondary);">
+                            Listing kind
+                            <select name="listing_kind" style="width:100%; margin-top:4px;">
+                                <option value="variation" ${(existing?.listing_kind || 'variation') === 'variation' ? 'selected' : ''}>variation (multi-variation listing)</option>
+                                <option value="single" ${existing?.listing_kind === 'single' ? 'selected' : ''}>single (one card per listing)</option>
+                            </select>
+                        </label>
+                        ${f('Base price ($) — sync price floor, raise-only', 'number', 'base_price', existing?.base_price, '', '0.01', true)}
+                        ${f('Default quantity limit (per variation)', 'number', 'default_quantity_limit', existing?.default_quantity_limit, '', '', true)}
+                        <div style="display:flex; gap:10px;">
+                            ${f('Low-stock threshold', 'number', 'low_stock_threshold', existing?.low_stock_threshold ?? 8, '', '', true)}
+                            ${f('Low-stock bump ($)', 'number', 'low_stock_bump', existing?.low_stock_bump ?? 1, '', '0.01', true)}
+                        </div>
+                        <label style="font-size:12px; color:var(--text-secondary);">
+                            Display sort (buyer-facing dropdown order)
+                            <select name="display_sort" style="width:100%; margin-top:4px;">
+                                <option value="card_number" ${(existing?.display_sort || 'card_number') === 'card_number' ? 'selected' : ''}>card_number</option>
+                                <option value="alpha" ${existing?.display_sort === 'alpha' ? 'selected' : ''}>alpha</option>
+                                <option value="release_date" ${existing?.display_sort === 'release_date' ? 'selected' : ''}>release_date (reserved — future themed listings)</option>
+                            </select>
+                        </label>
+                        ${f('Name format', 'text', 'name_format', existing?.name_format || '{number}/{set_total} {name} {suffix}', '', '', true)}
+                    </div>
+                    <div id="lp-template-form-error" style="color:var(--danger); font-size:12px; margin-top:10px;"></div>
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:18px;">
+                        ${isEdit ? `<button type="button" class="btn" id="lp-template-delete" style="color:var(--danger); border-color:var(--danger);">Delete</button>` : '<span></span>'}
+                        <div style="display:flex; gap:8px;">
+                            <button type="button" class="btn" id="lp-template-cancel">Cancel</button>
+                            <button type="submit" class="btn btn-primary">${isEdit ? 'Save changes' : 'Create'}</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    `;
+
+    root.querySelector('#lp-template-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+    if (isEdit) {
+        root.querySelector('#lp-template-delete').addEventListener('click', async () => {
+            if (!window.confirm(`Delete template "${existing.name}"? This can't be undone.`)) return;
+            const { error } = await supabase.from('listing_templates').delete().eq('id', templateId);
+            if (error) { window.alert(`Failed to delete: ${error.message}`); return; }
+            root.innerHTML = '';
+            await renderTemplatesList(container);
+        });
+    }
+    root.querySelector('#lp-template-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#lp-template-form-error');
+        errBox.textContent = '';
+        const fd = new FormData(e.target);
+        const num = (name) => fd.get(name) ? parseFloat(fd.get(name)) : null;
+        const int = (name) => fd.get(name) ? parseInt(fd.get(name), 10) : null;
+        const payload = {
+            platform: fd.get('platform').trim(),
+            account: fd.get('account').trim() || null,
+            name: fd.get('name').trim(),
+            listing_id: fd.get('listing_id').trim() || null,
+            description: fd.get('description').trim() || null,
+            listing_kind: fd.get('listing_kind') || 'variation',
+            base_price: num('base_price'),
+            default_quantity_limit: int('default_quantity_limit'),
+            low_stock_threshold: int('low_stock_threshold') ?? 8,
+            low_stock_bump: num('low_stock_bump') ?? 1,
+            display_sort: fd.get('display_sort') || 'card_number',
+            name_format: fd.get('name_format').trim() || '{number}/{set_total} {name} {suffix}',
+            updated_at: new Date().toISOString(),
+        };
+        try {
+            const { error } = isEdit
+                ? await supabase.from('listing_templates').update(payload).eq('id', templateId)
+                : await supabase.from('listing_templates').insert(payload);
+            if (error) throw error;
+            root.innerHTML = '';
+            await renderTemplatesList(container);
+        } catch (err) {
+            console.error(err);
+            errBox.textContent = err.message || 'Failed to save listing template.';
+        }
     });
 }
 
 // ----------------------------------------------------------------
-// Loading
+// Roster/groups view for one template
 // ----------------------------------------------------------------
 
 async function loadListing(container) {
@@ -233,6 +371,7 @@ function renderBody(container) {
     }
 
     body.innerHTML = `
+        <button class="btn" id="lp-back-to-templates-btn" style="margin-bottom:12px;">&larr; Back to templates</button>
         <div style="display:flex; align-items:center; gap:12px; margin:16px 0; flex-wrap:wrap;">
             <h3 style="margin:0;">${escapeHtml(state.template.name)}</h3>
             <span style="font-size:12px; color:var(--text-secondary);">${escapeHtml(state.template.listing_kind)} listing</span>
@@ -337,6 +476,8 @@ function rowHTML(r) {
 // ----------------------------------------------------------------
 
 function wireControls(container, body) {
+    body.querySelector('#lp-back-to-templates-btn').addEventListener('click', () => renderTemplatesList(container));
+
     body.querySelectorAll('.lp-row-checkbox').forEach(cb => {
         cb.addEventListener('change', () => {
             if (cb.checked) state.selected.add(cb.dataset.rowId);
@@ -360,18 +501,7 @@ function wireControls(container, body) {
         await loadListing(container);
     });
 
-    body.querySelector('#lp-new-group-btn').addEventListener('click', async () => {
-        const name = window.prompt('Group name:');
-        if (!name || !name.trim()) return;
-        const { error } = await supabase.from('listing_card_groups').insert({
-            template_id: state.template.id, name: name.trim(),
-        });
-        if (error) {
-            window.alert(`Failed to create group: ${error.message}`);
-            return;
-        }
-        await loadListing(container);
-    });
+    body.querySelector('#lp-new-group-btn').addEventListener('click', () => openNewGroupModal(container, body));
 
     body.querySelectorAll('.lp-rename-group-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
@@ -475,6 +605,58 @@ async function importExisting(container) {
         return;
     }
     await loadListing(container);
+}
+
+// ----------------------------------------------------------------
+// New group — group NAMES are reusable/consistent across listings (a
+// datalist of every name used anywhere suggests existing ones), but each
+// pick always creates a separate row scoped to THIS template, with its
+// own profile assignment. This intentionally does NOT share pricing
+// across listings — see the conversation in the plan doc for why.
+// ----------------------------------------------------------------
+
+async function openNewGroupModal(container, body) {
+    const { data } = await supabase.from('listing_card_groups').select('name');
+    const names = [...new Set((data || []).map(r => r.name))].sort();
+
+    const root = body.querySelector('#lp-modal-root');
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:400px; max-width:90vw;">
+                <h3 style="margin:0 0 12px;">New group</h3>
+                <p style="color:var(--text-secondary); font-size:12px; margin:0 0 10px;">
+                    Type a new name or pick a name you've used on another listing to stay consistent —
+                    this always creates a separate group scoped to this listing, with its own profile.
+                </p>
+                <input type="text" id="lp-new-group-name" list="lp-group-name-suggestions" placeholder="e.g. Bulk Holos" style="width:100%;" />
+                <datalist id="lp-group-name-suggestions">
+                    ${names.map(n => `<option value="${escapeHtml(n)}"></option>`).join('')}
+                </datalist>
+                <div id="lp-new-group-error" style="color:var(--danger); font-size:12px; margin-top:8px;"></div>
+                <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+                    <button type="button" class="btn" id="lp-new-group-cancel">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="lp-new-group-create">Create</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    root.querySelector('#lp-new-group-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+    root.querySelector('#lp-new-group-create').addEventListener('click', async () => {
+        const name = root.querySelector('#lp-new-group-name').value.trim();
+        const errBox = root.querySelector('#lp-new-group-error');
+        if (!name) { errBox.textContent = 'Enter a name.'; return; }
+
+        const { error } = await supabase.from('listing_card_groups').insert({
+            template_id: state.template.id, name,
+        });
+        if (error) {
+            errBox.textContent = error.code === '23505' ? `A group named "${name}" already exists on this listing.` : error.message;
+            return;
+        }
+        root.innerHTML = '';
+        await loadListing(container);
+    });
 }
 
 // ----------------------------------------------------------------

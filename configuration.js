@@ -33,10 +33,6 @@ let pricingState = {
 // tier_card_type domain used by both price_tiers and card_type_mapping
 const TIER_CARD_TYPES = ['common', 'holo', 'reverse_holo', 'ultra_rare_rule'];
 
-let templatesState = {
-    templates: [],
-};
-
 let syncControlsState = {
     statuses: [],
 };
@@ -81,11 +77,6 @@ export async function renderConfiguration(container, initialKey = 'sets') {
         container.innerHTML = configShell(pricingSectionHTML());
         wireConfigNav(container, 'pricing-rules');
         await loadPricing(container);
-    } else if (initialKey === 'listing-templates') {
-        templatesState = { templates: [] };
-        container.innerHTML = configShell(templatesSectionHTML());
-        wireConfigNav(container, 'listing-templates');
-        await loadTemplates(container);
     } else if (initialKey === 'variant-attributes') {
         attrState = { activeTable: 'foil_types', rows: [], usageCounts: {}, search: '' };
         container.innerHTML = configShell(attrSectionHTML());
@@ -120,7 +111,6 @@ function configShell(bodyHTML) {
                 <a href="#sets" data-config-nav="sets" class="config-nav-item">Sets</a>
                 <a href="#card-games" data-config-nav="card-games" class="config-nav-item">Card games</a>
                 <a href="#pricing-rules" data-config-nav="pricing-rules" class="config-nav-item">Pricing rules</a>
-                <a href="#listing-templates" data-config-nav="listing-templates" class="config-nav-item">Listing templates</a>
                 <a href="#pricing-profiles" data-config-nav="pricing-profiles" class="config-nav-item">Pricing profiles</a>
                 <a href="#variant-attributes" data-config-nav="variant-attributes" class="config-nav-item">Variant attributes</a>
                 <a href="#sync-controls" data-config-nav="sync-controls" class="config-nav-item">Sync controls</a>
@@ -158,8 +148,6 @@ function wireConfigNav(container, activeKey) {
                 await renderConfiguration(container, 'card-games');
             } else if (key === 'pricing-rules') {
                 await renderConfiguration(container, 'pricing-rules');
-            } else if (key === 'listing-templates') {
-                await renderConfiguration(container, 'listing-templates');
             } else if (key === 'variant-attributes') {
                 await renderConfiguration(container, 'variant-attributes');
             } else if (key === 'sync-controls') {
@@ -179,7 +167,6 @@ function labelFor(key) {
     return {
         'card-games': 'Card games',
         'pricing-rules': 'Pricing rules',
-        'listing-templates': 'Listing templates',
         'sync-controls': 'Sync controls',
         'pricing-profiles': 'Pricing profiles',
     }[key] || key;
@@ -919,191 +906,6 @@ function openCardTypeMappingModal(container, mappingId) {
         } catch (err) {
             console.error(err);
             errBox.textContent = err.message || 'Failed to save card type mapping.';
-        }
-    });
-}
-
-// ── Listing templates section ───────────────────────────────────────────────
-
-function templatesSectionHTML() {
-    return `
-        <div class="filters-bar" style="justify-content:flex-end;">
-            <button class="btn btn-primary" id="new-template-btn">+ New template</button>
-        </div>
-        <div id="templates-table-wrap"><p>Loading...</p></div>
-        <div id="template-modal-root"></div>
-    `;
-}
-
-async function loadTemplates(container) {
-    const wrap = container.querySelector('#templates-table-wrap');
-    try {
-        const { data, error } = await supabase.from('listing_templates').select('*').order('platform').order('name');
-        if (error) throw error;
-        templatesState.templates = data || [];
-        renderTemplatesTable(container);
-    } catch (err) {
-        console.error(err);
-        wrap.innerHTML = `<p style="color:var(--danger)">Failed to load listing templates: ${err.message}</p>`;
-    }
-}
-
-function renderTemplatesTable(container) {
-    const wrap = container.querySelector('#templates-table-wrap');
-    const rows = templatesState.templates;
-
-    if (!rows.length) {
-        wrap.innerHTML = `<p style="color:var(--text-secondary)">No listing templates yet.</p>`;
-    } else {
-        wrap.innerHTML = `
-            <table>
-                <thead><tr>
-                    <th>Name</th><th>eBay Item #</th><th>Platform</th><th>Account</th><th>Kind</th><th>Included types</th><th>Card # range</th><th>Shipping</th><th>Max qty</th><th>Base price</th><th>Priority / Display sort</th><th style="width:60px;"></th>
-                </tr></thead>
-                <tbody>
-                    ${rows.map(t => `
-                        <tr>
-                            <td>${escapeHTML(t.name)}</td>
-                            <td>${t.listing_id ? escapeHTML(t.listing_id) : '<span style="color:var(--text-secondary);">(draft — no listing yet)</span>'}</td>
-                            <td>${escapeHTML(t.platform)}</td>
-                            <td>${t.account ? escapeHTML(t.account) : '<span style="color:var(--text-secondary);">All accounts</span>'}</td>
-                            <td>${escapeHTML(t.listing_kind || 'variation')}</td>
-                            <td style="color:var(--text-secondary); font-size:12px;">${(t.included_types || []).map(escapeHTML).join(', ') || '-'}</td>
-                            <td>${t.card_num_min ?? '-'} – ${t.card_num_max ?? '-'}</td>
-                            <td>${formatPrice(t.shipping_base)} + ${formatPrice(t.shipping_per_card)}/card</td>
-                            <td>${t.max_quantity}</td>
-                            <td>${formatPrice(t.base_price)}</td>
-                            <td style="color:var(--text-secondary); font-size:12px;">${escapeHTML(t.priority_rule || 'card_number')} / ${escapeHTML(t.display_sort || 'card_number')}</td>
-                            <td><button class="btn edit-template-btn" data-id="${t.id}">Edit</button></td>
-                        </tr>
-                    `).join('')}
-                </tbody>
-            </table>
-        `;
-    }
-
-    container.querySelector('#new-template-btn').addEventListener('click', () => openTemplateModal(container, null));
-    wrap.querySelectorAll('.edit-template-btn').forEach(btn => {
-        btn.addEventListener('click', () => openTemplateModal(container, btn.dataset.id));
-    });
-}
-
-function openTemplateModal(container, templateId) {
-    const isEdit = !!templateId;
-    const existing = isEdit ? templatesState.templates.find(t => t.id === templateId) : null;
-    const root = container.querySelector('#template-modal-root');
-
-    root.innerHTML = modalShell(isEdit ? 'Edit listing template' : 'New listing template', `
-        <div style="display:flex; flex-direction:column; gap:10px;">
-            ${field('Platform', 'text', 'platform', existing?.platform || 'ebay')}
-            ${field('Account (blank = applies to all accounts)', 'text', 'account', existing?.account || '', 'e.g. BIGGYFISH', '', true)}
-            ${field('Name', 'text', 'name', existing?.name || '', 'e.g. commons')}
-            ${field('eBay Item # (listing_id) — this template IS that listing', 'text', 'listing_id', existing?.listing_id || '', 'e.g. 336691917730', '', true)}
-            ${field('Description', 'text', 'description', existing?.description || '', '', '', true)}
-            ${field('Included types (comma-separated)', 'text', 'included_types', (existing?.included_types || []).join(', '), 'common, holo, double_rare')}
-            ${field('Excluded types (comma-separated)', 'text', 'excluded_types', (existing?.excluded_types || []).join(', '), '', '', true)}
-            <div style="display:flex; gap:10px;">
-                ${field('Card # min', 'number', 'card_num_min', existing?.card_num_min ?? '', '', '', true)}
-                ${field('Card # max', 'number', 'card_num_max', existing?.card_num_max ?? '', '', '', true)}
-            </div>
-            <div style="display:flex; gap:10px;">
-                ${field('Shipping base ($)', 'number', 'shipping_base', existing?.shipping_base ?? '0.00', '', '0.01')}
-                ${field('Shipping per card ($)', 'number', 'shipping_per_card', existing?.shipping_per_card ?? '0.00', '', '0.01')}
-            </div>
-            ${field('Max quantity', 'number', 'max_quantity', existing?.max_quantity ?? '250')}
-
-            <div style="border-top:1px solid var(--border); margin-top:4px; padding-top:10px;">
-                <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.03em; color:var(--text-secondary); margin-bottom:8px;">
-                    Sync engine settings (docs/plans/ebay-listing-sync.md)
-                </div>
-                <div style="display:flex; flex-direction:column; gap:10px;">
-                    <label style="font-size:12px; color:var(--text-secondary);">
-                        Listing kind
-                        <select name="listing_kind" style="width:100%; margin-top:4px;">
-                            <option value="variation" ${(existing?.listing_kind || 'variation') === 'variation' ? 'selected' : ''}>variation (multi-variation listing)</option>
-                            <option value="single" ${existing?.listing_kind === 'single' ? 'selected' : ''}>single (one card per listing)</option>
-                        </select>
-                    </label>
-                    ${field('Base price ($) — sync price floor, raise-only', 'number', 'base_price', existing?.base_price ?? '', '', '0.01', true)}
-                    ${field('Default quantity limit (per variation)', 'number', 'default_quantity_limit', existing?.default_quantity_limit ?? '', '', '', true)}
-                    <div style="display:flex; gap:10px;">
-                        ${field('Low-stock threshold', 'number', 'low_stock_threshold', existing?.low_stock_threshold ?? '8', '', '', true)}
-                        ${field('Low-stock bump ($)', 'number', 'low_stock_bump', existing?.low_stock_bump ?? '1', '', '0.01', true)}
-                    </div>
-                    <label style="font-size:12px; color:var(--text-secondary);">
-                        Promotion priority (250-cap queue order)
-                        <select name="priority_rule" style="width:100%; margin-top:4px;">
-                            <option value="card_number" ${(existing?.priority_rule || 'card_number') === 'card_number' ? 'selected' : ''}>card_number (plain numeric)</option>
-                            <option value="rh_then_number_holo_last" ${existing?.priority_rule === 'rh_then_number_holo_last' ? 'selected' : ''}>rh_then_number_holo_last (reverse holo first, then number, holo last)</option>
-                        </select>
-                    </label>
-                    <label style="font-size:12px; color:var(--text-secondary);">
-                        Display sort (buyer-facing dropdown order)
-                        <select name="display_sort" style="width:100%; margin-top:4px;">
-                            <option value="card_number" ${(existing?.display_sort || 'card_number') === 'card_number' ? 'selected' : ''}>card_number</option>
-                            <option value="alpha" ${existing?.display_sort === 'alpha' ? 'selected' : ''}>alpha</option>
-                            <option value="release_date" ${existing?.display_sort === 'release_date' ? 'selected' : ''}>release_date (reserved — future themed listings)</option>
-                        </select>
-                    </label>
-                    ${field('Name format', 'text', 'name_format', existing?.name_format || '{number}/{set_total} {name} {suffix}', '', '', true)}
-                    ${field('Card type filter (comma-separated tier types; blank = all)', 'text', 'card_type_filter', (existing?.card_type_filter || []).join(', '), 'common, holo, reverse_holo, ultra_rare_rule', '', true)}
-                </div>
-            </div>
-        </div>
-    `, isEdit, 'template');
-
-    root.querySelector('#modal-cancel').addEventListener('click', () => { root.innerHTML = ''; });
-    if (isEdit) {
-        root.querySelector('#modal-delete').addEventListener('click', async () => {
-            root.innerHTML = '';
-            await confirmDelete(container, 'listing_templates', templateId, `this listing template`, () => loadTemplates(container));
-        });
-    }
-    root.querySelector('#modal-form').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const errBox = root.querySelector('#modal-error');
-        errBox.textContent = '';
-        const fd = new FormData(e.target);
-        const splitList = (name) => {
-            const raw = fd.get(name).trim();
-            return raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [];
-        };
-        const num = (name) => fd.get(name) ? parseFloat(fd.get(name)) : null;
-        const int = (name) => fd.get(name) ? parseInt(fd.get(name), 10) : null;
-        const payload = {
-            platform: fd.get('platform').trim(),
-            account: fd.get('account').trim() || null,
-            name: fd.get('name').trim(),
-            listing_id: fd.get('listing_id').trim() || null,
-            description: fd.get('description').trim() || null,
-            included_types: splitList('included_types'),
-            excluded_types: splitList('excluded_types'),
-            card_num_min: fd.get('card_num_min') ? parseInt(fd.get('card_num_min'), 10) : null,
-            card_num_max: fd.get('card_num_max') ? parseInt(fd.get('card_num_max'), 10) : null,
-            shipping_base: parseFloat(fd.get('shipping_base')) || 0,
-            shipping_per_card: parseFloat(fd.get('shipping_per_card')) || 0,
-            max_quantity: parseInt(fd.get('max_quantity'), 10) || 250,
-            listing_kind: fd.get('listing_kind') || 'variation',
-            base_price: num('base_price'),
-            default_quantity_limit: int('default_quantity_limit'),
-            low_stock_threshold: int('low_stock_threshold') ?? 8,
-            low_stock_bump: num('low_stock_bump') ?? 1,
-            priority_rule: fd.get('priority_rule') || 'card_number',
-            display_sort: fd.get('display_sort') || 'card_number',
-            name_format: fd.get('name_format').trim() || '{number}/{set_total} {name} {suffix}',
-            card_type_filter: splitList('card_type_filter'),
-            updated_at: new Date().toISOString(),
-        };
-        try {
-            const { error } = isEdit
-                ? await supabase.from('listing_templates').update(payload).eq('id', templateId)
-                : await supabase.from('listing_templates').insert(payload);
-            if (error) throw error;
-            root.innerHTML = '';
-            await loadTemplates(container);
-        } catch (err) {
-            console.error(err);
-            errBox.textContent = err.message || 'Failed to save listing template.';
         }
     });
 }

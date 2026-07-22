@@ -264,7 +264,7 @@
             const hash = window.location.hash.replace('#', '') || 'dashboard';
             const content = document.getElementById('page-content');
 
-            const configKeys = ['configuration', 'sets', 'card-games', 'pricing-rules', 'listing-templates'];
+            const configKeys = ['configuration', 'sets', 'card-games', 'pricing-rules'];
             document.querySelectorAll('nav.sidebar a[data-page]').forEach(a => {
                 const isConfigActive = a.dataset.page === 'configuration' && configKeys.includes(hash);
                 a.classList.toggle('active', a.dataset.page === hash || isConfigActive);
@@ -318,8 +318,7 @@
                     case 'configuration':
                     case 'sets':
                     case 'card-games':
-                    case 'pricing-rules':
-                    case 'listing-templates': {
+                    case 'pricing-rules': {
                         const { renderConfiguration } = await import(`./configuration.js?v=${Date.now()}`);
                         const subKey = hash === 'configuration' ? 'sets' : hash;
                         await renderConfiguration(content, subKey);
