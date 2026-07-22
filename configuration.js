@@ -958,12 +958,13 @@ function renderTemplatesTable(container) {
         wrap.innerHTML = `
             <table>
                 <thead><tr>
-                    <th>Name</th><th>Platform</th><th>Account</th><th>Kind</th><th>Included types</th><th>Card # range</th><th>Shipping</th><th>Max qty</th><th>Base price</th><th>Priority / Display sort</th><th style="width:60px;"></th>
+                    <th>Name</th><th>eBay Item #</th><th>Platform</th><th>Account</th><th>Kind</th><th>Included types</th><th>Card # range</th><th>Shipping</th><th>Max qty</th><th>Base price</th><th>Priority / Display sort</th><th style="width:60px;"></th>
                 </tr></thead>
                 <tbody>
                     ${rows.map(t => `
                         <tr>
                             <td>${escapeHTML(t.name)}</td>
+                            <td>${t.listing_id ? escapeHTML(t.listing_id) : '<span style="color:var(--text-secondary);">(draft — no listing yet)</span>'}</td>
                             <td>${escapeHTML(t.platform)}</td>
                             <td>${t.account ? escapeHTML(t.account) : '<span style="color:var(--text-secondary);">All accounts</span>'}</td>
                             <td>${escapeHTML(t.listing_kind || 'variation')}</td>
@@ -997,6 +998,7 @@ function openTemplateModal(container, templateId) {
             ${field('Platform', 'text', 'platform', existing?.platform || 'ebay')}
             ${field('Account (blank = applies to all accounts)', 'text', 'account', existing?.account || '', 'e.g. BIGGYFISH', '', true)}
             ${field('Name', 'text', 'name', existing?.name || '', 'e.g. commons')}
+            ${field('eBay Item # (listing_id) — this template IS that listing', 'text', 'listing_id', existing?.listing_id || '', 'e.g. 336691917730', '', true)}
             ${field('Description', 'text', 'description', existing?.description || '', '', '', true)}
             ${field('Included types (comma-separated)', 'text', 'included_types', (existing?.included_types || []).join(', '), 'common, holo, double_rare')}
             ${field('Excluded types (comma-separated)', 'text', 'excluded_types', (existing?.excluded_types || []).join(', '), '', '', true)}
@@ -1072,6 +1074,7 @@ function openTemplateModal(container, templateId) {
             platform: fd.get('platform').trim(),
             account: fd.get('account').trim() || null,
             name: fd.get('name').trim(),
+            listing_id: fd.get('listing_id').trim() || null,
             description: fd.get('description').trim() || null,
             included_types: splitList('included_types'),
             excluded_types: splitList('excluded_types'),

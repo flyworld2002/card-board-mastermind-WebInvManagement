@@ -1,11 +1,13 @@
 // listing-pricing.js
 // Listing pricing page — docs/plans/listing-pricing-system.md (Card-Board-MasterMind repo).
-// Loads ONE eBay listing (platform + listing_id) at a time, groups its
-// platform_listings rows by derived label (rarity [+ foil type]), shows
-// the pricing_profile assigned to each label via a listing_pricing_rules
-// row, lets you (re)assign a profile, pin an individual card's price, and
-// push resolved prices/quantities to eBay via the FastAPI /push-prices
-// endpoint (same picking_api.py service as the Picking tab).
+//
+// Post-pivot model: a listing_templates row IS the listing (template.listing_id
+// == the eBay Item #). The card roster is explicit (listing_card_assignments),
+// not inferred from whatever happens to be synced in platform_listings —
+// a roster row can be 'active' (live, has a platform_listings row) or
+// 'queued' (planned, not live on eBay yet). Grouping is manual:
+// listing_card_groups are created inline on this page, cards are assigned
+// to a group by selection, and a group's profile_id IS the pricing rule.
 //
 // Resolution ALWAYS comes from the resolve_listing_prices() Postgres RPC —
 // never recomputed here — so this page and the Python push job can never
@@ -19,9 +21,6 @@ import { supabase, formatPrice } from './shared.js';
 const PICKING_API_URL = 'http://192.168.1.186:8765';
 const PICKING_API_TOKEN = 'I1knbOJAve_UZJQHAFZANds9-HalgCxcRJw1GXDg404';
 
-// shared.js doesn't export an escapeHtml — inventory.js/configuration.js
-// each define their own local copy; do the same here rather than adding a
-// cross-cutting export that wasn't asked for.
 function escapeHtml(str) {
     return String(str ?? '').replace(/[&<>"']/g, c => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -32,32 +31,28 @@ let state = {
     platform: 'ebay',
     listingId: '',
     accountNum: 1,
-    loading: false,
-    error: null,
-    loaded: false,
-    resolvedRows: [],      // resolve_listing_prices() output, keyed by row_id
-    listingRows: {},       // row_id -> platform_listings row (external_id, manual_price, pushed_price, pushed_qty, pushed_at)
-    variantMeta: {},       // variant_id -> {foil_type, card_id}
-    cardMeta: {},          // card_id -> {rarity}
+    template: null,          // listing_templates row, or null if none exists yet
+    resolvedRows: [],        // resolve_listing_prices() output
+    listingRowsByPLId: {},   // platform_listing_id -> platform_listings row (sync_enabled/status/manual_price/etc.)
+    groups: [],              // listing_card_groups for this template
     profiles: [],
-    rules: [],             // listing_pricing_rules for this listing
-    pushBusy: false,
-    pushResult: null,
+    unimportedCount: 0,      // platform_listings rows for this listing_id not yet in the roster
+    selected: new Set(),     // selected listing_card_assignments.row_id values
 };
 
 export async function renderListingPricing(container) {
     container.innerHTML = shellHTML();
     wireShell(container);
-    await ensureProfilesLoaded(container);
+    const { data } = await supabase.from('pricing_profiles').select('*').order('name');
+    state.profiles = data || [];
 }
 
 function shellHTML() {
     return `
         <h2 style="margin:0 0 4px;">Listing pricing</h2>
         <p style="color:var(--text-secondary); font-size:13px; margin:0 0 16px;">
-            docs/plans/listing-pricing-system.md — resolved prices always
-            come from the resolve_listing_prices() database function,
-            never computed here.
+            docs/plans/listing-pricing-system.md — a template IS the listing;
+            cards belong to it via an explicit roster, grouped however you like.
         </p>
         <div class="filters-bar">
             <label style="font-size:13px;">Platform
@@ -66,7 +61,7 @@ function shellHTML() {
                 </select>
             </label>
             <label style="font-size:13px;">eBay Item # (listing_id)
-                <input type="text" id="lp-listing-id" placeholder="e.g. 335662210469"
+                <input type="text" id="lp-listing-id" placeholder="e.g. 336691917730"
                        value="${escapeHtml(state.listingId)}" style="margin-left:6px; width:160px;" />
             </label>
             <label style="font-size:13px;">Account #
@@ -95,155 +90,115 @@ function wireShell(container) {
     });
 }
 
-async function ensureProfilesLoaded(container) {
-    const { data, error } = await supabase.from('pricing_profiles').select('*').order('name');
-    if (!error) state.profiles = data || [];
-}
-
 // ----------------------------------------------------------------
-// Loading one listing
+// Loading
 // ----------------------------------------------------------------
 
 async function loadListing(container) {
     const body = container.querySelector('#lp-body');
-    body.innerHTML = '<p>Loading listing...</p>';
-    state.loading = true;
-    state.error = null;
-    state.pushResult = null;
+    body.innerHTML = '<p>Loading...</p>';
+    state.selected = new Set();
 
     try {
-        const { data: resolved, error: rErr } = await supabase.rpc('resolve_listing_prices', {
-            p_platform: state.platform, p_listing_id: state.listingId,
-        });
-        if (rErr) throw rErr;
+        const { data: template, error: tErr } = await supabase
+            .from('listing_templates').select('*')
+            .eq('platform', state.platform).eq('listing_id', state.listingId)
+            .maybeSingle();
+        if (tErr) throw tErr;
 
-        if (!resolved || resolved.length === 0) {
-            state.loading = false;
-            state.loaded = true;
-            state.resolvedRows = [];
-            body.innerHTML = `<p style="color:var(--text-secondary);">No platform_listings rows found for ${escapeHtml(state.platform)} listing ${escapeHtml(state.listingId)}.</p>`;
+        state.template = template;
+
+        if (!template) {
+            body.innerHTML = noTemplateHTML();
+            body.querySelector('#lp-create-template-btn').addEventListener('click', () => createTemplate(container));
             return;
         }
 
-        const rowIds = resolved.map(r => r.row_id);
-        const variantIds = [...new Set(resolved.map(r => r.variant_id).filter(Boolean))];
-
-        const [{ data: listingRows, error: lErr }, { data: variants, error: vErr }, { data: rules, error: ruErr }] = await Promise.all([
-            supabase.from('platform_listings').select('id, external_id, manual_price, pushed_price, pushed_qty, pushed_at, sync_enabled, status').in('id', rowIds),
-            supabase.from('card_variants').select('id, foil_type, card_id').in('id', variantIds),
-            supabase.from('listing_pricing_rules').select('*').eq('platform', state.platform).eq('listing_id', state.listingId),
+        const [{ data: resolved, error: rErr }, { data: groups, error: gErr }, { count: platformCount }] = await Promise.all([
+            supabase.rpc('resolve_listing_prices', { p_platform: state.platform, p_listing_id: state.listingId }),
+            supabase.from('listing_card_groups').select('*').eq('template_id', template.id).order('name'),
+            supabase.from('platform_listings').select('id', { count: 'exact', head: true })
+                .eq('platform', state.platform).eq('listing_id', state.listingId),
         ]);
-        if (lErr) throw lErr;
-        if (vErr) throw vErr;
-        if (ruErr) throw ruErr;
+        if (rErr) throw rErr;
+        if (gErr) throw gErr;
 
-        const cardIds = [...new Set((variants || []).map(v => v.card_id).filter(Boolean))];
-        const { data: cards, error: cErr } = await supabase.from('card_master').select('id, rarity').in('id', cardIds);
-        if (cErr) throw cErr;
+        state.resolvedRows = resolved || [];
+        state.groups = groups || [];
 
-        state.resolvedRows = resolved;
-        state.listingRows = Object.fromEntries((listingRows || []).map(r => [r.id, r]));
-        state.variantMeta = Object.fromEntries((variants || []).map(v => [v.id, v]));
-        state.cardMeta = Object.fromEntries((cards || []).map(c => [c.id, c]));
-        state.rules = rules || [];
-        state.loading = false;
-        state.loaded = true;
+        const plIds = (resolved || []).map(r => r.platform_listing_id).filter(Boolean);
+        if (plIds.length) {
+            const { data: listingRows } = await supabase
+                .from('platform_listings')
+                .select('id, external_id, manual_price, pushed_price, pushed_qty, pushed_at, sync_enabled, status')
+                .in('id', plIds);
+            state.listingRowsByPLId = Object.fromEntries((listingRows || []).map(r => [r.id, r]));
+        } else {
+            state.listingRowsByPLId = {};
+        }
+
+        const rosterPLIds = new Set(plIds);
+        state.unimportedCount = Math.max((platformCount || 0) - rosterPLIds.size, 0);
 
         renderBody(container);
     } catch (err) {
         console.error(err);
-        state.loading = false;
         body.innerHTML = `<p style="color:var(--danger)">Failed to load listing: ${escapeHtml(err.message)}</p>`;
     }
 }
 
-// ----------------------------------------------------------------
-// Grouping by derived label
-// ----------------------------------------------------------------
-
-function groupByLabel() {
-    const groups = {};
-    for (const r of state.resolvedRows) {
-        const variant = state.variantMeta[r.variant_id] || {};
-        const card = state.cardMeta[variant.card_id] || {};
-        const key = r.derived_label;
-        if (!groups[key]) {
-            groups[key] = { label: key, rarity: card.rarity || null, foilType: variant.foil_type || null, rows: [] };
-        }
-        groups[key].rows.push(r);
-    }
-    return Object.values(groups).sort((a, b) => a.label.localeCompare(b.label));
+function noTemplateHTML() {
+    return `
+        <div style="border:1px solid var(--border); border-radius:8px; padding:20px; max-width:480px;">
+            <p style="margin-top:0;">No template exists for ${escapeHtml(state.platform)} listing
+                <strong>${escapeHtml(state.listingId)}</strong> yet. A template IS the listing — create one to start
+                setting up groups and a card roster.</p>
+            <label style="font-size:13px; display:block; margin-bottom:10px;">Template name
+                <input type="text" id="lp-new-template-name" placeholder="e.g. this listing's name"
+                       style="width:100%; margin-top:4px;" />
+            </label>
+            <label style="font-size:13px; display:block; margin-bottom:10px;">Listing kind
+                <select id="lp-new-template-kind" style="width:100%; margin-top:4px;">
+                    <option value="variation">variation (multi-variation listing)</option>
+                    <option value="single">single (one card per listing)</option>
+                </select>
+            </label>
+            <button class="btn btn-primary" id="lp-create-template-btn">Create template</button>
+        </div>
+    `;
 }
 
-// The "plain" rule for a label: no set/card scoping — this is what the
-// profile picker manages. Set-/card-scoped rules are left to the Advanced
-// flow and just show up under "other rules for this listing".
-function plainRuleFor(rarity, foilType) {
-    return state.rules.find(r =>
-        r.match_rarity === rarity && r.match_foil_type === foilType
-        && r.match_set_id == null && r.match_card_id == null
-    ) || null;
+async function createTemplate(container) {
+    const body = container.querySelector('#lp-body');
+    const name = body.querySelector('#lp-new-template-name').value.trim() || state.listingId;
+    const kind = body.querySelector('#lp-new-template-kind').value;
+    const { error } = await supabase.from('listing_templates').insert({
+        platform: state.platform, listing_id: state.listingId, name, listing_kind: kind,
+    });
+    if (error) {
+        window.alert(`Failed to create template: ${error.message}`);
+        return;
+    }
+    await loadListing(container);
 }
 
 // ----------------------------------------------------------------
 // Render
 // ----------------------------------------------------------------
 
-function renderBody(container) {
-    const body = container.querySelector('#lp-body');
-    const groups = groupByLabel();
-    const pending = state.resolvedRows.filter(r => needsPush(r));
-    const pendingGated = pending.filter(r => isGatedIn(r));
-    const pendingNotGated = pending.length - pendingGated.length;
-
-    body.innerHTML = `
-        <div style="display:flex; align-items:center; gap:16px; margin:16px 0;">
-            <div style="font-size:13px; color:var(--text-secondary);">
-                ${state.resolvedRows.length} line(s) across ${groups.length} label group(s)
-                ${pendingGated.length > 0 ? ` · <span style="color:var(--warning);">${pendingGated.length} need push</span>` : ''}
-                ${pendingNotGated > 0 ? ` · <span style="color:var(--text-secondary);">${pendingNotGated} changed but not sync-enabled (won't push)</span>` : ''}
-                ${pending.length === 0 ? ' · in sync' : ''}
-            </div>
-            <button class="btn btn-primary" id="lp-push-btn" style="margin-left:auto;" ${pendingGated.length === 0 ? 'disabled' : ''}>
-                Push ${pendingGated.length > 0 ? `(${pendingGated.length})` : ''}
-            </button>
-            <button class="btn" id="lp-push-dryrun-btn">Dry-run</button>
-        </div>
-        <div id="lp-push-msg" style="font-size:13px; margin-bottom:12px;"></div>
-        ${groups.map(g => groupHTML(g)).join('')}
-    `;
-
-    wireGroupControls(container, body);
-
-    body.querySelector('#lp-push-btn').addEventListener('click', () => doPush(container, false));
-    body.querySelector('#lp-push-dryrun-btn').addEventListener('click', () => doPush(container, true));
-}
-
-// Mirrors the same low-stock gating the CLI applies before pushing
-// (available - low_stock_qty, floored at 0) — comparing against the raw
-// available_qty instead would show a permanent false "needs push" for
-// every row that has a low_stock_qty set, even when nothing changed.
-function gatedQty(r) {
-    const available = r.available_qty ?? 0;
-    if (r.low_stock_qty == null) return available;
-    return Math.max(available - r.low_stock_qty, 0);
-}
-
 function needsPush(r) {
-    const row = state.listingRows[r.row_id];
+    const row = state.listingRowsByPLId[r.platform_listing_id];
     if (!row) return false;
     if (row.pushed_at == null) return true;
     const priceDiff = row.pushed_price == null || Math.abs(Number(row.pushed_price) - Number(r.resolved_price)) >= 0.005;
-    const qtyDiff = row.pushed_qty == null || row.pushed_qty !== gatedQty(r);
+    const available = r.available_qty ?? 0;
+    const gated = r.low_stock_qty == null ? available : Math.max(available - r.low_stock_qty, 0);
+    const qtyDiff = row.pushed_qty == null || row.pushed_qty !== gated;
     return priceDiff || qtyDiff;
 }
 
-// Client-side approximation of the server-side push gate (sync_enabled +
-// status='active') — doesn't check the platform_sync_status kill switch,
-// which isn't loaded here, but covers the common case so the grid isn't
-// silent about why a row with pending changes won't actually get pushed.
 function isGatedIn(r) {
-    const row = state.listingRows[r.row_id];
+    const row = state.listingRowsByPLId[r.platform_listing_id];
     if (!row) return false;
     return !!row.sync_enabled && row.status === 'active';
 }
@@ -251,64 +206,128 @@ function isGatedIn(r) {
 function sourceBadge(source) {
     if (source === 'pin') return `<span class="badge" style="background:rgba(167,139,250,0.15); color:#a78bfa;">pinned</span>`;
     if (source === 'default') return `<span class="badge badge-ambiguous">default</span>`;
-    return `<span class="badge badge-matched">rule</span>`;
+    return `<span class="badge badge-matched">group</span>`;
 }
 
-function groupHTML(g) {
-    const rule = plainRuleFor(g.rarity, g.foilType);
-    const profile = rule ? state.profiles.find(p => p.id === rule.profile_id) : null;
-    const hasNoRule = !rule && g.rows.some(r => r.price_source === 'default');
+function statusBadge(status) {
+    const map = {
+        active: { c: 'var(--success)', label: 'active' },
+        queued: { c: 'var(--warning)', label: 'queued' },
+        sold_out_retained: { c: 'var(--text-secondary)', label: 'sold out (kept)' },
+    };
+    const s = map[status] || { c: 'var(--text-secondary)', label: status };
+    return `<span style="color:${s.c}; font-size:12px;">${s.label}</span>`;
+}
+
+function renderBody(container) {
+    const body = container.querySelector('#lp-body');
+    const rows = state.resolvedRows;
+    const pending = rows.filter(r => r.status === 'active' && needsPush(r));
+    const pendingGated = pending.filter(r => isGatedIn(r));
+
+    const byGroup = {};
+    const ungrouped = [];
+    for (const r of rows) {
+        if (r.group_id) (byGroup[r.group_id] ??= []).push(r);
+        else ungrouped.push(r);
+    }
+
+    body.innerHTML = `
+        <div style="display:flex; align-items:center; gap:12px; margin:16px 0; flex-wrap:wrap;">
+            <h3 style="margin:0;">${escapeHtml(state.template.name)}</h3>
+            <span style="font-size:12px; color:var(--text-secondary);">${escapeHtml(state.template.listing_kind)} listing</span>
+            <span style="font-size:13px; color:var(--text-secondary);">
+                ${rows.length} card(s) on roster
+                ${pendingGated.length > 0 ? ` · <span style="color:var(--warning);">${pendingGated.length} need push</span>` : ' · in sync'}
+            </span>
+            <button class="btn btn-primary" id="lp-push-btn" style="margin-left:auto;" ${pendingGated.length === 0 ? 'disabled' : ''}>
+                Push ${pendingGated.length > 0 ? `(${pendingGated.length})` : ''}
+            </button>
+            <button class="btn" id="lp-push-dryrun-btn">Dry-run</button>
+        </div>
+        <div id="lp-push-msg" style="font-size:13px; margin-bottom:12px;"></div>
+
+        ${state.unimportedCount > 0 ? `
+            <div style="padding:10px 14px; background:rgba(74,140,255,0.1); border:1px solid var(--accent); border-radius:6px; margin-bottom:14px; display:flex; align-items:center; gap:12px;">
+                <span style="font-size:13px;">${state.unimportedCount} existing platform_listings row(s) for this Item # aren't on the roster yet.</span>
+                <button class="btn btn-primary" id="lp-import-existing-btn" style="margin-left:auto;">Import into roster</button>
+            </div>
+        ` : ''}
+
+        <div style="display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap;">
+            <button class="btn" id="lp-new-group-btn">+ New group</button>
+            <button class="btn" id="lp-add-card-btn">+ Add card to listing</button>
+            <span style="margin-left:auto; font-size:12px; color:var(--text-secondary); align-self:center;">
+                ${state.selected.size} selected
+            </span>
+            <select id="lp-bulk-group-select" style="font-size:12px;" ${state.selected.size === 0 ? 'disabled' : ''}>
+                <option value="">Assign selected to group...</option>
+                <option value="__none__">(no group)</option>
+                ${state.groups.map(g => `<option value="${g.id}">${escapeHtml(g.name)}</option>`).join('')}
+            </select>
+        </div>
+
+        ${state.groups.map(g => groupSectionHTML(g, byGroup[g.id] || [])).join('')}
+        ${groupSectionHTML(null, ungrouped)}
+
+        <div id="lp-modal-root"></div>
+    `;
+
+    wireControls(container, body);
+}
+
+function groupSectionHTML(group, rows) {
+    const title = group ? escapeHtml(group.name) : '(no group)';
+    const profile = group && group.profile_id ? state.profiles.find(p => p.id === group.profile_id) : null;
 
     return `
         <div class="lp-group" style="border:1px solid var(--border); border-radius:8px; margin-bottom:14px; overflow:hidden;">
             <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; background:var(--bg-tertiary); flex-wrap:wrap;">
-                <span class="badge" style="background:rgba(74,140,255,0.15); color:var(--accent);">${escapeHtml(g.label)}</span>
-                <span style="font-size:12px; color:var(--text-secondary);">${g.rows.length} card(s)</span>
-                <label style="font-size:12px; color:var(--text-secondary); margin-left:auto;">Profile
-                    <select class="lp-profile-picker" data-rarity="${escapeHtml(g.rarity || '')}" data-foil-type="${escapeHtml(g.foilType || '')}" data-rule-id="${rule ? rule.id : ''}" style="margin-left:6px;">
-                        <option value="">(none — falls to platform default)</option>
-                        ${state.profiles.map(p => `<option value="${p.id}" ${profile && profile.id === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
-                    </select>
-                </label>
+                <span class="badge" style="background:rgba(74,140,255,0.15); color:var(--accent);">${title}</span>
+                <span style="font-size:12px; color:var(--text-secondary);">${rows.length} card(s)</span>
+                ${group ? `
+                    <label style="font-size:12px; color:var(--text-secondary); margin-left:auto;">Profile
+                        <select class="lp-group-profile-picker" data-group-id="${group.id}" style="margin-left:6px;">
+                            <option value="">(none — falls to platform default)</option>
+                            ${state.profiles.map(p => `<option value="${p.id}" ${profile && profile.id === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
+                        </select>
+                    </label>
+                    <button class="btn lp-rename-group-btn" data-group-id="${group.id}" style="font-size:12px; padding:3px 8px;">Rename</button>
+                    <button class="btn lp-delete-group-btn" data-group-id="${group.id}" style="font-size:12px; padding:3px 8px; color:var(--danger);">Delete</button>
+                ` : ''}
             </div>
-            ${hasNoRule ? `
-                <div style="padding:8px 14px; background:rgba(245,166,35,0.1); color:var(--warning); font-size:12px;">
-                    ⚠ No rule assigned — these cards are pricing off the platform default fallback. Pick a profile above.
-                </div>
-            ` : ''}
-            <table>
-                <thead><tr>
-                    <th>Variation</th><th>Market</th><th>Resolved</th><th>Source</th><th>Synced?</th><th>Available</th><th>Low-stock qty</th><th>Manual pin</th>
-                </tr></thead>
-                <tbody>
-                    ${g.rows.map(r => rowHTML(r)).join('')}
-                </tbody>
-            </table>
+            ${rows.length ? `
+                <table>
+                    <thead><tr>
+                        <th style="width:24px;"></th><th>Variation</th><th>Status</th><th>Market</th><th>Resolved</th><th>Source</th><th>Synced?</th><th>Available</th><th>Low-stock qty</th><th>Manual pin</th>
+                    </tr></thead>
+                    <tbody>${rows.map(r => rowHTML(r)).join('')}</tbody>
+                </table>
+            ` : `<p style="color:var(--text-secondary); font-size:13px; padding:10px 14px;">No cards here yet.</p>`}
         </div>
     `;
 }
 
 function rowHTML(r) {
-    const row = state.listingRows[r.row_id] || {};
-    const stale = needsPush(r);
+    const listingRow = state.listingRowsByPLId[r.platform_listing_id] || {};
+    const stale = r.status === 'active' && needsPush(r);
+    const isActive = r.status === 'active';
     return `
         <tr data-row-id="${r.row_id}" ${stale ? 'style="background:rgba(245,166,35,0.06);"' : ''}>
-            <td>${escapeHtml(row.external_id || '')}</td>
+            <td><input type="checkbox" class="lp-row-checkbox" data-row-id="${r.row_id}" ${state.selected.has(r.row_id) ? 'checked' : ''} /></td>
+            <td>${escapeHtml(listingRow.external_id || r.derived_label)}</td>
+            <td>${statusBadge(r.status)}</td>
             <td>${r.market_price != null ? formatPrice(r.market_price) : '-'}</td>
             <td style="font-weight:600;">${formatPrice(r.resolved_price)}</td>
             <td>${sourceBadge(r.price_source)}</td>
-            <td>${isGatedIn(r)
-                ? '<span style="color:var(--success); font-size:12px;">yes</span>'
-                : '<span style="color:var(--text-secondary); font-size:12px;" title="sync_enabled=false or status != active">no</span>'}</td>
+            <td>${isActive
+                ? (isGatedIn(r) ? '<span style="color:var(--success); font-size:12px;">yes</span>' : '<span style="color:var(--text-secondary); font-size:12px;">no</span>')
+                : '<span style="color:var(--text-secondary); font-size:12px;">n/a</span>'}</td>
             <td>${r.available_qty ?? '-'}</td>
-            <td>
-                <input type="number" class="lp-low-stock-input" data-row-id="${r.row_id}"
-                       value="${r.low_stock_qty ?? ''}" placeholder="-" style="width:60px;" />
-            </td>
-            <td>
-                <input type="number" step="0.01" class="lp-pin-input" data-row-id="${r.row_id}"
-                       value="${row.manual_price ?? ''}" placeholder="unpinned" style="width:80px;" />
-            </td>
+            <td><input type="number" class="lp-low-stock-input" data-row-id="${r.row_id}" data-pl-id="${r.platform_listing_id || ''}"
+                       value="${r.low_stock_qty ?? ''}" placeholder="-" style="width:60px;" ${isActive ? '' : 'disabled title="only editable once live"'} /></td>
+            <td><input type="number" step="0.01" class="lp-pin-input" data-pl-id="${r.platform_listing_id || ''}"
+                       value="${listingRow.manual_price ?? ''}" placeholder="${isActive ? 'unpinned' : 'n/a'}" style="width:80px;" ${isActive ? '' : 'disabled'} /></td>
         </tr>
     `;
 }
@@ -317,70 +336,252 @@ function rowHTML(r) {
 // Wiring
 // ----------------------------------------------------------------
 
-function wireGroupControls(container, body) {
-    body.querySelectorAll('.lp-profile-picker').forEach(sel => {
-        sel.addEventListener('change', async () => {
-            const rarity = sel.dataset.rarity || null;
-            const foilType = sel.dataset.foilType || null;
-            const existingRuleId = sel.dataset.ruleId || null;
-            const profileId = sel.value || null;
+function wireControls(container, body) {
+    body.querySelectorAll('.lp-row-checkbox').forEach(cb => {
+        cb.addEventListener('change', () => {
+            if (cb.checked) state.selected.add(cb.dataset.rowId);
+            else state.selected.delete(cb.dataset.rowId);
+            renderBody(container);
+        });
+    });
 
-            try {
-                if (!profileId) {
-                    if (existingRuleId) {
-                        const { error } = await supabase.from('listing_pricing_rules').delete().eq('id', existingRuleId);
-                        if (error) throw error;
-                    }
-                } else if (existingRuleId) {
-                    const { error } = await supabase.from('listing_pricing_rules').update({ profile_id: profileId }).eq('id', existingRuleId);
-                    if (error) throw error;
-                } else {
-                    const { error } = await supabase.from('listing_pricing_rules').insert({
-                        platform: state.platform, listing_id: state.listingId, profile_id: profileId,
-                        match_rarity: rarity, match_foil_type: foilType,
-                    });
-                    if (error) throw error;
-                }
-                await loadListing(container);
-            } catch (err) {
-                console.error(err);
-                window.alert(`Failed to assign profile: ${err.message}`);
-            }
+    body.querySelector('#lp-bulk-group-select').addEventListener('change', async (e) => {
+        const value = e.target.value;
+        if (!value) return;
+        const groupId = value === '__none__' ? null : value;
+        const { error } = await supabase.from('listing_card_assignments')
+            .update({ group_id: groupId })
+            .in('id', [...state.selected]);
+        if (error) {
+            window.alert(`Failed to assign group: ${error.message}`);
+            return;
+        }
+        state.selected = new Set();
+        await loadListing(container);
+    });
+
+    body.querySelector('#lp-new-group-btn').addEventListener('click', async () => {
+        const name = window.prompt('Group name:');
+        if (!name || !name.trim()) return;
+        const { error } = await supabase.from('listing_card_groups').insert({
+            template_id: state.template.id, name: name.trim(),
+        });
+        if (error) {
+            window.alert(`Failed to create group: ${error.message}`);
+            return;
+        }
+        await loadListing(container);
+    });
+
+    body.querySelectorAll('.lp-rename-group-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const group = state.groups.find(g => g.id === btn.dataset.groupId);
+            const name = window.prompt('Rename group:', group?.name || '');
+            if (!name || !name.trim()) return;
+            const { error } = await supabase.from('listing_card_groups').update({ name: name.trim() }).eq('id', btn.dataset.groupId);
+            if (error) { window.alert(`Failed to rename: ${error.message}`); return; }
+            await loadListing(container);
+        });
+    });
+
+    body.querySelectorAll('.lp-delete-group-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            if (!window.confirm('Delete this group? Cards in it become ungrouped, not deleted.')) return;
+            const { error } = await supabase.from('listing_card_groups').delete().eq('id', btn.dataset.groupId);
+            if (error) { window.alert(`Failed to delete: ${error.message}`); return; }
+            await loadListing(container);
+        });
+    });
+
+    body.querySelectorAll('.lp-group-profile-picker').forEach(sel => {
+        sel.addEventListener('change', async () => {
+            const { error } = await supabase.from('listing_card_groups')
+                .update({ profile_id: sel.value || null }).eq('id', sel.dataset.groupId);
+            if (error) { window.alert(`Failed to assign profile: ${error.message}`); return; }
+            await loadListing(container);
         });
     });
 
     body.querySelectorAll('.lp-pin-input').forEach(input => {
         input.addEventListener('change', async () => {
-            const rowId = input.dataset.rowId;
+            const plId = input.dataset.plId;
+            if (!plId) return;
             const raw = input.value.trim();
             const manualPrice = raw === '' ? null : parseFloat(raw);
-            const { error } = await supabase.from('platform_listings').update({ manual_price: manualPrice }).eq('id', rowId);
-            if (error) {
-                window.alert(`Failed to save pin: ${error.message}`);
-                return;
-            }
+            const { error } = await supabase.from('platform_listings').update({ manual_price: manualPrice }).eq('id', plId);
+            if (error) { window.alert(`Failed to save pin: ${error.message}`); return; }
             await loadListing(container);
         });
     });
 
     body.querySelectorAll('.lp-low-stock-input').forEach(input => {
         input.addEventListener('change', async () => {
-            const rowId = input.dataset.rowId;
+            const plId = input.dataset.plId;
+            if (!plId) return;
             const raw = input.value.trim();
             const lowStockQty = raw === '' ? null : parseInt(raw, 10);
-            const { error } = await supabase.from('platform_listings').update({ low_stock_qty: lowStockQty }).eq('id', rowId);
-            if (error) {
-                window.alert(`Failed to save low-stock qty: ${error.message}`);
+            const { error } = await supabase.from('platform_listings').update({ low_stock_qty: lowStockQty }).eq('id', plId);
+            if (error) { window.alert(`Failed to save low-stock qty: ${error.message}`); return; }
+            await loadListing(container);
+        });
+    });
+
+    const importBtn = body.querySelector('#lp-import-existing-btn');
+    if (importBtn) importBtn.addEventListener('click', () => importExisting(container));
+
+    body.querySelector('#lp-add-card-btn').addEventListener('click', () => openAddCardModal(container, body));
+
+    body.querySelector('#lp-push-btn').addEventListener('click', () => doPush(container, false));
+    body.querySelector('#lp-push-dryrun-btn').addEventListener('click', () => doPush(container, true));
+}
+
+// ----------------------------------------------------------------
+// Import existing platform_listings rows into the roster
+// ----------------------------------------------------------------
+
+async function importExisting(container) {
+    const { data: existing, error: fetchErr } = await supabase
+        .from('platform_listings')
+        .select('id, variant_id')
+        .eq('platform', state.platform).eq('listing_id', state.listingId);
+    if (fetchErr) {
+        window.alert(`Failed to fetch existing listings: ${fetchErr.message}`);
+        return;
+    }
+
+    const { data: existingRoster } = await supabase
+        .from('listing_card_assignments')
+        .select('platform_listing_id')
+        .eq('template_id', state.template.id);
+    const already = new Set((existingRoster || []).map(r => r.platform_listing_id));
+
+    const toImport = (existing || []).filter(r => !already.has(r.id));
+    if (!toImport.length) {
+        window.alert('Nothing new to import.');
+        return;
+    }
+    if (!window.confirm(`Import ${toImport.length} existing card(s) into the roster as 'active'?`)) return;
+
+    const rows = toImport.map((r, i) => ({
+        template_id: state.template.id,
+        platform_listing_id: r.id,
+        variant_id: r.variant_id,
+        priority_rank: i,
+        status: 'active',
+    }));
+    const { error } = await supabase.from('listing_card_assignments').insert(rows);
+    if (error) {
+        window.alert(`Import failed: ${error.message}`);
+        return;
+    }
+    await loadListing(container);
+}
+
+// ----------------------------------------------------------------
+// Add card to listing (queued — not live yet)
+// ----------------------------------------------------------------
+
+function openAddCardModal(container, body) {
+    const root = body.querySelector('#lp-modal-root');
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:480px; max-width:90vw; max-height:80vh; overflow-y:auto;">
+                <h3 style="margin:0 0 12px;">Add card to listing</h3>
+                <p style="color:var(--text-secondary); font-size:12px; margin:0 0 10px;">
+                    Adds as <strong>queued</strong> (planned, not live on eBay yet). Search by card name.
+                </p>
+                <input type="search" id="lp-card-search" placeholder="Card name..." style="width:100%; margin-bottom:10px;" />
+                <div id="lp-card-search-results" style="max-height:320px; overflow-y:auto;"></div>
+                <div style="display:flex; justify-content:flex-end; margin-top:14px;">
+                    <button type="button" class="btn" id="lp-add-card-cancel">Close</button>
+                </div>
+            </div>
+        </div>
+    `;
+    root.querySelector('#lp-add-card-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+
+    let debounceTimer = null;
+    root.querySelector('#lp-card-search').addEventListener('input', (e) => {
+        clearTimeout(debounceTimer);
+        const q = e.target.value.trim();
+        debounceTimer = setTimeout(() => runCardSearch(container, root, q), 300);
+    });
+}
+
+async function runCardSearch(container, root, query) {
+    const resultsEl = root.querySelector('#lp-card-search-results');
+    if (!query) { resultsEl.innerHTML = ''; return; }
+
+    const { data: cards, error } = await supabase
+        .from('card_master').select('id, name, card_number, set_id')
+        .ilike('name', `%${query}%`).limit(15);
+    if (error) {
+        resultsEl.innerHTML = `<p style="color:var(--danger); font-size:12px;">${escapeHtml(error.message)}</p>`;
+        return;
+    }
+    if (!cards || !cards.length) {
+        resultsEl.innerHTML = `<p style="color:var(--text-secondary); font-size:12px;">No matches.</p>`;
+        return;
+    }
+
+    const setIds = [...new Set(cards.map(c => c.set_id).filter(Boolean))];
+    const { data: sets } = await supabase.from('card_sets').select('id, name').in('id', setIds);
+    const setNameById = Object.fromEntries((sets || []).map(s => [s.id, s.name]));
+
+    resultsEl.innerHTML = cards.map(c => `
+        <div class="lp-card-result" data-card-id="${c.id}" style="padding:8px; border-bottom:1px solid var(--border); cursor:pointer; font-size:13px;">
+            ${escapeHtml(c.name)} #${escapeHtml(c.card_number || '?')}
+            <span style="color:var(--text-secondary);">${escapeHtml(setNameById[c.set_id] || '')}</span>
+        </div>
+    `).join('');
+
+    resultsEl.querySelectorAll('.lp-card-result').forEach(el => {
+        el.addEventListener('click', () => showVariantPicker(container, root, el.dataset.cardId));
+    });
+}
+
+async function showVariantPicker(container, root, cardId) {
+    const resultsEl = root.querySelector('#lp-card-search-results');
+    const { data: variants, error } = await supabase
+        .from('card_variants').select('id, foil_type, foil_pattern, texture, stamp_type')
+        .eq('card_id', cardId);
+    if (error) {
+        resultsEl.innerHTML = `<p style="color:var(--danger); font-size:12px;">${escapeHtml(error.message)}</p>`;
+        return;
+    }
+
+    resultsEl.innerHTML = `
+        <p style="font-size:12px; color:var(--text-secondary);">Pick a variant:</p>
+        ${(variants || []).map(v => {
+            const parts = [v.foil_type, v.foil_pattern, v.texture, v.stamp_type].filter(Boolean);
+            return `<div class="lp-variant-result" data-variant-id="${v.id}" style="padding:8px; border-bottom:1px solid var(--border); cursor:pointer; font-size:13px;">
+                ${escapeHtml(parts.join(' · ') || 'Standard')}
+            </div>`;
+        }).join('')}
+    `;
+
+    resultsEl.querySelectorAll('.lp-variant-result').forEach(el => {
+        el.addEventListener('click', async () => {
+            const { count } = await supabase.from('listing_card_assignments')
+                .select('id', { count: 'exact', head: true }).eq('template_id', state.template.id);
+            const { error: insErr } = await supabase.from('listing_card_assignments').insert({
+                template_id: state.template.id,
+                variant_id: el.dataset.variantId,
+                priority_rank: count || 0,
+                status: 'queued',
+            });
+            if (insErr) {
+                window.alert(`Failed to add card: ${insErr.message}`);
                 return;
             }
+            root.innerHTML = '';
             await loadListing(container);
         });
     });
 }
 
 // ----------------------------------------------------------------
-// Push (POSTs to picking_api.py, same service/token as the Picking tab —
-// eBay credentials never touch the browser)
+// Push
 // ----------------------------------------------------------------
 
 async function doPush(container, dryRun) {
