@@ -27,6 +27,64 @@ function escapeHtml(str) {
     }[c]));
 }
 
+function cardLabel(r) {
+    return r.card_name ? `${r.card_number ?? ''} ${r.card_name}`.trim() : r.derived_label;
+}
+
+// Same thumbnail + hover-zoom convention as picking.js: a small fixed
+// image (class="card-thumb") that a page-level mouseover listener blows
+// up into a floating preview near the cursor.
+function imgHtml(url) {
+    if (!url) return `<div style="width:40px; height:56px; background:var(--bg-tertiary); border-radius:3px; border:1px solid var(--border);"></div>`;
+    return `<img src="${escapeHtml(url)}" alt="" loading="lazy" class="card-thumb"
+                style="width:40px; height:56px; object-fit:cover; border-radius:3px; border:1px solid var(--border); cursor:zoom-in;"
+                onerror="this.replaceWith(Object.assign(document.createElement('div'),
+                    {style:'width:40px;height:56px;background:var(--bg-tertiary);border-radius:3px;border:1px solid var(--border);'}))">`;
+}
+
+// Hover-to-zoom preview, one shared floating element cached on window
+// (index.html re-imports this module with a fresh ?v= on every
+// navigation) — mirrors picking.js's setupImagePreview() exactly.
+function setupImagePreview(container) {
+    let preview = window.__cbmListingPricingPreview;
+    if (!preview) {
+        preview = document.createElement('div');
+        preview.id = 'cbm-listing-pricing-img-preview';
+        preview.style.cssText = `
+            position:fixed; pointer-events:none; z-index:9999; display:none;
+            border:1px solid var(--border); border-radius:6px; overflow:hidden;
+            box-shadow:0 8px 28px rgba(0,0,0,0.5); background:var(--bg-secondary);
+        `;
+        const img = document.createElement('img');
+        img.style.cssText = 'display:block; max-width:280px; max-height:390px;';
+        preview.appendChild(img);
+        document.body.appendChild(preview);
+        window.__cbmListingPricingPreview = preview;
+    }
+
+    container.addEventListener('mouseover', (e) => {
+        const t = e.target.closest('img.card-thumb');
+        if (!t || !t.src) return;
+        preview.firstChild.src = t.src;
+        preview.style.display = 'block';
+    });
+
+    container.addEventListener('mousemove', (e) => {
+        if (preview.style.display !== 'block') return;
+        const pad = 16;
+        let x = e.clientX + pad;
+        let y = e.clientY + pad;
+        if (x + 300 > window.innerWidth) x = e.clientX - 300 - pad;
+        if (y + 400 > window.innerHeight) y = Math.max(8, window.innerHeight - 400);
+        preview.style.left = `${x}px`;
+        preview.style.top = `${y}px`;
+    });
+
+    container.addEventListener('mouseout', (e) => {
+        if (e.target.closest('img.card-thumb')) preview.style.display = 'none';
+    });
+}
+
 let state = {
     platform: 'ebay',
     listingId: '',
@@ -48,6 +106,7 @@ let lastClickedCheckboxIndex = null;
 
 export async function renderListingPricing(container) {
     container.innerHTML = shellHTML();
+    setupImagePreview(container);
     const { data } = await supabase.from('pricing_profiles').select('*').order('name');
     state.profiles = data || [];
     await renderTemplatesList(container);
@@ -428,10 +487,14 @@ function renderBody(container) {
 function groupSectionHTML(group, rows) {
     const title = group ? escapeHtml(group.name) : '(no group)';
     const profile = group && group.profile_id ? state.profiles.find(p => p.id === group.profile_id) : null;
+    const groupKey = group ? group.id : '__ungrouped__';
+    const allSelected = rows.length > 0 && rows.every(r => state.selected.has(r.row_id));
 
     return `
         <div class="lp-group" style="border:1px solid var(--border); border-radius:8px; margin-bottom:14px; overflow:hidden;">
             <div style="display:flex; align-items:center; gap:12px; padding:10px 14px; background:var(--bg-tertiary); flex-wrap:wrap;">
+                <input type="checkbox" class="lp-group-select-all" data-group-key="${groupKey}"
+                       title="Select all in this group" ${allSelected ? 'checked' : ''} ${rows.length === 0 ? 'disabled' : ''} />
                 <span class="badge" style="background:rgba(74,140,255,0.15); color:var(--accent);">${title}</span>
                 <span style="font-size:12px; color:var(--text-secondary);">${rows.length} card(s)</span>
                 ${group ? `
@@ -442,6 +505,7 @@ function groupSectionHTML(group, rows) {
                             <option value="__new__">+ New profile...</option>
                         </select>
                     </label>
+                    ${profile ? `<button class="btn lp-edit-tiers-btn" data-profile-id="${profile.id}" style="font-size:12px; padding:3px 8px;">Edit tiers</button>` : ''}
                     <button class="btn lp-rename-group-btn" data-group-id="${group.id}" style="font-size:12px; padding:3px 8px;">Rename</button>
                     <button class="btn lp-delete-group-btn" data-group-id="${group.id}" style="font-size:12px; padding:3px 8px; color:var(--danger);">Delete</button>
                 ` : ''}
@@ -449,7 +513,7 @@ function groupSectionHTML(group, rows) {
             ${rows.length ? `
                 <table>
                     <thead><tr>
-                        <th style="width:24px;"></th><th>Variation</th><th>Status</th><th>Market</th><th>Resolved</th><th>Source</th><th>Synced?</th><th>Available</th><th>Resolved Qty</th><th>Low-stock qty</th><th>Manual pin</th><th>Qty Limit pin</th>
+                        <th style="width:24px;"></th><th></th><th>Variation</th><th>Status</th><th>Market</th><th>Resolved</th><th>Source</th><th>Synced?</th><th>Available</th><th>Resolved Qty</th><th>Low-stock qty</th><th>Manual pin</th><th>Qty Limit pin</th>
                     </tr></thead>
                     <tbody>${rows.map(r => rowHTML(r)).join('')}</tbody>
                 </table>
@@ -465,7 +529,10 @@ function rowHTML(r) {
     return `
         <tr data-row-id="${r.row_id}" ${stale ? 'style="background:rgba(245,166,35,0.06);"' : ''}>
             <td><input type="checkbox" class="lp-row-checkbox" data-row-id="${r.row_id}" ${state.selected.has(r.row_id) ? 'checked' : ''} /></td>
-            <td>${escapeHtml(listingRow.external_id || r.derived_label)}</td>
+            <td>${imgHtml(r.image_url)}</td>
+            <td>${escapeHtml(listingRow.external_id || cardLabel(r))}
+                <div style="font-size:11px; color:var(--text-secondary);">${escapeHtml(r.derived_label)}</div>
+            </td>
             <td>${statusBadge(r.status)}</td>
             <td>${r.market_price != null ? formatPrice(r.market_price) : '-'}</td>
             <td style="font-weight:600;">${formatPrice(r.resolved_price)}</td>
@@ -516,6 +583,18 @@ function wireControls(container, body) {
         });
     });
 
+    body.querySelectorAll('.lp-group-select-all').forEach(cb => {
+        cb.addEventListener('change', () => {
+            const rowCheckboxes = [...cb.closest('.lp-group').querySelectorAll('.lp-row-checkbox')];
+            rowCheckboxes.forEach(rcb => {
+                rcb.checked = cb.checked;
+                if (cb.checked) state.selected.add(rcb.dataset.rowId);
+                else state.selected.delete(rcb.dataset.rowId);
+            });
+            renderBody(container);
+        });
+    });
+
     body.querySelector('#lp-bulk-group-select').addEventListener('change', async (e) => {
         const value = e.target.value;
         if (!value) return;
@@ -532,6 +611,10 @@ function wireControls(container, body) {
     });
 
     body.querySelector('#lp-new-group-btn').addEventListener('click', () => openNewGroupModal(container, body));
+
+    body.querySelectorAll('.lp-edit-tiers-btn').forEach(btn => {
+        btn.addEventListener('click', () => openEditTiersModal(container, body, btn.dataset.profileId));
+    });
 
     body.querySelectorAll('.lp-rename-group-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
@@ -879,6 +962,165 @@ function openNewProfileModal(container, body, groupId) {
 
         root.innerHTML = '';
         await loadListing(container);
+    });
+}
+
+// ----------------------------------------------------------------
+// Edit tiers — inline tier editing for a group's assigned profile, so you
+// don't have to leave the Listing pricing page to fix a price. Mirrors
+// configuration.js's per-profile Tiers modal (including the flat/formula
+// toggle from migration 007), but stands alone here rather than importing
+// it — same duplication convention already used for openNewProfileModal
+// vs. Configuration's "New pricing profile" modal in this codebase.
+// ----------------------------------------------------------------
+
+function tierPriceLabel(t) {
+    if (t.list_price != null) return formatPrice(t.list_price);
+    const plusPart = t.plus ? ` + ${formatPrice(t.plus)}` : '';
+    return `market × ${t.multiplier}${plusPart}`;
+}
+
+async function openEditTiersModal(container, body, profileId, editingTierId = null) {
+    const root = body.querySelector('#lp-modal-root');
+    const [{ data: profile }, { data: tiers }] = await Promise.all([
+        supabase.from('pricing_profiles').select('*').eq('id', profileId).single(),
+        supabase.from('pricing_profile_tiers').select('*').eq('profile_id', profileId).order('min_market'),
+    ]);
+    if (!profile) { root.innerHTML = ''; return; }
+
+    const editingTier = editingTierId ? (tiers || []).find(t => t.id === editingTierId) : (editingTierId === 'new' ? {} : null);
+    const isFormOpen = editingTierId !== null;
+    const tierMode = editingTier && editingTier.list_price == null && editingTier.multiplier != null ? 'formula' : 'flat';
+
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:460px; max-width:90vw; max-height:85vh; overflow-y:auto;">
+                <h3 style="margin:0 0 4px;">Tiers — ${escapeHtml(profile.name)}</h3>
+                <p style="color:var(--text-secondary); font-size:12px; margin:0 0 14px;">
+                    Market price brackets: min is inclusive, max is exclusive (blank max = open-ended top tier).
+                </p>
+                ${(tiers || []).length ? `
+                    <table style="margin-bottom:12px;">
+                        <thead><tr><th>Min market</th><th>Max market</th><th>Price</th><th style="width:110px;"></th></tr></thead>
+                        <tbody>
+                            ${tiers.map(t => `
+                                <tr>
+                                    <td>${formatPrice(t.min_market)}</td>
+                                    <td>${t.max_market == null ? '(open-ended)' : formatPrice(t.max_market)}</td>
+                                    <td>${tierPriceLabel(t)}</td>
+                                    <td>
+                                        <button type="button" class="btn lp-edit-tier-row-btn" data-id="${t.id}" style="padding:2px 8px; font-size:12px;">Edit</button>
+                                        <button type="button" class="btn lp-delete-tier-row-btn" data-id="${t.id}" style="padding:2px 8px; font-size:12px; color:var(--danger);">×</button>
+                                    </td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                ` : `<p style="color:var(--text-secondary); font-size:13px;">No tiers yet.</p>`}
+
+                ${isFormOpen ? `
+                    <form id="lp-tier-form" style="border-top:1px solid var(--border); padding-top:12px; display:flex; flex-direction:column; gap:10px;">
+                        <div style="display:flex; gap:10px;">
+                            <label style="font-size:12px; color:var(--text-secondary); flex:1;">Min market ($, inclusive)
+                                <input type="number" step="0.01" name="min_market" value="${editingTier?.min_market ?? '0.00'}" style="width:100%; margin-top:4px;" />
+                            </label>
+                            <label style="font-size:12px; color:var(--text-secondary); flex:1;">Max market ($, blank=open-ended)
+                                <input type="number" step="0.01" name="max_market" value="${editingTier?.max_market ?? ''}" style="width:100%; margin-top:4px;" />
+                            </label>
+                        </div>
+                        <label style="font-size:12px; color:var(--text-secondary);">Pricing
+                            <select id="lp-tier-pricing-mode" name="pricing_mode" style="width:100%; margin-top:4px;">
+                                <option value="flat" ${tierMode === 'flat' ? 'selected' : ''}>Flat price</option>
+                                <option value="formula" ${tierMode === 'formula' ? 'selected' : ''}>Formula (market × multiplier + plus)</option>
+                            </select>
+                        </label>
+                        <div id="lp-tier-flat-fields" style="${tierMode === 'flat' ? '' : 'display:none;'}">
+                            <label style="font-size:12px; color:var(--text-secondary); display:block;">List price ($)
+                                <input type="number" step="0.01" name="list_price" value="${editingTier?.list_price ?? ''}" style="width:100%; margin-top:4px;" />
+                            </label>
+                        </div>
+                        <div id="lp-tier-formula-fields" style="display:flex; gap:10px; ${tierMode === 'formula' ? '' : 'display:none;'}">
+                            <label style="font-size:12px; color:var(--text-secondary); flex:1;">Multiplier
+                                <input type="number" step="0.01" name="multiplier" value="${editingTier?.multiplier ?? ''}" style="width:100%; margin-top:4px;" />
+                            </label>
+                            <label style="font-size:12px; color:var(--text-secondary); flex:1;">Plus ($)
+                                <input type="number" step="0.01" name="plus" value="${editingTier?.plus ?? ''}" style="width:100%; margin-top:4px;" />
+                            </label>
+                        </div>
+                        <div id="lp-tier-form-error" style="color:var(--danger); font-size:12px;"></div>
+                        <div style="display:flex; gap:8px;">
+                            <button type="submit" class="btn btn-primary">${editingTierId === 'new' ? 'Add tier' : 'Save tier'}</button>
+                            <button type="button" class="btn" id="lp-tier-form-cancel">Cancel</button>
+                        </div>
+                    </form>
+                ` : `<button type="button" class="btn btn-primary" id="lp-add-tier-btn">+ Add tier</button>`}
+
+                <div style="display:flex; justify-content:flex-end; margin-top:16px;">
+                    <button type="button" class="btn" id="lp-tiers-modal-close">Close</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    root.querySelector('#lp-tiers-modal-close').addEventListener('click', async () => {
+        root.innerHTML = '';
+        await loadListing(container);
+    });
+
+    if (!isFormOpen) {
+        root.querySelector('#lp-add-tier-btn').addEventListener('click', () => openEditTiersModal(container, body, profileId, 'new'));
+        root.querySelectorAll('.lp-edit-tier-row-btn').forEach(btn => {
+            btn.addEventListener('click', () => openEditTiersModal(container, body, profileId, btn.dataset.id));
+        });
+        root.querySelectorAll('.lp-delete-tier-row-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                if (!window.confirm('Delete this tier?')) return;
+                const { error } = await supabase.from('pricing_profile_tiers').delete().eq('id', btn.dataset.id);
+                if (error) { window.alert(`Failed to delete: ${error.message}`); return; }
+                await openEditTiersModal(container, body, profileId);
+            });
+        });
+        return;
+    }
+
+    root.querySelector('#lp-tier-pricing-mode').addEventListener('change', (e) => {
+        const isFormula = e.target.value === 'formula';
+        root.querySelector('#lp-tier-flat-fields').style.display = isFormula ? 'none' : '';
+        root.querySelector('#lp-tier-formula-fields').style.display = isFormula ? 'flex' : 'none';
+    });
+
+    root.querySelector('#lp-tier-form-cancel').addEventListener('click', () => openEditTiersModal(container, body, profileId));
+    root.querySelector('#lp-tier-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#lp-tier-form-error');
+        errBox.textContent = '';
+        const fd = new FormData(e.target);
+        const mode = fd.get('pricing_mode');
+        if (mode === 'flat' && !fd.get('list_price')) {
+            errBox.textContent = 'List price is required for a flat tier.';
+            return;
+        }
+        if (mode === 'formula' && !fd.get('multiplier')) {
+            errBox.textContent = 'Multiplier is required for a formula tier.';
+            return;
+        }
+        const payload = {
+            profile_id: profileId,
+            min_market: parseFloat(fd.get('min_market')),
+            max_market: fd.get('max_market') ? parseFloat(fd.get('max_market')) : null,
+            list_price: mode === 'flat' ? parseFloat(fd.get('list_price')) : null,
+            multiplier: mode === 'formula' ? parseFloat(fd.get('multiplier')) : null,
+            plus: mode === 'formula' && fd.get('plus') ? parseFloat(fd.get('plus')) : null,
+        };
+        const { error } = editingTierId === 'new'
+            ? await supabase.from('pricing_profile_tiers').insert(payload)
+            : await supabase.from('pricing_profile_tiers').update(payload).eq('id', editingTierId);
+        if (error) {
+            // The non-overlap trigger raises a plain RAISE EXCEPTION message — surface it directly.
+            errBox.textContent = error.message || 'Failed to save tier.';
+            return;
+        }
+        await openEditTiersModal(container, body, profileId);
     });
 }
 
