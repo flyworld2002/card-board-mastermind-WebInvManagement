@@ -92,7 +92,7 @@ let state = {
     templates: [],           // all listing_templates rows (landing view)
     template: null,          // the one currently open, or null when on the landing view
     resolvedRows: [],        // resolve_listing_prices() output
-    listingRowsByPLId: {},   // platform_listing_id -> platform_listings row (sync_enabled/status/manual_price/etc.)
+    listingRowsByPLId: {},   // platform_listing_id -> platform_listings row (sync_enabled/status/pushed_*/external_id)
     groups: [],              // listing_card_groups for this template
     profiles: [],
     unimportedCount: 0,      // platform_listings rows for this listing_id not yet in the roster
@@ -332,7 +332,7 @@ async function loadListing(container) {
         if (plIds.length) {
             const { data: listingRows } = await supabase
                 .from('platform_listings')
-                .select('id, external_id, manual_price, quantity_limit, pushed_price, pushed_qty, pushed_at, sync_enabled, status')
+                .select('id, external_id, pushed_price, pushed_qty, pushed_at, sync_enabled, status')
                 .in('id', plIds);
             state.listingRowsByPLId = Object.fromEntries((listingRows || []).map(r => [r.id, r]));
         } else {
@@ -513,7 +513,7 @@ function groupSectionHTML(group, rows) {
             ${rows.length ? `
                 <table>
                     <thead><tr>
-                        <th style="width:24px;"></th><th></th><th>Variation</th><th>Status</th><th>Market</th><th>Resolved</th><th>Source</th><th>Synced?</th><th>Available</th><th>Resolved Qty</th><th>Low-stock qty</th><th>Manual pin</th><th>Qty Limit pin</th>
+                        <th style="width:24px;"></th><th></th><th>Variation</th><th>Set</th><th>Status</th><th>Market</th><th>Resolved</th><th>Source</th><th>Synced?</th><th>Available</th><th>Resolved Qty</th><th>Low-stock qty</th><th>Manual pin</th><th>Qty Limit pin</th>
                     </tr></thead>
                     <tbody>${rows.map(r => rowHTML(r)).join('')}</tbody>
                 </table>
@@ -533,6 +533,7 @@ function rowHTML(r) {
             <td>${escapeHtml(listingRow.external_id || cardLabel(r))}
                 <div style="font-size:11px; color:var(--text-secondary);">${escapeHtml(r.derived_label)}</div>
             </td>
+            <td style="font-size:12px; color:var(--text-secondary);">${escapeHtml(r.set_name || '-')}</td>
             <td>${statusBadge(r.status)}</td>
             <td>${r.market_price != null ? formatPrice(r.market_price) : '-'}</td>
             <td style="font-weight:600;">${formatPrice(r.resolved_price)}</td>
@@ -541,13 +542,13 @@ function rowHTML(r) {
                 ? (isGatedIn(r) ? '<span style="color:var(--success); font-size:12px;">yes</span>' : '<span style="color:var(--text-secondary); font-size:12px;">no</span>')
                 : '<span style="color:var(--text-secondary); font-size:12px;">n/a</span>'}</td>
             <td>${r.available_qty ?? '-'}</td>
-            <td>${isActive ? resolvedQty(r) : '-'}</td>
-            <td><input type="number" class="lp-low-stock-input" data-row-id="${r.row_id}" data-pl-id="${r.platform_listing_id || ''}"
-                       value="${r.low_stock_qty ?? ''}" placeholder="-" style="width:60px;" ${isActive ? '' : 'disabled title="only editable once live"'} /></td>
-            <td><input type="number" step="0.01" class="lp-pin-input" data-pl-id="${r.platform_listing_id || ''}"
-                       value="${listingRow.manual_price ?? ''}" placeholder="${isActive ? 'unpinned' : 'n/a'}" style="width:80px;" ${isActive ? '' : 'disabled'} /></td>
-            <td><input type="number" class="lp-qty-limit-input" data-pl-id="${r.platform_listing_id || ''}"
-                       value="${listingRow.quantity_limit ?? ''}" placeholder="${isActive ? 'default' : 'n/a'}" style="width:70px;" ${isActive ? '' : 'disabled'} /></td>
+            <td>${resolvedQty(r)}</td>
+            <td><input type="number" class="lp-low-stock-input" data-row-id="${r.row_id}"
+                       value="${r.row_low_stock_qty ?? ''}" placeholder="-" style="width:60px;" /></td>
+            <td><input type="number" step="0.01" class="lp-pin-input" data-row-id="${r.row_id}"
+                       value="${r.manual_price ?? ''}" placeholder="unpinned" style="width:80px;" /></td>
+            <td><input type="number" class="lp-qty-limit-input" data-row-id="${r.row_id}"
+                       value="${r.row_quantity_limit ?? ''}" placeholder="default" style="width:70px;" /></td>
         </tr>
     `;
 }
@@ -649,13 +650,18 @@ function wireControls(container, body) {
         });
     });
 
+    // Pins (manual_price/low_stock_qty/quantity_limit) live on
+    // listing_card_assignments (docs/plans/listing-pricing-system.md
+    // migration 010) — the roster row, which exists for a card regardless
+    // of status, unlike platform_listings which only exists once live.
+    // Editable for queued rows too, so a pin set before going live carries
+    // straight through once it does (same row id, no copying needed).
     body.querySelectorAll('.lp-pin-input').forEach(input => {
         input.addEventListener('change', async () => {
-            const plId = input.dataset.plId;
-            if (!plId) return;
+            const rowId = input.dataset.rowId;
             const raw = input.value.trim();
             const manualPrice = raw === '' ? null : parseFloat(raw);
-            const { error } = await supabase.from('platform_listings').update({ manual_price: manualPrice }).eq('id', plId);
+            const { error } = await supabase.from('listing_card_assignments').update({ manual_price: manualPrice }).eq('id', rowId);
             if (error) { window.alert(`Failed to save pin: ${error.message}`); return; }
             await loadListing(container);
         });
@@ -663,11 +669,10 @@ function wireControls(container, body) {
 
     body.querySelectorAll('.lp-low-stock-input').forEach(input => {
         input.addEventListener('change', async () => {
-            const plId = input.dataset.plId;
-            if (!plId) return;
+            const rowId = input.dataset.rowId;
             const raw = input.value.trim();
             const lowStockQty = raw === '' ? null : parseInt(raw, 10);
-            const { error } = await supabase.from('platform_listings').update({ low_stock_qty: lowStockQty }).eq('id', plId);
+            const { error } = await supabase.from('listing_card_assignments').update({ low_stock_qty: lowStockQty }).eq('id', rowId);
             if (error) { window.alert(`Failed to save low-stock qty: ${error.message}`); return; }
             await loadListing(container);
         });
@@ -675,11 +680,10 @@ function wireControls(container, body) {
 
     body.querySelectorAll('.lp-qty-limit-input').forEach(input => {
         input.addEventListener('change', async () => {
-            const plId = input.dataset.plId;
-            if (!plId) return;
+            const rowId = input.dataset.rowId;
             const raw = input.value.trim();
             const quantityLimit = raw === '' ? null : parseInt(raw, 10);
-            const { error } = await supabase.from('platform_listings').update({ quantity_limit: quantityLimit }).eq('id', plId);
+            const { error } = await supabase.from('listing_card_assignments').update({ quantity_limit: quantityLimit }).eq('id', rowId);
             if (error) { window.alert(`Failed to save qty limit pin: ${error.message}`); return; }
             await loadListing(container);
         });

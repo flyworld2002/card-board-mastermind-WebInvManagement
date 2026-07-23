@@ -749,7 +749,7 @@ function renderDetailPanel(container, row, td) {
                 <span style="color:var(--text-secondary); font-size:12px; min-width:80px;">${escapeHtml(l.account || '—')}</span>
                 <span style="color:${statusColor}; font-size:11px; min-width:80px;">${escapeHtml(l.status || '—')}</span>
                 <span style="font-weight:500; min-width:55px;">${formatPrice(l.list_price)}</span>
-                <span style="color:var(--text-secondary); font-size:12px; min-width:90px;">Qty: ${l.quantity_listed ?? '—'} / ${l.quantity_limit ?? '—'}</span>
+                <span style="color:var(--text-secondary); font-size:12px; min-width:90px;">Qty: ${l.quantity_listed ?? '—'}</span>
                 <div style="margin-left:auto;">
                     <button class="btn detail-edit-listing-btn" data-lid="${l.id}"
                             style="font-size:11px; padding:3px 10px;">Edit</button>
@@ -826,11 +826,6 @@ function openInlineListingEdit(container, row, l, triggerBtn) {
                        value="${l.quantity_listed ?? ''}"
                        style="width:70px; margin-top:2px; display:block;" />
             </label>
-            <label style="font-size:12px; color:var(--text-secondary);">Qty Limit
-                <input type="number" class="ile-limit"
-                       value="${l.quantity_limit ?? ''}"
-                       style="width:70px; margin-top:2px; display:block;" />
-            </label>
             <label style="font-size:12px; color:var(--text-secondary);">eBay Item #
                 <input type="text" class="ile-listing-id"
                        value="${escapeHtml(l.listing_id || '')}"
@@ -892,7 +887,6 @@ function openInlineListingEdit(container, row, l, triggerBtn) {
     editPanel.querySelector('.ile-save-btn').addEventListener('click', async () => {
         const price   = parseFloat(editPanel.querySelector('.ile-price').value) || null;
         const qty     = parseInt(editPanel.querySelector('.ile-qty').value) || null;
-        const limit   = parseInt(editPanel.querySelector('.ile-limit').value) || null;
         const listId  = editPanel.querySelector('.ile-listing-id').value.trim() || null;
         const extId   = editPanel.querySelector('.ile-external-id').value.trim() || null;
         const account = editPanel.querySelector('.ile-account').value.trim() || null;
@@ -907,7 +901,6 @@ function openInlineListingEdit(container, row, l, triggerBtn) {
             .update({
                 list_price:      price,
                 quantity_listed: qty,
-                quantity_limit:  limit,
                 listing_id:      listId,
                 external_id:     extId,
                 account,
@@ -1458,10 +1451,6 @@ function openListModal(container, row) {
                     </label>
                 </div>
                 <div style="display:flex; gap:12px;">
-                    <label style="font-size:13px; flex:1;">Quantity limit <span style="color:var(--text-secondary); font-size:12px;">(max to keep listed)</span>
-                        <input type="number" class="list-qty-limit" value="${row.quantity ?? 1}"
-                               min="1" style="width:100%; margin-top:4px;" />
-                    </label>
                     <label style="font-size:13px; flex:1;">eBay Item # <span class="ebay-required" style="color:var(--danger); display:none;">*</span><span class="ebay-optional" style="color:var(--text-secondary);">(optional)</span>
                         <input type="text" class="list-listing-id" placeholder="e.g. 334903509883"
                                style="width:100%; margin-top:4px;" />
@@ -1558,7 +1547,6 @@ function openListModal(container, row) {
                 external_id:     externalId,
                 list_price:      price,
                 quantity_listed: qty,
-                quantity_limit:  parseInt(overlay.querySelector('.list-qty-limit').value) || null,
                 description,
                 status:          status,
                 listed_at:       new Date().toISOString(),
@@ -1680,7 +1668,7 @@ async function openListingsModal(container, row) {
                 </span>
                 <span style="font-weight:600;">${formatPrice(l.list_price)}</span>
                 <span style="font-size:12px; color:var(--text-secondary);">
-                    Qty: ${l.quantity_listed ?? '—'}${l.quantity_limit ? ` / Limit: ${l.quantity_limit}` : ''}
+                    Qty: ${l.quantity_listed ?? '—'}
                 </span>
                 <span style="margin-left:auto; font-size:11px; color:var(--text-secondary);">
                     ${l.listed_at ? new Date(l.listed_at).toLocaleDateString() : ''}
@@ -1699,11 +1687,6 @@ async function openListingsModal(container, row) {
                     <label style="font-size:12px; color:var(--text-secondary);">Qty Listed
                         <input type="number" class="edit-list-qty"
                                value="${l.quantity_listed ?? ''}"
-                               style="width:70px; margin-top:2px; display:block;" />
-                    </label>
-                    <label style="font-size:12px; color:var(--text-secondary);">Qty Limit
-                        <input type="number" class="edit-list-limit"
-                               value="${l.quantity_limit ?? ''}"
                                style="width:70px; margin-top:2px; display:block;" />
                     </label>
                     <label style="font-size:12px; color:var(--text-secondary);">eBay Item #
@@ -1766,7 +1749,6 @@ async function openListingsModal(container, row) {
         div.querySelector('.save-listing-btn').addEventListener('click', async () => {
             const price    = parseFloat(div.querySelector('.edit-list-price').value) || null;
             const qty      = parseInt(div.querySelector('.edit-list-qty').value) || null;
-            const limit    = parseInt(div.querySelector('.edit-list-limit').value) || null;
             const listId   = div.querySelector('.edit-listing-id').value.trim() || null;
             const extId    = div.querySelector('.edit-external-id').value.trim() || null;
             const status   = div.querySelector('.edit-status').value;
@@ -1780,7 +1762,6 @@ async function openListingsModal(container, row) {
                 .update({
                     list_price:      price,
                     quantity_listed: qty,
-                    quantity_limit:  limit,
                     listing_id:      listId,
                     external_id:     extId,
                     status,
