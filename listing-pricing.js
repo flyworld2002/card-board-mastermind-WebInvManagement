@@ -522,7 +522,7 @@ function groupSectionHTML(group, rows) {
             ${rows.length ? `
                 <table>
                     <thead><tr>
-                        <th style="width:24px;"></th><th></th><th>Variation</th><th>Set</th><th>Status</th><th>Market</th><th>Resolved</th><th>Source</th><th>Synced?</th><th>Available</th><th>Resolved Qty</th><th>Low-stock qty</th><th>Manual pin</th><th>Qty Limit pin</th>
+                        <th style="width:24px;"></th><th></th><th>Variation</th><th>Set</th><th>Status</th><th>Market</th><th>Resolved</th><th>Source</th><th>Synced?</th><th>Available</th><th>Resolved Qty</th><th>Low-stock qty</th><th>Manual pin</th><th>Qty Limit pin</th><th>Actions</th>
                     </tr></thead>
                     <tbody>${rows.map(r => rowHTML(r)).join('')}</tbody>
                 </table>
@@ -552,7 +552,7 @@ function rowHTML(r) {
             <td>${sourceBadge(r.price_source)}</td>
             <td>${isActive
                 ? (isGatedIn(r) ? '<span style="color:var(--success); font-size:12px;">yes</span>' : '<span style="color:var(--text-secondary); font-size:12px;">no</span>')
-                : `<button class="btn lp-push-card-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px;">Push live</button>`}</td>
+                : '<span style="color:var(--text-secondary); font-size:12px;">n/a</span>'}</td>
             <td>${r.available_qty ?? '-'}</td>
             <td>${resolvedQty(r)}</td>
             <td><input type="number" class="lp-low-stock-input" data-row-id="${r.row_id}"
@@ -561,8 +561,23 @@ function rowHTML(r) {
                        value="${r.manual_price ?? ''}" placeholder="unpinned" style="width:80px;" /></td>
             <td><input type="number" class="lp-qty-limit-input" data-row-id="${r.row_id}"
                        value="${r.row_quantity_limit ?? ''}" placeholder="default" style="width:70px;" /></td>
+            <td style="white-space:nowrap;">${actionsHTML(r)}</td>
         </tr>
     `;
+}
+
+function actionsHTML(r) {
+    if (r.status === 'active') {
+        return `<button class="btn lp-remove-card-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px; color:var(--danger);">Remove</button>`;
+    }
+    if (r.status === 'queued') {
+        return `
+            <button class="btn lp-push-card-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px;">Push live</button>
+            <button class="btn lp-delete-roster-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px; color:var(--danger);">Remove from roster</button>
+        `;
+    }
+    // sold_out_retained — already off eBay, nothing left to push live again for this row.
+    return `<button class="btn lp-delete-roster-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px; color:var(--danger);">Remove from roster</button>`;
 }
 
 // ----------------------------------------------------------------
@@ -740,6 +755,14 @@ function wireControls(container, body) {
 
     body.querySelectorAll('.lp-push-card-btn').forEach(btn => {
         btn.addEventListener('click', () => pushCardLive(container, btn));
+    });
+
+    body.querySelectorAll('.lp-remove-card-btn').forEach(btn => {
+        btn.addEventListener('click', () => removeCardLive(container, btn));
+    });
+
+    body.querySelectorAll('.lp-delete-roster-btn').forEach(btn => {
+        btn.addEventListener('click', () => deleteRosterRow(container, btn));
     });
 }
 
@@ -1392,5 +1415,79 @@ async function pushCardLive(container, btn) {
     } finally {
         btn.disabled = false;
         btn.textContent = originalLabel;
+    }
+}
+
+async function callRemoveCard(rowId, dryRun) {
+    const resp = await fetch(`${PICKING_API_URL}/api/remove-card`, {
+        method: 'POST',
+        headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ row_id: rowId, account_num: state.accountNum, dry_run: dryRun }),
+    });
+    if (!resp.ok) {
+        const detail = await resp.text().catch(() => '');
+        throw new Error(`${resp.status} ${detail}`);
+    }
+    return resp.json();
+}
+
+// Pulls a live card's variation off eBay — the reverse of pushCardLive().
+// Roster row goes back to 'queued' (handled server-side), NOT deleted —
+// permanently removing it from the roster is a separate action
+// (deleteRosterRow), only offered once a row is no longer live.
+async function removeCardLive(container, btn) {
+    const rowId = btn.dataset.rowId;
+    const originalLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Checking...';
+
+    try {
+        const preview = await callRemoveCard(rowId, true);
+        if (preview.error) {
+            window.alert(`Can't remove this card: ${preview.error}`);
+            return;
+        }
+        const confirmed = window.confirm(
+            `Remove "${preview.external_id}" from live eBay listing ${state.listingId}? `
+            + `It goes back to queued and can be pushed live again later — no other `
+            + `variation's price or quantity is touched. Continue?`
+        );
+        if (!confirmed) return;
+
+        btn.textContent = 'Removing...';
+        const result = await callRemoveCard(rowId, false);
+        if (result.error) {
+            window.alert(`Remove failed: ${result.error}`);
+            return;
+        }
+        await loadListing(container);
+    } catch (err) {
+        console.error(err);
+        window.alert(`Remove failed: ${err.message} — is picking_api.py running and reachable at ${PICKING_API_URL}?`);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+    }
+}
+
+// Permanently deletes a listing_card_assignments row — only ever shown
+// for 'queued'/'sold_out_retained' rows (never 'active'), so this never
+// needs to touch eBay: nothing live is pointing at this row by the time
+// the button exists.
+async function deleteRosterRow(container, btn) {
+    const rowId = btn.dataset.rowId;
+    if (!window.confirm('Permanently remove this card from the roster? This cannot be undone — '
+        + 'you would need to re-add it via "Add card to listing." Continue?')) return;
+
+    btn.disabled = true;
+    try {
+        const { error } = await supabase.from('listing_card_assignments').delete().eq('id', rowId);
+        if (error) { window.alert(`Failed to remove from roster: ${error.message}`); return; }
+        await loadListing(container);
+    } catch (err) {
+        console.error(err);
+        window.alert(`Failed to remove from roster: ${err.message}`);
+    } finally {
+        btn.disabled = false;
     }
 }
