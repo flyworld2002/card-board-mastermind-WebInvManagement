@@ -544,7 +544,10 @@ function rowHTML(r) {
             </td>
             <td style="font-size:12px; color:var(--text-secondary);">${escapeHtml(r.set_name || '-')}</td>
             <td>${statusBadge(r.status)}</td>
-            <td>${r.market_price != null ? formatPrice(r.market_price) : '-'}</td>
+            <td><input type="number" step="0.01" class="lp-market-price-input" data-variant-id="${r.variant_id}"
+                       value="${r.market_price ?? ''}" placeholder="none"
+                       title="${r.market_price_source === 'manual' ? 'Manually set' : ''}"
+                       style="width:70px; ${r.market_price_source === 'manual' ? 'background:rgba(167,139,250,0.12); border-color:#a78bfa;' : ''}" /></td>
             <td style="font-weight:600;">${formatPrice(r.resolved_price)}</td>
             <td>${sourceBadge(r.price_source)}</td>
             <td>${isActive
@@ -655,6 +658,35 @@ function wireControls(container, body) {
             const { error } = await supabase.from('listing_card_groups')
                 .update({ profile_id: sel.value || null }).eq('id', sel.dataset.groupId);
             if (error) { window.alert(`Failed to assign profile: ${error.message}`); return; }
+            await loadListing(container);
+        });
+    });
+
+    // Market price edit — writes the REAL market price (migration 011),
+    // not a scoped-to-this-page override. market_prices is keyed by
+    // (variant_id, condition); every existing row in the table uses
+    // condition='Near Mint' (confirmed live, no exceptions), so that's
+    // the row this updates — the exact same one v_inventory (Inventory
+    // tab) and every other market_prices consumer already reads. Editing
+    // it here changes what shows up there too. Clearing the input
+    // deletes the row entirely (no price data at all, same as any other
+    // never-priced card) rather than reverting to some separate
+    // "automatic" value — there isn't a separate one anymore.
+    body.querySelectorAll('.lp-market-price-input').forEach(input => {
+        input.addEventListener('change', async () => {
+            const variantId = input.dataset.variantId;
+            const raw = input.value.trim();
+            if (raw === '') {
+                const { error } = await supabase.from('market_prices').delete()
+                    .eq('variant_id', variantId).eq('condition', 'Near Mint');
+                if (error) { window.alert(`Failed to clear market price: ${error.message}`); return; }
+            } else {
+                const { error } = await supabase.from('market_prices').upsert({
+                    variant_id: variantId, condition: 'Near Mint', market_price: parseFloat(raw),
+                    source: 'manual', updated_at: new Date().toISOString(),
+                }, { onConflict: 'variant_id,condition' });
+                if (error) { window.alert(`Failed to save market price: ${error.message}`); return; }
+            }
             await loadListing(container);
         });
     });
