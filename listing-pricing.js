@@ -147,7 +147,7 @@ async function renderTemplatesList(container) {
         ${state.templates.length ? `
             <table>
                 <thead><tr>
-                    <th>Name</th><th>eBay Item #</th><th>Platform</th><th>Account</th><th>Kind</th><th style="width:60px;"></th>
+                    <th>Name</th><th>eBay Item #</th><th>Platform</th><th>Account</th><th>Kind</th><th style="width:130px;"></th>
                 </tr></thead>
                 <tbody>
                     ${state.templates.map(t => `
@@ -157,7 +157,10 @@ async function renderTemplatesList(container) {
                             <td>${escapeHtml(t.platform)}</td>
                             <td>${t.account ? escapeHtml(t.account) : '<span style="color:var(--text-secondary);">All accounts</span>'}</td>
                             <td>${escapeHtml(t.listing_kind || 'variation')}</td>
-                            <td><button class="btn lp-edit-template-btn" data-id="${t.id}">Edit</button></td>
+                            <td>
+                                <button class="btn lp-edit-template-btn" data-id="${t.id}">Edit</button>
+                                <button class="btn lp-duplicate-template-btn" data-id="${t.id}">Duplicate</button>
+                            </td>
                         </tr>
                     `).join('')}
                 </tbody>
@@ -169,6 +172,9 @@ async function renderTemplatesList(container) {
     body.querySelector('#lp-new-template-btn').addEventListener('click', () => openTemplateModal(container, null));
     body.querySelectorAll('.lp-edit-template-btn').forEach(btn => {
         btn.addEventListener('click', (e) => { e.stopPropagation(); openTemplateModal(container, btn.dataset.id); });
+    });
+    body.querySelectorAll('.lp-duplicate-template-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => { e.stopPropagation(); openTemplateModal(container, null, btn.dataset.id); });
     });
     body.querySelectorAll('.lp-template-row').forEach(tr => {
         tr.addEventListener('click', () => openTemplate(container, tr.dataset.id));
@@ -187,9 +193,18 @@ async function openTemplate(container, templateId) {
     await loadListing(container);
 }
 
-function openTemplateModal(container, templateId) {
+// `duplicateFromId` seeds the form from an existing template's config
+// (name/platform/account/listing_kind/base_price/default_quantity_limit/
+// low_stock_*/display_sort/name_format) while still creating a brand-new
+// row (isEdit stays false — plain INSERT) — name gets "(copy)" appended
+// and listing_id is forced blank, since the duplicate isn't tied to a
+// real eBay listing yet. Deliberately config-only: does NOT touch
+// listing_card_groups/listing_card_assignments — the new template starts
+// with an empty roster, built fresh via "Add card to listing".
+function openTemplateModal(container, templateId, duplicateFromId = null) {
     const isEdit = !!templateId;
-    const existing = isEdit ? state.templates.find(t => t.id === templateId) : null;
+    const duplicateSource = duplicateFromId ? state.templates.find(t => t.id === duplicateFromId) : null;
+    const existing = isEdit ? state.templates.find(t => t.id === templateId) : duplicateSource;
     const root = container.querySelector('#lp-modal-root');
     const f = (label, type, name, value, placeholder = '', step = '', optional = false) => `
         <label style="font-size:12px; color:var(--text-secondary); flex:${optional ? '1' : 'initial'};">
@@ -202,13 +217,14 @@ function openTemplateModal(container, templateId) {
     root.innerHTML = `
         <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
             <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:460px; max-width:90vw; max-height:85vh; overflow-y:auto;">
-                <h3 style="margin:0 0 16px;">${isEdit ? 'Edit listing template' : 'New listing template'}</h3>
+                <h3 style="margin:0 0 16px;">${isEdit ? 'Edit listing template' : duplicateSource ? 'Duplicate listing template' : 'New listing template'}</h3>
+                ${duplicateSource ? `<p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">Copied from "${escapeHtml(duplicateSource.name)}" — roster/groups are NOT copied, this starts empty.</p>` : ''}
                 <form id="lp-template-form">
                     <div style="display:flex; flex-direction:column; gap:10px;">
                         ${f('Platform', 'text', 'platform', existing?.platform || 'ebay')}
                         ${f('Account (blank = applies to all accounts)', 'text', 'account', existing?.account || '', 'e.g. BIGGYFISH', '', true)}
-                        ${f('Name', 'text', 'name', existing?.name || '', 'e.g. commons')}
-                        ${f('eBay Item # (listing_id) — this template IS that listing', 'text', 'listing_id', existing?.listing_id || '', 'e.g. 336691917730', '', true)}
+                        ${f('Name', 'text', 'name', duplicateSource ? `${duplicateSource.name} (copy)` : (existing?.name || ''), 'e.g. commons')}
+                        ${f('eBay Item # (listing_id) — this template IS that listing', 'text', 'listing_id', duplicateSource ? '' : (existing?.listing_id || ''), 'e.g. 336691917730', '', true)}
                         ${f('Description', 'text', 'description', existing?.description || '', '', '', true)}
                         <label style="font-size:12px; color:var(--text-secondary);">
                             Listing kind
