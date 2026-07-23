@@ -319,8 +319,16 @@ async function loadListing(container) {
         const [{ data: resolved, error: rErr }, { data: groups, error: gErr }, { count: platformCount }] = await Promise.all([
             supabase.rpc('resolve_listing_prices', { p_platform: state.platform, p_listing_id: state.listingId }),
             supabase.from('listing_card_groups').select('*').eq('template_id', template.id).order('name'),
+            // Excludes 'delisted' rows — those are cards Remove-from-listing
+            // already pulled off eBay, retained purely as history. They're
+            // NOT unimported: the card is already correctly represented as
+            // a 'queued' roster row (platform_listing_id cleared), just not
+            // pointing at this now-dead row. Counting them here would offer
+            // "Import into roster" as if they were new, which would create
+            // a duplicate 'active' roster entry for a listing that isn't
+            // actually live on eBay.
             supabase.from('platform_listings').select('id', { count: 'exact', head: true })
-                .eq('platform', state.platform).eq('listing_id', state.listingId),
+                .eq('platform', state.platform).eq('listing_id', state.listingId).neq('status', 'delisted'),
         ]);
         if (rErr) throw rErr;
         if (gErr) throw gErr;
@@ -774,7 +782,7 @@ async function importExisting(container) {
     const { data: existing, error: fetchErr } = await supabase
         .from('platform_listings')
         .select('id, variant_id')
-        .eq('platform', state.platform).eq('listing_id', state.listingId);
+        .eq('platform', state.platform).eq('listing_id', state.listingId).neq('status', 'delisted');
     if (fetchErr) {
         window.alert(`Failed to fetch existing listings: ${fetchErr.message}`);
         return;
