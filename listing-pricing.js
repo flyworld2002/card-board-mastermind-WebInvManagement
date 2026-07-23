@@ -431,6 +431,13 @@ function renderBody(container) {
     const rows = state.resolvedRows;
     const pending = rows.filter(r => r.status === 'active' && needsPush(r));
     const pendingGated = pending.filter(r => isGatedIn(r));
+    // Queued rows might get promoted by a push (250-cap logic, decided
+    // live against eBay's actual variation count) — the exact count isn't
+    // knowable client-side, so just treat "any queued rows exist" as a
+    // reason the Push button shouldn't be disabled. doPush()'s dry-run
+    // pre-check catches the case where nothing actually happens.
+    const queuedCount = rows.filter(r => r.status === 'queued').length;
+    const pushEnabled = pendingGated.length > 0 || queuedCount > 0;
 
     const byGroup = {};
     const ungrouped = [];
@@ -446,9 +453,11 @@ function renderBody(container) {
             <span style="font-size:12px; color:var(--text-secondary);">${escapeHtml(state.template.listing_kind)} listing</span>
             <span style="font-size:13px; color:var(--text-secondary);">
                 ${rows.length} card(s) on roster
-                ${pendingGated.length > 0 ? ` · <span style="color:var(--warning);">${pendingGated.length} need push</span>` : ' · in sync'}
+                ${pendingGated.length > 0 ? ` · <span style="color:var(--warning);">${pendingGated.length} need push</span>` : ''}
+                ${queuedCount > 0 ? ` · <span style="color:var(--warning);">${queuedCount} queued</span>` : ''}
+                ${pendingGated.length === 0 && queuedCount === 0 ? ' · in sync' : ''}
             </span>
-            <button class="btn btn-primary" id="lp-push-btn" style="margin-left:auto;" ${pendingGated.length === 0 ? 'disabled' : ''}>
+            <button class="btn btn-primary" id="lp-push-btn" style="margin-left:auto;" ${pushEnabled ? '' : 'disabled'}>
                 Push ${pendingGated.length > 0 ? `(${pendingGated.length})` : ''}
             </button>
             <button class="btn" id="lp-push-dryrun-btn">Dry-run</button>
@@ -540,7 +549,7 @@ function rowHTML(r) {
             <td>${sourceBadge(r.price_source)}</td>
             <td>${isActive
                 ? (isGatedIn(r) ? '<span style="color:var(--success); font-size:12px;">yes</span>' : '<span style="color:var(--text-secondary); font-size:12px;">no</span>')
-                : '<span style="color:var(--text-secondary); font-size:12px;">n/a</span>'}</td>
+                : `<button class="btn lp-push-card-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px;">Push live</button>`}</td>
             <td>${r.available_qty ?? '-'}</td>
             <td>${resolvedQty(r)}</td>
             <td><input type="number" class="lp-low-stock-input" data-row-id="${r.row_id}"
@@ -696,6 +705,10 @@ function wireControls(container, body) {
 
     body.querySelector('#lp-push-btn').addEventListener('click', () => doPush(container, false));
     body.querySelector('#lp-push-dryrun-btn').addEventListener('click', () => doPush(container, true));
+
+    body.querySelectorAll('.lp-push-card-btn').forEach(btn => {
+        btn.addEventListener('click', () => pushCardLive(container, btn));
+    });
 }
 
 // ----------------------------------------------------------------
@@ -1235,40 +1248,60 @@ async function showVariantPicker(container, root, cardId) {
 // Push
 // ----------------------------------------------------------------
 
+async function callPushPrices(dryRun) {
+    const resp = await fetch(`${PICKING_API_URL}/api/push-prices`, {
+        method: 'POST',
+        headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ listing_id: state.listingId, account_num: state.accountNum, dry_run: dryRun }),
+    });
+    if (!resp.ok) {
+        const detail = await resp.text().catch(() => '');
+        throw new Error(`${resp.status} ${detail}`);
+    }
+    return resp.json();
+}
+
 async function doPush(container, dryRun) {
     const body = container.querySelector('#lp-body');
     const msg = body.querySelector('#lp-push-msg');
     const pushBtn = body.querySelector('#lp-push-btn');
     const dryBtn = body.querySelector('#lp-push-dryrun-btn');
 
-    if (!dryRun) {
-        const confirmed = window.confirm(
-            `This will send live price/quantity changes to eBay listing ${state.listingId}. `
-            + `Only rows with sync_enabled=true and status='active' will actually be pushed — `
-            + `run Dry-run first if you haven't already. Continue?`
-        );
-        if (!confirmed) return;
-    }
-
     pushBtn.disabled = true;
     dryBtn.disabled = true;
-    msg.innerHTML = `<span style="color:var(--text-secondary);">${dryRun ? 'Checking' : 'Pushing'}...</span>`;
 
     try {
-        const resp = await fetch(`${PICKING_API_URL}/api/push-prices`, {
-            method: 'POST',
-            headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
-            body: JSON.stringify({ listing_id: state.listingId, account_num: state.accountNum, dry_run: dryRun }),
-        });
-        if (!resp.ok) {
-            const detail = await resp.text().catch(() => '');
-            throw new Error(`${resp.status} ${detail}`);
+        if (!dryRun) {
+            // Silent dry-run first so the confirm dialog can call out
+            // exactly how many cards are going live for the first time —
+            // a normal price sync can now also add brand-new variations
+            // via 250-cap promotion, and that shouldn't be buried in a
+            // routine-looking confirm.
+            msg.innerHTML = `<span style="color:var(--text-secondary);">Checking...</span>`;
+            const preview = await callPushPrices(true);
+            if (!preview.pushed) {
+                msg.innerHTML = `<span style="color:var(--text-secondary);">Nothing to push.</span>`;
+                return;
+            }
+            const promoted = preview.promoted || 0;
+            const priceQtyChanges = preview.pushed - promoted;
+            const parts = [];
+            if (priceQtyChanges > 0) parts.push(`${priceQtyChanges} price/qty change(s)`);
+            if (promoted > 0) parts.push(`${promoted} card(s) going live for the first time`);
+            const confirmed = window.confirm(
+                `This will send live changes to eBay listing ${state.listingId}: `
+                + `${parts.join(' + ')}. Continue?`
+            );
+            if (!confirmed) { msg.innerHTML = ''; return; }
         }
-        const result = await resp.json();
+
+        msg.innerHTML = `<span style="color:var(--text-secondary);">${dryRun ? 'Checking' : 'Pushing'}...</span>`;
+        const result = await callPushPrices(dryRun);
         const warningsNote = result.warnings && result.warnings.length
             ? ` — ${result.warnings.length} warning(s): ${escapeHtml(result.warnings.join('; '))}` : '';
+        const promotedNote = result.promoted ? ` (${result.promoted} newly live)` : '';
         msg.innerHTML = `<span style="color:var(--success);">
-            ${dryRun ? 'Would push' : 'Pushed'} ${result.pushed} of ${result.resolved} row(s)${warningsNote}
+            ${dryRun ? 'Would push' : 'Pushed'} ${result.pushed} of ${result.resolved} row(s)${promotedNote}${warningsNote}
         </span>`;
         if (!dryRun) await loadListing(container);
     } catch (err) {
@@ -1278,5 +1311,54 @@ async function doPush(container, dryRun) {
     } finally {
         pushBtn.disabled = false;
         dryBtn.disabled = false;
+    }
+}
+
+async function callPushCard(rowId, dryRun) {
+    const resp = await fetch(`${PICKING_API_URL}/api/push-card`, {
+        method: 'POST',
+        headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ row_id: rowId, account_num: state.accountNum, dry_run: dryRun }),
+    });
+    if (!resp.ok) {
+        const detail = await resp.text().catch(() => '');
+        throw new Error(`${resp.status} ${detail}`);
+    }
+    return resp.json();
+}
+
+async function pushCardLive(container, btn) {
+    const rowId = btn.dataset.rowId;
+    const originalLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Checking...';
+
+    try {
+        const preview = await callPushCard(rowId, true);
+        if (preview.error) {
+            window.alert(`Can't push this card live: ${preview.error}`);
+            return;
+        }
+        const confirmed = window.confirm(
+            `Push "${preview.external_id}" live on eBay listing ${state.listingId} at `
+            + `${formatPrice(preview.resolved_price)}, qty ${preview.qty_to_push}? `
+            + `This adds ONLY this one card as a new variation — no other variation's `
+            + `price or quantity is touched. Continue?`
+        );
+        if (!confirmed) return;
+
+        btn.textContent = 'Pushing...';
+        const result = await callPushCard(rowId, false);
+        if (result.error) {
+            window.alert(`Push failed: ${result.error}`);
+            return;
+        }
+        await loadListing(container);
+    } catch (err) {
+        console.error(err);
+        window.alert(`Push failed: ${err.message} — is picking_api.py running and reachable at ${PICKING_API_URL}?`);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalLabel;
     }
 }
