@@ -546,7 +546,13 @@ function rowHTML(r) {
     return `
         <tr data-row-id="${r.row_id}" ${stale ? 'style="background:rgba(245,166,35,0.06);"' : ''}>
             <td><input type="checkbox" class="lp-row-checkbox" data-row-id="${r.row_id}" ${state.selected.has(r.row_id) ? 'checked' : ''} /></td>
-            <td>${imgHtml(r.image_url)}</td>
+            <td>${r.status === 'queued'
+                ? `<div class="lp-thumb-upload" data-row-id="${r.row_id}" style="cursor:pointer; position:relative; width:fit-content;"
+                        title="${r.eps_picture_url ? 'Picture staged for eBay — click to replace' : 'Click to stage a picture for eBay (uploads to EPS now, attaches when this card is pushed live)'}">
+                      ${imgHtml(r.eps_picture_url || r.image_url)}
+                      ${r.eps_picture_url ? '<span style="position:absolute; top:-4px; right:-4px; background:var(--success); color:#000; font-size:10px; font-weight:700; border-radius:50%; width:14px; height:14px; display:flex; align-items:center; justify-content:center;">&#10003;</span>' : ''}
+                  </div>`
+                : imgHtml(r.image_url)}</td>
             <td>${r.status === 'queued'
                 ? `<input type="text" class="lp-custom-name-input" data-row-id="${r.row_id}"
                           value="${escapeHtml(r.custom_name || '')}"
@@ -801,6 +807,10 @@ function wireControls(container, body) {
             rowId: btn.dataset.rowId,
             currentLabel: btn.dataset.currentLabel,
         }));
+    });
+
+    body.querySelectorAll('.lp-thumb-upload').forEach(el => {
+        el.addEventListener('click', () => openStagePictureModal(container, body, el.dataset.rowId));
     });
 }
 
@@ -1560,4 +1570,100 @@ async function deleteRosterRow(container, btn) {
     } finally {
         btn.disabled = false;
     }
+}
+
+// ----------------------------------------------------------------
+// Stage a picture for eBay (EPS) — queued rows only. Uploads to eBay's
+// own image hosting right now and stores the resulting URL on the
+// roster row; nothing changes on the live listing yet (there's nothing
+// live to attach a picture to for a queued card). The staged picture
+// rides along automatically the next time this specific row gets pushed
+// live. No R2/card_master catalog upload involved — separate, later plan.
+// ----------------------------------------------------------------
+
+function openStagePictureModal(container, body, rowId) {
+    const root = body.querySelector('#lp-modal-root');
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:420px; max-width:90vw;">
+                <h3 style="margin:0 0 8px;">Stage picture for eBay</h3>
+                <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
+                    Uploads to eBay's own image hosting (EPS) right now. The listing
+                    itself isn't touched until this card is actually pushed live —
+                    at that point the picture is attached automatically.
+                </p>
+                <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:10px;">Image URL
+                    <input type="url" id="lp-stage-pic-url" placeholder="https://..." style="width:100%; margin-top:4px;" />
+                </label>
+                <div style="text-align:center; font-size:11px; color:var(--text-secondary); margin:6px 0;">— or —</div>
+                <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:10px;">Upload a file
+                    <input type="file" id="lp-stage-pic-file" accept="image/*" style="width:100%; margin-top:4px;" />
+                </label>
+                <div id="lp-stage-pic-error" style="color:var(--danger); font-size:12px; margin-bottom:10px;"></div>
+                <div style="display:flex; justify-content:flex-end; gap:8px;">
+                    <button type="button" class="btn" id="lp-stage-pic-cancel">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="lp-stage-pic-upload">Upload</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    root.querySelector('#lp-stage-pic-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+
+    // URL and file are mutually exclusive — picking one clears the other,
+    // so it's always unambiguous which the user meant.
+    const urlInput = root.querySelector('#lp-stage-pic-url');
+    const fileInput = root.querySelector('#lp-stage-pic-file');
+    urlInput.addEventListener('input', () => { if (urlInput.value.trim()) fileInput.value = ''; });
+    fileInput.addEventListener('change', () => { if (fileInput.files.length) urlInput.value = ''; });
+
+    root.querySelector('#lp-stage-pic-upload').addEventListener('click', async () => {
+        const errBox = root.querySelector('#lp-stage-pic-error');
+        errBox.textContent = '';
+        const url = urlInput.value.trim();
+        const file = fileInput.files[0];
+        if (!url && !file) { errBox.textContent = 'Enter an image URL or choose a file.'; return; }
+
+        const uploadBtn = root.querySelector('#lp-stage-pic-upload');
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = 'Uploading...';
+
+        try {
+            let resp;
+            if (file) {
+                const form = new FormData();
+                form.append('row_id', rowId);
+                form.append('account_num', String(state.accountNum));
+                form.append('file', file);
+                resp = await fetch(`${PICKING_API_URL}/api/stage-card-picture-file`, {
+                    method: 'POST',
+                    headers: { 'x-picking-token': PICKING_API_TOKEN },
+                    body: form,
+                });
+            } else {
+                resp = await fetch(`${PICKING_API_URL}/api/stage-card-picture`, {
+                    method: 'POST',
+                    headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+                    body: JSON.stringify({ row_id: rowId, image_url: url, account_num: state.accountNum }),
+                });
+            }
+            if (!resp.ok) {
+                const detail = await resp.text().catch(() => '');
+                throw new Error(`${resp.status} ${detail}`);
+            }
+            const result = await resp.json();
+            if (result.error) {
+                errBox.textContent = result.error;
+                return;
+            }
+            root.innerHTML = '';
+            await loadListing(container);
+        } catch (err) {
+            console.error(err);
+            errBox.textContent = `Upload failed: ${err.message} — is picking_api.py running and reachable at ${PICKING_API_URL}?`;
+        } finally {
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = 'Upload';
+        }
+    });
 }
