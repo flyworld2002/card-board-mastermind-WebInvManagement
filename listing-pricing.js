@@ -547,7 +547,13 @@ function rowHTML(r) {
         <tr data-row-id="${r.row_id}" ${stale ? 'style="background:rgba(245,166,35,0.06);"' : ''}>
             <td><input type="checkbox" class="lp-row-checkbox" data-row-id="${r.row_id}" ${state.selected.has(r.row_id) ? 'checked' : ''} /></td>
             <td>${imgHtml(r.image_url)}</td>
-            <td>${escapeHtml(listingRow.external_id || cardLabel(r))}
+            <td>${r.status === 'queued'
+                ? `<input type="text" class="lp-custom-name-input" data-row-id="${r.row_id}"
+                          value="${escapeHtml(r.custom_name || '')}"
+                          placeholder="${escapeHtml(cardLabel(r))} (auto-named at push)"
+                          title="eBay variation name at push time — leave blank to auto-generate"
+                          style="width:100%; font-size:13px; background:transparent; border:1px solid var(--border); border-radius:3px; padding:2px 4px;" />`
+                : escapeHtml(listingRow.external_id || cardLabel(r))}
                 <div style="font-size:11px; color:var(--text-secondary);">${escapeHtml(r.derived_label)}</div>
             </td>
             <td style="font-size:12px; color:var(--text-secondary);">${escapeHtml(r.set_name || '-')}</td>
@@ -581,6 +587,7 @@ function actionsHTML(r) {
     if (r.status === 'queued') {
         return `
             <button class="btn lp-push-card-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px;">Push live</button>
+            <button class="btn lp-fix-card-btn" data-row-id="${r.row_id}" data-current-label="${escapeHtml(cardLabel(r))}" style="font-size:11px; padding:2px 8px;">Fix card</button>
             <button class="btn lp-delete-roster-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px; color:var(--danger);">Remove from roster</button>
         `;
     }
@@ -685,6 +692,22 @@ function wireControls(container, body) {
         });
     });
 
+    // Custom eBay variation name (migration 012) — only ever editable for
+    // queued rows (see rowHTML). When set, push_single_card_live() /
+    // _do_promotions()'s promotion path use it verbatim instead of
+    // computing one via _render_variation_name(). Clearing it reverts to
+    // auto-generation at push time.
+    body.querySelectorAll('.lp-custom-name-input').forEach(input => {
+        input.addEventListener('change', async () => {
+            const rowId = input.dataset.rowId;
+            const raw = input.value.trim();
+            const { error } = await supabase.from('listing_card_assignments')
+                .update({ custom_name: raw === '' ? null : raw }).eq('id', rowId);
+            if (error) { window.alert(`Failed to save custom name: ${error.message}`); return; }
+            await loadListing(container);
+        });
+    });
+
     // Market price edit — writes the REAL market price (migration 011),
     // not a scoped-to-this-page override. market_prices is keyed by
     // (variant_id, condition); every existing row in the table uses
@@ -771,6 +794,13 @@ function wireControls(container, body) {
 
     body.querySelectorAll('.lp-delete-roster-btn').forEach(btn => {
         btn.addEventListener('click', () => deleteRosterRow(container, btn));
+    });
+
+    body.querySelectorAll('.lp-fix-card-btn').forEach(btn => {
+        btn.addEventListener('click', () => openAddCardModal(container, body, {
+            rowId: btn.dataset.rowId,
+            currentLabel: btn.dataset.currentLabel,
+        }));
     });
 }
 
@@ -1208,14 +1238,27 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
 // Add card to listing (queued — not live yet)
 // ----------------------------------------------------------------
 
-function openAddCardModal(container, body) {
+// `editRow` is null for the normal "add a new card" flow, or
+// {rowId, currentLabel} to instead re-point an EXISTING roster row's
+// variant_id — used by the "Fix card" action for correcting a wrong
+// search-result click (search requires an explicit click, there's no
+// auto-pick, so a wrong card here is a manual misclick, not a matching
+// bug — see docs/plans/listing-pricing-system.md). Deliberately only
+// ever offered for queued/sold_out_retained rows, never active: an
+// active row's live eBay variation text won't change just because we
+// repoint variant_id here, and reconciling that mismatch is a separate,
+// bigger problem (same class as the existing "needs manual reconcile in
+// Seller Hub" cases elsewhere in this codebase).
+function openAddCardModal(container, body, editRow = null) {
     const root = body.querySelector('#lp-modal-root');
     root.innerHTML = `
         <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
             <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:480px; max-width:90vw; max-height:80vh; overflow-y:auto;">
-                <h3 style="margin:0 0 12px;">Add card to listing</h3>
+                <h3 style="margin:0 0 12px;">${editRow ? 'Fix card' : 'Add card to listing'}</h3>
                 <p style="color:var(--text-secondary); font-size:12px; margin:0 0 10px;">
-                    Adds as <strong>queued</strong> (planned, not live on eBay yet). Search by card name.
+                    ${editRow
+                        ? `Currently mapped to <strong>${escapeHtml(editRow.currentLabel)}</strong> — search and pick the correct card below.`
+                        : `Adds as <strong>queued</strong> (planned, not live on eBay yet). Search by card name.`}
                 </p>
                 <input type="search" id="lp-card-search" placeholder="Card name..." style="width:100%; margin-bottom:10px;" />
                 <div id="lp-card-search-results" style="max-height:320px; overflow-y:auto;"></div>
@@ -1231,16 +1274,16 @@ function openAddCardModal(container, body) {
     root.querySelector('#lp-card-search').addEventListener('input', (e) => {
         clearTimeout(debounceTimer);
         const q = e.target.value.trim();
-        debounceTimer = setTimeout(() => runCardSearch(container, root, q), 300);
+        debounceTimer = setTimeout(() => runCardSearch(container, root, q, editRow), 300);
     });
 }
 
-async function runCardSearch(container, root, query) {
+async function runCardSearch(container, root, query, editRow = null) {
     const resultsEl = root.querySelector('#lp-card-search-results');
     if (!query) { resultsEl.innerHTML = ''; return; }
 
     const { data: cards, error } = await supabase
-        .from('card_master').select('id, name, card_number, set_id')
+        .from('card_master').select('id, name, card_number, card_number_numeric, set_id')
         .ilike('name', `%${query}%`).limit(15);
     if (error) {
         resultsEl.innerHTML = `<p style="color:var(--danger); font-size:12px;">${escapeHtml(error.message)}</p>`;
@@ -1255,19 +1298,29 @@ async function runCardSearch(container, root, query) {
     const { data: sets } = await supabase.from('card_sets').select('id, name').in('id', setIds);
     const setNameById = Object.fromEntries((sets || []).map(s => [s.id, s.name]));
 
-    resultsEl.innerHTML = cards.map(c => `
+    // Sort by set then card number — an unsorted list is exactly what
+    // made it easy to misclick an adjacent card in the same promo set.
+    const sorted = [...cards].sort((a, b) => {
+        const setA = setNameById[a.set_id] || '';
+        const setB = setNameById[b.set_id] || '';
+        if (setA !== setB) return setA.localeCompare(setB);
+        return (a.card_number_numeric ?? 0) - (b.card_number_numeric ?? 0);
+    });
+
+    resultsEl.innerHTML = sorted.map(c => `
         <div class="lp-card-result" data-card-id="${c.id}" style="padding:8px; border-bottom:1px solid var(--border); cursor:pointer; font-size:13px;">
-            ${escapeHtml(c.name)} #${escapeHtml(c.card_number || '?')}
-            <span style="color:var(--text-secondary);">${escapeHtml(setNameById[c.set_id] || '')}</span>
+            <span style="color:var(--accent); font-weight:600;">#${escapeHtml(c.card_number || '?')}</span>
+            ${escapeHtml(c.name)}
+            <div style="font-size:11px; color:var(--text-secondary);">${escapeHtml(setNameById[c.set_id] || '')}</div>
         </div>
     `).join('');
 
     resultsEl.querySelectorAll('.lp-card-result').forEach(el => {
-        el.addEventListener('click', () => showVariantPicker(container, root, el.dataset.cardId));
+        el.addEventListener('click', () => showVariantPicker(container, root, el.dataset.cardId, editRow));
     });
 }
 
-async function showVariantPicker(container, root, cardId) {
+async function showVariantPicker(container, root, cardId, editRow = null) {
     const resultsEl = root.querySelector('#lp-card-search-results');
     const { data: variants, error } = await supabase
         .from('card_variants').select('id, foil_type, foil_pattern, texture, stamp_type')
@@ -1289,17 +1342,26 @@ async function showVariantPicker(container, root, cardId) {
 
     resultsEl.querySelectorAll('.lp-variant-result').forEach(el => {
         el.addEventListener('click', async () => {
-            const { count } = await supabase.from('listing_card_assignments')
-                .select('id', { count: 'exact', head: true }).eq('template_id', state.template.id);
-            const { error: insErr } = await supabase.from('listing_card_assignments').insert({
-                template_id: state.template.id,
-                variant_id: el.dataset.variantId,
-                priority_rank: count || 0,
-                status: 'queued',
-            });
-            if (insErr) {
-                window.alert(`Failed to add card: ${insErr.message}`);
-                return;
+            if (editRow) {
+                const { error: updErr } = await supabase.from('listing_card_assignments')
+                    .update({ variant_id: el.dataset.variantId }).eq('id', editRow.rowId);
+                if (updErr) {
+                    window.alert(`Failed to update card: ${updErr.message}`);
+                    return;
+                }
+            } else {
+                const { count } = await supabase.from('listing_card_assignments')
+                    .select('id', { count: 'exact', head: true }).eq('template_id', state.template.id);
+                const { error: insErr } = await supabase.from('listing_card_assignments').insert({
+                    template_id: state.template.id,
+                    variant_id: el.dataset.variantId,
+                    priority_rank: count || 0,
+                    status: 'queued',
+                });
+                if (insErr) {
+                    window.alert(`Failed to add card: ${insErr.message}`);
+                    return;
+                }
             }
             root.innerHTML = '';
             await loadListing(container);
