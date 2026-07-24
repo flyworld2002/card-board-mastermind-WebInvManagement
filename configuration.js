@@ -1006,6 +1006,7 @@ function renderProfilesTable(container) {
                             <td>
                                 <button class="btn edit-profile-btn" data-id="${p.id}">Edit</button>
                                 <button class="btn manage-tiers-btn" data-id="${p.id}">Tiers</button>
+                                <button class="btn duplicate-profile-btn" data-id="${p.id}">Duplicate</button>
                             </td>
                         </tr>
                     `).join('')}
@@ -1021,6 +1022,51 @@ function renderProfilesTable(container) {
     wrap.querySelectorAll('.manage-tiers-btn').forEach(btn => {
         btn.addEventListener('click', () => openProfileTiersModal(container, btn.dataset.id));
     });
+    wrap.querySelectorAll('.duplicate-profile-btn').forEach(btn => {
+        btn.addEventListener('click', () => duplicateProfile(container, btn.dataset.id));
+    });
+}
+
+// Copies name/notes/default_low_stock_qty AND every tier — unlike
+// duplicating a listing template (config only, roster stays empty),
+// tiers ARE the profile's actual pricing rules: a duplicate with none
+// would just fall back to the market*2+1 default and be useless as a
+// starting point for a similar-but-tweaked rule set.
+async function duplicateProfile(container, profileId) {
+    const source = profilesState.profiles.find(p => p.id === profileId);
+    if (!source) return;
+
+    let copyName = `${source.name} (copy)`;
+    for (let n = 2; profilesState.profiles.some(p => p.name === copyName); n++) {
+        copyName = `${source.name} (copy ${n})`;
+    }
+
+    try {
+        const { data: inserted, error: insErr } = await supabase.from('pricing_profiles').insert({
+            name: copyName,
+            notes: source.notes,
+            default_low_stock_qty: source.default_low_stock_qty,
+        }).select().single();
+        if (insErr) throw insErr;
+
+        if (source.tiers.length) {
+            const tierPayload = source.tiers.map(t => ({
+                profile_id: inserted.id,
+                min_market: t.min_market,
+                max_market: t.max_market,
+                list_price: t.list_price,
+                multiplier: t.multiplier,
+                plus: t.plus,
+            }));
+            const { error: tierErr } = await supabase.from('pricing_profile_tiers').insert(tierPayload);
+            if (tierErr) throw tierErr;
+        }
+
+        await loadProfiles(container);
+    } catch (err) {
+        console.error(err);
+        window.alert(`Failed to duplicate profile: ${err.message}`);
+    }
 }
 
 function openProfileModal(container, profileId) {
