@@ -42,6 +42,21 @@ function imgHtml(url) {
                     {style:'width:40px;height:56px;background:var(--bg-tertiary);border-radius:3px;border:1px solid var(--border);'}))">`;
 }
 
+// Shared between rowHTML() (full render) and refreshRowDerivedCells()
+// (in-place patch after staging a picture) so the two never drift.
+function thumbTitle(r) {
+    return r.eps_picture_url
+        ? 'Picture staged for eBay — click to replace'
+        : 'Click to stage a picture for eBay (uploads to EPS now, attaches when this card is pushed live)';
+}
+
+function thumbInnerHTML(r) {
+    return `
+        ${imgHtml(r.eps_picture_url || r.image_url)}
+        ${r.eps_picture_url ? '<span style="position:absolute; top:-4px; right:-4px; background:var(--success); color:#000; font-size:10px; font-weight:700; border-radius:50%; width:14px; height:14px; display:flex; align-items:center; justify-content:center;">&#10003;</span>' : ''}
+    `;
+}
+
 // Hover-to-zoom preview, one shared floating element cached on window
 // (index.html re-imports this module with a fresh ?v= on every
 // navigation) — mirrors picking.js's setupImagePreview() exactly.
@@ -468,6 +483,73 @@ function resolvedQty(r) {
     return qty;
 }
 
+// Re-resolves ONE row from the server (still the only place derived
+// values — tier lookups, floors, the shared-inventory subtraction, etc.
+// — ever get computed, so this never duplicates that logic in JS) and
+// patches just its already-rendered <td> cells in place, instead of
+// reloading/rebuilding the whole table. Used after the per-cell pin
+// edits (low-stock, manual price, qty limit, custom name, market price)
+// so a fast edit doesn't blow away scroll position or drop focus across
+// the whole grid. Deliberately does NOT touch any input's own DOM node
+// or re-wire any listeners — only text/attribute content of derived,
+// non-input cells changes, so nothing needs re-wiring.
+async function refreshRowDerivedCells(container, rowId) {
+    const { data, error } = await supabase.rpc('resolve_listing_prices', {
+        p_platform: state.platform, p_listing_id: state.listingId,
+    });
+    if (error) { console.error('Failed to refresh row:', error); return; }
+
+    const fresh = (data || []).find(r => r.row_id === rowId);
+    if (!fresh) return; // row no longer exists (deleted/status changed elsewhere) — next full reload will catch it
+
+    const idx = state.resolvedRows.findIndex(r => r.row_id === rowId);
+    if (idx !== -1) state.resolvedRows[idx] = fresh;
+
+    const tr = container.querySelector(`tr[data-row-id="${rowId}"]`);
+    if (!tr) return;
+
+    const stale = fresh.status === 'active' && needsPush(fresh);
+    tr.style.background = stale ? 'rgba(245,166,35,0.06)' : '';
+
+    const resolvedCell = tr.querySelector('.lp-resolved-price-cell');
+    if (resolvedCell) resolvedCell.textContent = formatPrice(fresh.resolved_price);
+
+    const sourceCell = tr.querySelector('.lp-source-cell');
+    if (sourceCell) sourceCell.innerHTML = sourceBadge(fresh.price_source);
+
+    const availableCell = tr.querySelector('.lp-available-cell');
+    if (availableCell) availableCell.textContent = fresh.available_qty ?? '-';
+
+    const resolvedQtyCell = tr.querySelector('.lp-resolved-qty-cell');
+    if (resolvedQtyCell) resolvedQtyCell.textContent = resolvedQty(fresh);
+
+    const syncedCell = tr.querySelector('.lp-synced-cell');
+    if (syncedCell) {
+        const isActive = fresh.status === 'active';
+        syncedCell.innerHTML = isActive
+            ? (isGatedIn(fresh) ? '<span style="color:var(--success); font-size:12px;">yes</span>' : '<span style="color:var(--text-secondary); font-size:12px;">no</span>')
+            : '<span style="color:var(--text-secondary); font-size:12px;">n/a</span>';
+    }
+
+    // Market price cell shows a "manually set" highlight — refresh that
+    // too since editing OTHER pins never changes it, but editing the
+    // market price itself needs its own input's styling/title updated.
+    const marketInput = tr.querySelector('.lp-market-price-input');
+    if (marketInput) {
+        marketInput.title = fresh.market_price_source === 'manual' ? 'Manually set' : '';
+        marketInput.style.background = fresh.market_price_source === 'manual' ? 'rgba(167,139,250,0.12)' : '';
+        marketInput.style.borderColor = fresh.market_price_source === 'manual' ? '#a78bfa' : '';
+    }
+
+    // Thumbnail (image + "staged" checkmark badge) — only relevant for
+    // queued rows (see rowHTML()), but harmless to check regardless.
+    const thumbWrapper = tr.querySelector('.lp-thumb-upload');
+    if (thumbWrapper) {
+        thumbWrapper.title = thumbTitle(fresh);
+        thumbWrapper.innerHTML = thumbInnerHTML(fresh);
+    }
+}
+
 function isGatedIn(r) {
     const row = state.listingRowsByPLId[r.platform_listing_id];
     if (!row) return false;
@@ -606,9 +688,8 @@ function rowHTML(r) {
             <td><input type="checkbox" class="lp-row-checkbox" data-row-id="${r.row_id}" ${state.selected.has(r.row_id) ? 'checked' : ''} /></td>
             <td>${r.status === 'queued'
                 ? `<div class="lp-thumb-upload" data-row-id="${r.row_id}" style="cursor:pointer; position:relative; width:fit-content;"
-                        title="${r.eps_picture_url ? 'Picture staged for eBay — click to replace' : 'Click to stage a picture for eBay (uploads to EPS now, attaches when this card is pushed live)'}">
-                      ${imgHtml(r.eps_picture_url || r.image_url)}
-                      ${r.eps_picture_url ? '<span style="position:absolute; top:-4px; right:-4px; background:var(--success); color:#000; font-size:10px; font-weight:700; border-radius:50%; width:14px; height:14px; display:flex; align-items:center; justify-content:center;">&#10003;</span>' : ''}
+                        title="${escapeHtml(thumbTitle(r))}">
+                      ${thumbInnerHTML(r)}
                   </div>`
                 : imgHtml(r.image_url)}</td>
             <td>${r.status === 'queued'
@@ -622,20 +703,20 @@ function rowHTML(r) {
             </td>
             <td style="font-size:12px; color:var(--text-secondary);">${escapeHtml(r.set_name || '-')}</td>
             <td>${statusBadge(r.status)}</td>
-            <td><input type="number" step="0.01" class="lp-market-price-input" data-variant-id="${r.variant_id}"
+            <td><input type="number" step="0.01" class="lp-market-price-input" data-variant-id="${r.variant_id}" data-row-id="${r.row_id}"
                        value="${r.market_price ?? ''}" placeholder="none"
                        title="${r.market_price_source === 'manual' ? 'Manually set' : ''}"
                        style="width:70px; ${r.market_price_source === 'manual' ? 'background:rgba(167,139,250,0.12); border-color:#a78bfa;' : ''}" /></td>
-            <td style="font-weight:600;">${formatPrice(r.resolved_price)}</td>
-            <td>${sourceBadge(r.price_source)}</td>
-            <td>${isActive
+            <td class="lp-resolved-price-cell" style="font-weight:600;">${formatPrice(r.resolved_price)}</td>
+            <td class="lp-source-cell">${sourceBadge(r.price_source)}</td>
+            <td class="lp-synced-cell">${isActive
                 ? (isGatedIn(r) ? '<span style="color:var(--success); font-size:12px;">yes</span>' : '<span style="color:var(--text-secondary); font-size:12px;">no</span>')
                 : '<span style="color:var(--text-secondary); font-size:12px;">n/a</span>'}</td>
-            <td>${r.available_qty ?? '-'}
-                <a href="#" class="lp-balance-qty-link" data-variant-id="${r.variant_id}" data-card-label="${escapeHtml(cardLabel(r))}"
+            <td><span class="lp-available-cell">${r.available_qty ?? '-'}</span>
+                <a href="#" class="lp-balance-qty-link" data-variant-id="${r.variant_id}" data-card-label="${escapeHtml(cardLabel(r))}" data-row-id="${r.row_id}"
                    style="font-size:10px; margin-left:4px; color:var(--accent);" title="Balance quantity across every listing that offers this card">Balance</a>
             </td>
-            <td>${resolvedQty(r)}</td>
+            <td class="lp-resolved-qty-cell">${resolvedQty(r)}</td>
             <td><input type="number" class="lp-low-stock-input" data-row-id="${r.row_id}"
                        value="${r.row_low_stock_qty ?? ''}" placeholder="-" style="width:60px;" /></td>
             <td><input type="number" step="0.01" class="lp-pin-input" data-row-id="${r.row_id}"
@@ -798,7 +879,7 @@ function wireControls(container, body) {
             const { error } = await supabase.from('listing_card_assignments')
                 .update({ custom_name: raw === '' ? null : raw }).eq('id', rowId);
             if (error) { window.alert(`Failed to save custom name: ${error.message}`); return; }
-            await loadListing(container);
+            await refreshRowDerivedCells(container, rowId);
         });
     });
 
@@ -815,6 +896,7 @@ function wireControls(container, body) {
     body.querySelectorAll('.lp-market-price-input').forEach(input => {
         input.addEventListener('change', async () => {
             const variantId = input.dataset.variantId;
+            const rowId = input.dataset.rowId;
             const raw = input.value.trim();
             if (raw === '') {
                 const { error } = await supabase.from('market_prices').delete()
@@ -827,7 +909,7 @@ function wireControls(container, body) {
                 }, { onConflict: 'variant_id,condition' });
                 if (error) { window.alert(`Failed to save market price: ${error.message}`); return; }
             }
-            await loadListing(container);
+            await refreshRowDerivedCells(container, rowId);
         });
     });
 
@@ -844,7 +926,7 @@ function wireControls(container, body) {
             const manualPrice = raw === '' ? null : parseFloat(raw);
             const { error } = await supabase.from('listing_card_assignments').update({ manual_price: manualPrice }).eq('id', rowId);
             if (error) { window.alert(`Failed to save pin: ${error.message}`); return; }
-            await loadListing(container);
+            await refreshRowDerivedCells(container, rowId);
         });
     });
 
@@ -855,7 +937,7 @@ function wireControls(container, body) {
             const lowStockQty = raw === '' ? null : parseInt(raw, 10);
             const { error } = await supabase.from('listing_card_assignments').update({ low_stock_qty: lowStockQty }).eq('id', rowId);
             if (error) { window.alert(`Failed to save low-stock qty: ${error.message}`); return; }
-            await loadListing(container);
+            await refreshRowDerivedCells(container, rowId);
         });
     });
 
@@ -866,7 +948,7 @@ function wireControls(container, body) {
             const quantityLimit = raw === '' ? null : parseInt(raw, 10);
             const { error } = await supabase.from('listing_card_assignments').update({ quantity_limit: quantityLimit }).eq('id', rowId);
             if (error) { window.alert(`Failed to save qty limit pin: ${error.message}`); return; }
-            await loadListing(container);
+            await refreshRowDerivedCells(container, rowId);
         });
     });
 
@@ -904,7 +986,7 @@ function wireControls(container, body) {
     body.querySelectorAll('.lp-balance-qty-link').forEach(el => {
         el.addEventListener('click', (e) => {
             e.preventDefault();
-            openBalanceQtyModal(container, body, el.dataset.variantId, el.dataset.cardLabel);
+            openBalanceQtyModal(container, body, el.dataset.variantId, el.dataset.cardLabel, el.dataset.rowId);
         });
     });
 }
@@ -1752,7 +1834,7 @@ function openStagePictureModal(container, body, rowId) {
                 return;
             }
             root.innerHTML = '';
-            await loadListing(container);
+            await refreshRowDerivedCells(container, rowId);
         } catch (err) {
             console.error(err);
             errBox.textContent = `Upload failed: ${err.message} — is picking_api.py running and reachable at ${PICKING_API_URL}?`;
@@ -1773,7 +1855,7 @@ function openStagePictureModal(container, body, rowId) {
 // needs to work for listings that were never onboarded into a template.
 // ----------------------------------------------------------------
 
-async function openBalanceQtyModal(container, body, variantId, cardLabelText) {
+async function openBalanceQtyModal(container, body, variantId, cardLabelText, rowId) {
     const root = body.querySelector('#lp-modal-root');
     root.innerHTML = `
         <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
@@ -1808,10 +1890,10 @@ async function openBalanceQtyModal(container, body, variantId, cardLabelText) {
     const templateNameByListingId = Object.fromEntries((templates || []).map(t => [t.listing_id, t.name]));
 
     root.querySelector('#lp-balance-loading').remove();
-    renderBalanceQtyBody(root, container, rows, totalInventory, templateNameByListingId);
+    renderBalanceQtyBody(root, container, rows, totalInventory, templateNameByListingId, rowId);
 }
 
-function renderBalanceQtyBody(root, container, rows, totalInventory, templateNameByListingId) {
+function renderBalanceQtyBody(root, container, rows, totalInventory, templateNameByListingId, rowId) {
     const bodyEl = root.querySelector('#lp-balance-body');
     bodyEl.innerHTML = `
         <p style="font-size:12px; color:var(--text-secondary); margin:8px 0;">
@@ -1865,9 +1947,8 @@ function renderBalanceQtyBody(root, container, rows, totalInventory, templateNam
         updateTotalNote();
     });
 
-    root.querySelector('#lp-balance-cancel').addEventListener('click', async () => {
+    root.querySelector('#lp-balance-cancel').addEventListener('click', () => {
         root.innerHTML = '';
-        await loadListing(container);
     });
 
     bodyEl.querySelector('#lp-balance-apply').addEventListener('click', async () => {
@@ -1934,7 +2015,7 @@ function renderBalanceQtyBody(root, container, rows, totalInventory, templateNam
         if (results.every(r => r.ok)) {
             setTimeout(async () => {
                 root.innerHTML = '';
-                await loadListing(container);
+                await refreshRowDerivedCells(container, rowId);
             }, 1200);
         }
     });
