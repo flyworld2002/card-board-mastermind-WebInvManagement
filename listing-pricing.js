@@ -265,7 +265,47 @@ function openTemplateModal(container, templateId, duplicateFromId = null) {
     root.querySelector('#lp-template-cancel').addEventListener('click', () => { root.innerHTML = ''; });
     if (isEdit) {
         root.querySelector('#lp-template-delete').addEventListener('click', async () => {
-            if (!window.confirm(`Delete template "${existing.name}"? This can't be undone.`)) return;
+            // Both listing_card_assignments.template_id and
+            // platform_listings.template_id are NO ACTION FKs — a plain
+            // DELETE on listing_templates fails outright the moment any
+            // roster row or platform_listings row still references it
+            // (confirmed live: every real template already has active
+            // roster rows, so the old plain-delete button never actually
+            // worked for a template anyone had used). Show the real
+            // counts, confirm explicitly, then clean up in order:
+            // detach platform_listings (kept as history, not deleted —
+            // template_id just goes NULL) -> delete the roster
+            // (listing_card_groups already cascades on its own) ->
+            // delete the template itself.
+            const [{ count: activeCount }, { count: queuedCount }, { count: soldOutCount }, { count: platformCount }] = await Promise.all([
+                supabase.from('listing_card_assignments').select('id', { count: 'exact', head: true }).eq('template_id', templateId).eq('status', 'active'),
+                supabase.from('listing_card_assignments').select('id', { count: 'exact', head: true }).eq('template_id', templateId).eq('status', 'queued'),
+                supabase.from('listing_card_assignments').select('id', { count: 'exact', head: true }).eq('template_id', templateId).eq('status', 'sold_out_retained'),
+                supabase.from('platform_listings').select('id', { count: 'exact', head: true }).eq('template_id', templateId),
+            ]);
+            const totalRoster = (activeCount || 0) + (queuedCount || 0) + (soldOutCount || 0);
+
+            let confirmMsg = `Delete template "${existing.name}"? This can't be undone.`;
+            if (totalRoster > 0 || platformCount > 0) {
+                confirmMsg = `Delete template "${existing.name}"?\n\n`
+                    + `It still has ${activeCount || 0} active, ${queuedCount || 0} queued, and ${soldOutCount || 0} `
+                    + `sold-out-retained roster row(s)${platformCount ? `, and ${platformCount} platform_listings row(s) referencing it` : ''}.\n\n`
+                    + `This does NOT remove anything from eBay itself — only this app's tracking/pricing for it. `
+                    + `The roster will be deleted; platform_listings rows are kept as history but detached from this template.\n\n`
+                    + `This cannot be undone. Continue?`;
+            }
+            if (!window.confirm(confirmMsg)) return;
+
+            if (platformCount > 0) {
+                const { error: detachErr } = await supabase.from('platform_listings')
+                    .update({ template_id: null }).eq('template_id', templateId);
+                if (detachErr) { window.alert(`Failed to detach platform listings: ${detachErr.message}`); return; }
+            }
+            if (totalRoster > 0) {
+                const { error: rosterErr } = await supabase.from('listing_card_assignments')
+                    .delete().eq('template_id', templateId);
+                if (rosterErr) { window.alert(`Failed to clear roster: ${rosterErr.message}`); return; }
+            }
             const { error } = await supabase.from('listing_templates').delete().eq('id', templateId);
             if (error) { window.alert(`Failed to delete: ${error.message}`); return; }
             root.innerHTML = '';
