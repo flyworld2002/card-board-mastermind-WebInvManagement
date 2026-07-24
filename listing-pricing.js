@@ -631,7 +631,10 @@ function rowHTML(r) {
             <td>${isActive
                 ? (isGatedIn(r) ? '<span style="color:var(--success); font-size:12px;">yes</span>' : '<span style="color:var(--text-secondary); font-size:12px;">no</span>')
                 : '<span style="color:var(--text-secondary); font-size:12px;">n/a</span>'}</td>
-            <td>${r.available_qty ?? '-'}</td>
+            <td>${r.available_qty ?? '-'}
+                <a href="#" class="lp-balance-qty-link" data-variant-id="${r.variant_id}" data-card-label="${escapeHtml(cardLabel(r))}"
+                   style="font-size:10px; margin-left:4px; color:var(--accent);" title="Balance quantity across every listing that offers this card">Balance</a>
+            </td>
             <td>${resolvedQty(r)}</td>
             <td><input type="number" class="lp-low-stock-input" data-row-id="${r.row_id}"
                        value="${r.row_low_stock_qty ?? ''}" placeholder="-" style="width:60px;" /></td>
@@ -896,6 +899,13 @@ function wireControls(container, body) {
 
     body.querySelectorAll('.lp-thumb-upload').forEach(el => {
         el.addEventListener('click', () => openStagePictureModal(container, body, el.dataset.rowId));
+    });
+
+    body.querySelectorAll('.lp-balance-qty-link').forEach(el => {
+        el.addEventListener('click', (e) => {
+            e.preventDefault();
+            openBalanceQtyModal(container, body, el.dataset.variantId, el.dataset.cardLabel);
+        });
     });
 }
 
@@ -1749,6 +1759,183 @@ function openStagePictureModal(container, body, rowId) {
         } finally {
             uploadBtn.disabled = false;
             uploadBtn.textContent = 'Upload';
+        }
+    });
+}
+
+// ----------------------------------------------------------------
+// Balance Qty — redistribute a card's shared inventory across every
+// listing that currently offers it, including ones with no
+// listing_templates row at all. Reads/writes platform_listings directly
+// (LEFT-JOIN-style lookup against listing_templates just for a display
+// name) rather than going through resolve_listing_prices()/the roster —
+// same reasoning as revise_single_variation_qty() on the backend: this
+// needs to work for listings that were never onboarded into a template.
+// ----------------------------------------------------------------
+
+async function openBalanceQtyModal(container, body, variantId, cardLabelText) {
+    const root = body.querySelector('#lp-modal-root');
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:520px; max-width:90vw; max-height:85vh; overflow-y:auto;">
+                <h3 style="margin:0 0 4px;">Balance Qty — ${escapeHtml(cardLabelText)}</h3>
+                <p id="lp-balance-loading" style="color:var(--text-secondary); font-size:12px;">Loading listings...</p>
+                <div id="lp-balance-body"></div>
+            </div>
+        </div>
+    `;
+
+    const [{ data: invRows, error: invErr }, { data: plRows, error: plErr }] = await Promise.all([
+        supabase.from('inventory').select('quantity, quantity_sold').eq('variant_id', variantId).eq('is_graded', false),
+        supabase.from('platform_listings').select('id, platform, listing_id, account, quantity_listed, external_id')
+            .eq('variant_id', variantId).eq('status', 'active').order('listing_id'),
+    ]);
+    if (invErr || plErr) {
+        root.querySelector('#lp-balance-loading').textContent = `Failed to load: ${(invErr || plErr).message}`;
+        return;
+    }
+
+    const totalInventory = (invRows || []).reduce((sum, r) => sum + (r.quantity - (r.quantity_sold || 0)), 0);
+    const rows = plRows || [];
+
+    if (!rows.length) {
+        root.querySelector('#lp-balance-loading').textContent = 'No live listings currently offer this card — nothing to balance yet.';
+        return;
+    }
+
+    const listingIds = [...new Set(rows.map(r => r.listing_id))];
+    const { data: templates } = await supabase.from('listing_templates').select('listing_id, name').in('listing_id', listingIds);
+    const templateNameByListingId = Object.fromEntries((templates || []).map(t => [t.listing_id, t.name]));
+
+    root.querySelector('#lp-balance-loading').remove();
+    renderBalanceQtyBody(root, container, rows, totalInventory, templateNameByListingId);
+}
+
+function renderBalanceQtyBody(root, container, rows, totalInventory, templateNameByListingId) {
+    const bodyEl = root.querySelector('#lp-balance-body');
+    bodyEl.innerHTML = `
+        <p style="font-size:12px; color:var(--text-secondary); margin:8px 0;">
+            Total inventory: <strong>${totalInventory}</strong> — currently split across ${rows.length} live listing(s).
+        </p>
+        <table style="margin-bottom:10px;">
+            <thead><tr><th>Listing</th><th style="width:90px;">Qty</th></tr></thead>
+            <tbody>
+                ${rows.map(r => `
+                    <tr>
+                        <td>
+                            <div>${escapeHtml(templateNameByListingId[r.listing_id] || '(no template)')}</div>
+                            <div style="font-size:11px; color:var(--text-secondary);">${escapeHtml(r.listing_id)}${r.account ? ` · ${escapeHtml(r.account)}` : ''}</div>
+                        </td>
+                        <td><input type="number" min="0" class="lp-balance-qty-input" data-pl-id="${r.id}" value="${r.quantity_listed ?? 0}" style="width:70px;" /></td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+        <div id="lp-balance-total-note" style="font-size:12px; margin-bottom:10px;"></div>
+        <div id="lp-balance-error" style="color:var(--danger); font-size:12px; margin-bottom:10px;"></div>
+        <div id="lp-balance-results" style="font-size:12px; margin-bottom:10px;"></div>
+        <div style="display:flex; justify-content:space-between; gap:8px;">
+            <button type="button" class="btn" id="lp-balance-even-btn">Evenly split</button>
+            <div style="display:flex; gap:8px;">
+                <button type="button" class="btn" id="lp-balance-cancel">Close</button>
+                <button type="button" class="btn btn-primary" id="lp-balance-apply">Apply</button>
+            </div>
+        </div>
+    `;
+
+    const updateTotalNote = () => {
+        const inputs = [...bodyEl.querySelectorAll('.lp-balance-qty-input')];
+        const sum = inputs.reduce((s, el) => s + (parseInt(el.value, 10) || 0), 0);
+        const note = bodyEl.querySelector('#lp-balance-total-note');
+        note.textContent = `Entered total: ${sum} / ${totalInventory} in stock`;
+        note.style.color = sum > totalInventory ? 'var(--danger)' : 'var(--text-secondary)';
+    };
+    bodyEl.querySelectorAll('.lp-balance-qty-input').forEach(el => el.addEventListener('input', updateTotalNote));
+    updateTotalNote();
+
+    bodyEl.querySelector('#lp-balance-even-btn').addEventListener('click', () => {
+        const n = rows.length;
+        const base = Math.floor(totalInventory / n);
+        const remainder = totalInventory - base * n;
+        rows.forEach((r, i) => {
+            const share = base + (i < remainder ? 1 : 0);
+            const input = bodyEl.querySelector(`.lp-balance-qty-input[data-pl-id="${r.id}"]`);
+            if (input) input.value = share;
+        });
+        updateTotalNote();
+    });
+
+    root.querySelector('#lp-balance-cancel').addEventListener('click', async () => {
+        root.innerHTML = '';
+        await loadListing(container);
+    });
+
+    bodyEl.querySelector('#lp-balance-apply').addEventListener('click', async () => {
+        const errBox = bodyEl.querySelector('#lp-balance-error');
+        const resultsBox = bodyEl.querySelector('#lp-balance-results');
+        errBox.textContent = '';
+        resultsBox.innerHTML = '';
+
+        const sum = [...bodyEl.querySelectorAll('.lp-balance-qty-input')]
+            .reduce((s, el) => s + (parseInt(el.value, 10) || 0), 0);
+        if (sum > totalInventory) {
+            errBox.textContent = `Entered total (${sum}) exceeds actual stock (${totalInventory}) — reduce before applying.`;
+            return;
+        }
+
+        const changes = rows
+            .map(r => {
+                const input = bodyEl.querySelector(`.lp-balance-qty-input[data-pl-id="${r.id}"]`);
+                return { row: r, newQty: parseInt(input.value, 10) || 0 };
+            })
+            .filter(({ row, newQty }) => newQty !== (row.quantity_listed ?? 0));
+
+        if (!changes.length) {
+            errBox.textContent = 'Nothing changed.';
+            return;
+        }
+
+        const summary = changes.map(({ row, newQty }) =>
+            `${templateNameByListingId[row.listing_id] || row.listing_id}: ${row.quantity_listed ?? 0} → ${newQty}`).join('\n');
+        if (!window.confirm(`This will send live quantity changes to ${changes.length} eBay listing(s):\n\n${summary}\n\nContinue?`)) return;
+
+        const applyBtn = bodyEl.querySelector('#lp-balance-apply');
+        applyBtn.disabled = true;
+        applyBtn.textContent = 'Applying...';
+
+        const results = [];
+        for (const { row, newQty } of changes) {
+            try {
+                const resp = await fetch(`${PICKING_API_URL}/api/revise-variation-qty`, {
+                    method: 'POST',
+                    headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+                    body: JSON.stringify({ platform_listing_id: row.id, new_qty: newQty, account_num: state.accountNum, dry_run: false }),
+                });
+                if (!resp.ok) {
+                    const detail = await resp.text().catch(() => '');
+                    throw new Error(`${resp.status} ${detail}`);
+                }
+                const result = await resp.json();
+                results.push({ listingId: row.listing_id, ok: !result.error, detail: result.error || `${row.quantity_listed ?? 0} → ${newQty}` });
+            } catch (err) {
+                results.push({ listingId: row.listing_id, ok: false, detail: err.message });
+            }
+        }
+
+        resultsBox.innerHTML = results.map(r => `
+            <div style="color:${r.ok ? 'var(--success)' : 'var(--danger)'};">
+                ${r.ok ? '✓' : '✗'} ${escapeHtml(templateNameByListingId[r.listingId] || r.listingId)}: ${escapeHtml(r.detail)}
+            </div>
+        `).join('');
+
+        applyBtn.disabled = false;
+        applyBtn.textContent = 'Apply';
+
+        if (results.every(r => r.ok)) {
+            setTimeout(async () => {
+                root.innerHTML = '';
+                await loadListing(container);
+            }, 1200);
         }
     });
 }
