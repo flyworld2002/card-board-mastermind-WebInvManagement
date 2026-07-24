@@ -546,6 +546,8 @@ function renderBody(container) {
                 <option value="__none__">(no group)</option>
                 ${state.groups.map(g => `<option value="${g.id}">${escapeHtml(g.name)}</option>`).join('')}
             </select>
+            <button class="btn" id="lp-bulk-sync-on-btn" style="font-size:12px;" ${state.selected.size === 0 ? 'disabled' : ''}>Enable sync</button>
+            <button class="btn" id="lp-bulk-sync-off-btn" style="font-size:12px;" ${state.selected.size === 0 ? 'disabled' : ''}>Disable sync</button>
         </div>
 
         ${state.groups.map(g => groupSectionHTML(g, byGroup[g.id] || [])).join('')}
@@ -714,6 +716,33 @@ function wireControls(container, body) {
         state.selected = new Set();
         await loadListing(container);
     });
+
+    // sync_enabled lives on platform_listings, only meaningful for
+    // 'active' rows (queued rows have no platform_listings row at all)
+    // — a mixed selection just silently skips the queued ones rather
+    // than erroring, same as clicking Push already tolerates a mixed
+    // roster.
+    const bulkSetSyncEnabled = async (enabled) => {
+        const plIds = state.resolvedRows
+            .filter(r => state.selected.has(r.row_id) && r.status === 'active' && r.platform_listing_id)
+            .map(r => r.platform_listing_id);
+        if (!plIds.length) {
+            window.alert('None of the selected rows are active — sync only applies to active (live) rows.');
+            return;
+        }
+        const { error } = await supabase.from('platform_listings')
+            .update({ sync_enabled: enabled })
+            .in('id', plIds);
+        if (error) {
+            window.alert(`Failed to ${enabled ? 'enable' : 'disable'} sync: ${error.message}`);
+            return;
+        }
+        state.selected = new Set();
+        await loadListing(container);
+    };
+
+    body.querySelector('#lp-bulk-sync-on-btn').addEventListener('click', () => bulkSetSyncEnabled(true));
+    body.querySelector('#lp-bulk-sync-off-btn').addEventListener('click', () => bulkSetSyncEnabled(false));
 
     body.querySelector('#lp-new-group-btn').addEventListener('click', () => openNewGroupModal(container, body));
 
