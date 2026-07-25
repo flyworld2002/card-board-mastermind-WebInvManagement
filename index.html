@@ -202,6 +202,7 @@
                         <a href="#catalog" data-page="catalog">Catalog</a>
                         <a href="#listing-pricing" data-page="listing-pricing">Listing pricing</a>
                         <a href="#configuration" data-page="configuration">Configuration</a>
+                        <a href="#jobs" data-page="jobs">Jobs</a>
                         <a href="#" id="signout-link" style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px;">Sign out</a>
                     </nav>
                     <main id="page-content">
@@ -322,6 +323,11 @@
                         const { renderConfiguration } = await import(`./configuration.js?v=${Date.now()}`);
                         const subKey = hash === 'configuration' ? 'sets' : hash;
                         await renderConfiguration(content, subKey);
+                        break;
+                    }
+                    case 'jobs': {
+                        const { renderJobs } = await import(`./jobs.js?v=${Date.now()}`);
+                        await renderJobs(content);
                         break;
                     }
                     default:

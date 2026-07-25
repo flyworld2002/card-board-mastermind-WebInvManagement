@@ -7,6 +7,25 @@ import { supabase, debounce, formatPrice, loadAxisOptions, axisDisplay } from '.
 const PAGE_SIZES = [50, 100, 250];
 const PLATFORMS  = ['ebay', 'tcgplayer', 'amazon', 'shopify', 'wix'];
 
+// Same picking_api.py the Jobs page and Picking tab talk to — see jobs.js
+// for the full background-job flow. Inventory only ever fires the POST
+// that starts a refresh job; progress/history lives on the Jobs page.
+const PICKING_API_URL = 'http://192.168.1.186:8765';
+const PICKING_API_TOKEN = 'I1knbOJAve_UZJQHAFZANds9-HalgCxcRJw1GXDg404';
+
+async function startMarketPriceRefresh(body) {
+    const resp = await fetch(`${PICKING_API_URL}/api/jobs/market-price-refresh`, {
+        method: 'POST',
+        headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+        const detail = await resp.text().catch(() => '');
+        throw new Error(`${resp.status} ${detail}`);
+    }
+    return resp.json();
+}
+
 const DEFAULT_VISIBLE_PLATFORMS = ['ebay', 'tcgplayer'];
 
 function loadVisiblePlatforms() {
@@ -350,7 +369,12 @@ function renderFilters(container) {
                     title="Turn on sync_enabled for every eBay listing in ${escapeHtml(f.set_name)}">
                 Enable sync for "${escapeHtml(f.set_name)}"
             </button>
+            <button id="inv-refresh-market-prices" class="btn"
+                    title="Refresh market prices for ${escapeHtml(f.set_name)} from the Pokemon TCG API (skips cards already refreshed today). Runs in the background — see the Jobs page for progress.">
+                ↻ Refresh prices for "${escapeHtml(f.set_name)}"
+            </button>
         ` : ''}
+        <span id="inv-refresh-flash"></span>
         <select id="inv-page-size" style="margin-left:auto;">
             ${PAGE_SIZES.map(s =>
                 `<option value="${s}" ${s === state.pageSize ? 'selected' : ''}>${s} per page</option>`
@@ -402,6 +426,23 @@ function renderFilters(container) {
     const bulkEnableBtn = bar.querySelector('#inv-bulk-enable-sync');
     if (bulkEnableBtn) {
         bulkEnableBtn.addEventListener('click', () => bulkEnableSyncForSet(container, state.filters.set_name));
+    }
+
+    const refreshPricesBtn = bar.querySelector('#inv-refresh-market-prices');
+    if (refreshPricesBtn) {
+        refreshPricesBtn.addEventListener('click', async () => {
+            const flash = bar.querySelector('#inv-refresh-flash');
+            refreshPricesBtn.disabled = true;
+            try {
+                await startMarketPriceRefresh({ set_name: state.filters.set_name });
+                flash.innerHTML = `<span style="color:var(--success); font-size:12px; margin-left:8px;">✓ Refresh started — see the Jobs page for progress</span>`;
+            } catch (err) {
+                flash.innerHTML = `<span style="color:var(--danger); font-size:12px; margin-left:8px;">Failed to start: ${escapeHtml(err.message)} — is picking_api.py running?</span>`;
+            } finally {
+                refreshPricesBtn.disabled = false;
+                setTimeout(() => { flash.innerHTML = ''; }, 5000);
+            }
+        });
     }
 }
 
@@ -1421,6 +1462,8 @@ function openListModal(container, row) {
                         ${row.market_updated_at
                             ? `<span style="font-size:11px;"> · ${new Date(row.market_updated_at).toLocaleDateString()}</span>`
                             : ''}
+                        <a href="#" id="market-refresh-link" title="Refresh this card's market price from the Pokemon TCG API now"
+                           style="font-size:11px; margin-left:4px; color:var(--accent);">↻ Refresh</a>
                     </span>
                     <span id="margin-display"></span>
                 </div>
@@ -1481,6 +1524,20 @@ function openListModal(container, row) {
 
     document.body.appendChild(overlay);
     overlay.querySelector('.list-cancel-btn').addEventListener('click', () => overlay.remove());
+
+    overlay.querySelector('#market-refresh-link').addEventListener('click', async (e) => {
+        e.preventDefault();
+        const link = e.target;
+        const originalText = link.textContent;
+        link.textContent = 'Starting...';
+        try {
+            await startMarketPriceRefresh({ card_id: row.lots[0].card_id });
+            link.textContent = '✓ Started — see Jobs page';
+        } catch (err) {
+            link.textContent = originalText;
+            window.alert(`Failed to start refresh: ${err.message} — is picking_api.py running?`);
+        }
+    });
 
     // Show/hide required indicators based on platform
     const toggleEbayRequired = (platform) => {
