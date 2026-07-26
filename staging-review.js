@@ -2549,7 +2549,7 @@ function openNewLocalPurchaseModal(container) {
                 <label>Cost
                     <input type="number" step="0.01" class="nlp-edit-cost" style="width:80px;" placeholder="0.00" />
                 </label>
-                <label>Listing Price
+                <label>Listing Price <span class="nlp-listing-price-required" style="color:var(--danger); display:none;">*</span>
                     <input type="number" step="0.01" class="nlp-edit-listing-price" style="width:80px;" placeholder="0.00" />
                 </label>
             </div>
@@ -2633,6 +2633,7 @@ function openNewLocalPurchaseModal(container) {
 
         formDiv.querySelector('.nlp-edit-ebay-link').addEventListener('change', (e) => {
             formDiv.querySelector('.nlp-ebay-link-fields').style.display = e.target.checked ? 'flex' : 'none';
+            formDiv.querySelector('.nlp-listing-price-required').style.display = e.target.checked ? 'inline' : 'none';
         });
 
         // Reset match state for this fresh card
@@ -2894,6 +2895,10 @@ function openNewLocalPurchaseModal(container) {
             const ebayVarName  = formDiv.querySelector('.nlp-edit-ebay-variation-name').value.trim() || null;
             if (linkToEbay && (!ebayItemId || !ebayVarName)) {
                 msg.innerHTML = `<span style="color:var(--danger)">eBay Item ID and variation name are both required to link a listing.</span>`;
+                return;
+            }
+            if (linkToEbay && !listingPrice) {
+                msg.innerHTML = `<span style="color:var(--danger)">Listing Price is required when linking to an eBay listing (platform_listings.list_price can't be blank).</span>`;
                 return;
             }
 
