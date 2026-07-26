@@ -207,11 +207,13 @@ function rowHtml(row) {
     const isReversible = row.reason === 'cancelled_after_recording' && isOpen;
 
     const isUnmatched = row.reason === 'unmatched' && isOpen;
+    const isListingGap = row.reason === 'listing_gap' && isOpen;
 
     const actions = isOpen
         ? `
             ${isReversible ? `<button class="btn" style="color:var(--danger); border-color:var(--danger);" data-action="reverse_sale" data-id="${row.id}">Reverse Sale</button>` : ''}
             ${isUnmatched ? `<button class="btn" style="color:var(--accent); border-color:var(--accent);" data-action="add_mapping" data-id="${row.id}">Add mapping</button>` : ''}
+            ${isListingGap ? `<button class="btn" style="color:var(--accent); border-color:var(--accent);" data-action="fix_listing_gap" data-id="${row.id}">Create listing</button>` : ''}
             <button class="btn btn-primary" data-action="resolve" data-id="${row.id}">Resolve</button>
             <button class="btn" data-action="ignore" data-id="${row.id}">Ignore</button>
           `
@@ -258,6 +260,10 @@ async function handleAction(id, action) {
     }
     if (action === 'add_mapping') {
         openAddMappingModal(id);
+        return;
+    }
+    if (action === 'fix_listing_gap') {
+        openFixListingGapModal(id);
         return;
     }
 
@@ -472,6 +478,141 @@ function openAddMappingModal(id) {
         msgEl.innerHTML = `<span style="color:var(--success);">Mapping saved — this issue will auto-resolve on the next --ebay-pullorders run.</span>`;
         setTimeout(() => overlay.remove(), 1800);
     });
+}
+
+// ── Fix listing gap modal ────────────────────────────────────────────────
+// For a 'listing_gap' issue: the sale already matched and recorded fine
+// (inventory correctly deducted) — record_sale() just found no
+// platform_listings row to decrement quantity_listed on, because this
+// variant was never pushed live through our roster/push pipeline (it sold
+// straight off a pre-existing eBay listing). Unlike 'unmatched',
+// listing_gap is NOT auto-retried by anything (see ebay_orders.py) — so
+// this modal explicitly marks the issue resolved itself once the row is
+// created, since nothing else in the system ever will.
+function openFixListingGapModal(id) {
+    const row = issuesById.get(id);
+    if (!row) return;
+
+    (async () => {
+        const { data: mapRow, error: mapErr } = await supabase
+            .from('ebay_listing_map')
+            .select('variant_id')
+            .eq('item_id', row.item_id)
+            .eq('variation_name', row.variation_name)
+            .maybeSingle();
+
+        if (mapErr || !mapRow || !mapRow.variant_id) {
+            alert(`Couldn't find the resolved variant for this sale (${mapErr?.message || 'no ebay_listing_map row'}) — this shouldn't happen for a listing_gap issue.`);
+            return;
+        }
+
+        const { data: variant } = await supabase
+            .from('v_card_variants')
+            .select('card_name, set_name, display_number, foil_label, pattern_label, texture_label, material_label, size_label, stamp_label, source_label')
+            .eq('variant_id', mapRow.variant_id)
+            .maybeSingle();
+
+        const variantLabel = variant
+            ? [variant.foil_label, variant.pattern_label, variant.texture_label, variant.material_label, variant.size_label, variant.stamp_label, variant.source_label]
+                .filter(Boolean).join(' · ') || 'Non-Holo'
+            : '';
+
+        const overlay = document.createElement('div');
+        overlay.style.cssText = `
+            position:fixed; inset:0; background:rgba(0,0,0,0.6);
+            display:flex; align-items:center; justify-content:center;
+            z-index:1000; padding:16px;
+        `;
+        overlay.innerHTML = `
+            <div style="background:var(--bg-secondary); border:1px solid var(--border);
+                        border-radius:8px; padding:20px; width:480px; max-width:95vw;">
+                <h3 style="margin:0 0 4px;">Create listing</h3>
+                <p style="color:var(--text-secondary); font-size:12px; margin:0 0 14px;">
+                    Creates the missing platform_listings row so this variant's live-on-eBay
+                    state is tracked going forward. Inventory is untouched — the sale already
+                    deducted it correctly.
+                </p>
+                <div style="background:var(--bg-tertiary); border:1px solid var(--border); border-radius:6px;
+                            padding:8px 10px; margin-bottom:14px; font-size:12px;">
+                    <div><strong>Item ID:</strong> ${escapeHtml(row.item_id || '')}</div>
+                    <div><strong>Variation:</strong> ${escapeHtml(row.variation_name || '')}</div>
+                    ${variant ? `<div><strong>Card:</strong> ${escapeHtml(variant.card_name)} — ${escapeHtml(variant.set_name || '')} #${escapeHtml(variant.display_number || '')} (${escapeHtml(variantLabel)})</div>` : ''}
+                    <div><strong>Account:</strong> ${escapeHtml(row.account || '(none on this issue)')}</div>
+                </div>
+                <div style="display:flex; gap:12px; margin-bottom:14px;">
+                    <label style="font-size:12px; color:var(--text-secondary);">List price ($)
+                        <input type="number" step="0.01" id="flg-list-price" value="${row.sale_price ?? ''}" style="width:100px; display:block; margin-top:4px;" />
+                    </label>
+                    <label style="font-size:12px; color:var(--text-secondary);">Quantity currently live on eBay
+                        <input type="number" min="0" id="flg-qty" value="${row.quantity ?? 0}" style="width:100px; display:block; margin-top:4px;" />
+                    </label>
+                </div>
+                <div id="flg-msg" style="font-size:12px; margin-bottom:10px;"></div>
+                <div style="display:flex; gap:8px;">
+                    <button class="btn btn-primary" id="flg-save-btn">Create listing</button>
+                    <button class="btn" id="flg-cancel-btn">Cancel</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        overlay.querySelector('#flg-cancel-btn').addEventListener('click', () => overlay.remove());
+
+        overlay.querySelector('#flg-save-btn').addEventListener('click', async () => {
+            const msgEl = overlay.querySelector('#flg-msg');
+            const listPrice = parseFloat(overlay.querySelector('#flg-list-price').value);
+            const qty = parseInt(overlay.querySelector('#flg-qty').value, 10);
+
+            if (!listPrice || listPrice <= 0) {
+                msgEl.innerHTML = `<span style="color:var(--danger);">List price is required.</span>`;
+                return;
+            }
+            if (isNaN(qty) || qty < 0) {
+                msgEl.innerHTML = `<span style="color:var(--danger);">Quantity must be 0 or more.</span>`;
+                return;
+            }
+
+            const saveBtn = overlay.querySelector('#flg-save-btn');
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Creating...';
+
+            const { error: insErr } = await supabase
+                .from('platform_listings')
+                .upsert({
+                    variant_id: mapRow.variant_id,
+                    platform: 'ebay',
+                    listing_id: row.item_id,
+                    external_id: row.variation_name,
+                    list_price: listPrice,
+                    quantity_listed: qty,
+                    status: qty > 0 ? 'active' : 'out_of_stock',
+                    account: row.account,
+                    sync_enabled: false,
+                    listed_at: new Date().toISOString(),
+                }, { onConflict: 'variant_id,platform,listing_id,external_id', ignoreDuplicates: true });
+
+            if (insErr) {
+                msgEl.innerHTML = `<span style="color:var(--danger);">Failed: ${escapeHtml(insErr.message)}</span>`;
+                saveBtn.disabled = false;
+                saveBtn.textContent = 'Create listing';
+                return;
+            }
+
+            const { error: resolveErr } = await supabase
+                .from('ebay_order_issues')
+                .update({ status: 'resolved', closed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+                .eq('id', id);
+
+            if (resolveErr) {
+                msgEl.innerHTML = `<span style="color:var(--warning, var(--danger));">Listing created, but failed to mark the issue resolved: ${escapeHtml(resolveErr.message)}</span>`;
+                setTimeout(() => { overlay.remove(); loadIssues(); }, 2000);
+                return;
+            }
+
+            msgEl.innerHTML = `<span style="color:var(--success);">Listing created — issue resolved.</span>`;
+            setTimeout(() => { overlay.remove(); loadIssues(); }, 1200);
+        });
+    })();
 }
 
 function escapeHtml(str) {
