@@ -213,9 +213,14 @@ async function openTemplate(container, templateId) {
 // low_stock_*/display_sort/name_format) while still creating a brand-new
 // row (isEdit stays false — plain INSERT) — name gets "(copy)" appended
 // and listing_id is forced blank, since the duplicate isn't tied to a
-// real eBay listing yet. Deliberately config-only: does NOT touch
-// listing_card_groups/listing_card_assignments — the new template starts
-// with an empty roster, built fresh via "Add card to listing".
+// real eBay listing yet. The roster itself (listing_card_assignments)
+// stays empty, built fresh via "Add card to listing" — but the group
+// SHELLS (listing_card_groups: name + linked pricing_profile) ARE copied,
+// since the whole point of duplicating a template is usually "same
+// rarity-tier grouping/pricing structure, different physical eBay
+// listing" — recreating every group + profile link by hand for each new
+// listing would defeat that. Groups copy empty (no roster rows point at
+// them yet) — cards get assigned into them normally once added.
 function openTemplateModal(container, templateId, duplicateFromId = null) {
     const isEdit = !!templateId;
     const duplicateSource = duplicateFromId ? state.templates.find(t => t.id === duplicateFromId) : null;
@@ -233,7 +238,7 @@ function openTemplateModal(container, templateId, duplicateFromId = null) {
         <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
             <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:460px; max-width:90vw; max-height:85vh; overflow-y:auto;">
                 <h3 style="margin:0 0 16px;">${isEdit ? 'Edit listing template' : duplicateSource ? 'Duplicate listing template' : 'New listing template'}</h3>
-                ${duplicateSource ? `<p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">Copied from "${escapeHtml(duplicateSource.name)}" — roster/groups are NOT copied, this starts empty.</p>` : ''}
+                ${duplicateSource ? `<p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">Copied from "${escapeHtml(duplicateSource.name)}" — groups and their pricing profile links are copied (empty, no cards yet); the roster itself is NOT copied.</p>` : ''}
                 <form id="lp-template-form">
                     <div style="display:flex; flex-direction:column; gap:10px;">
                         ${f('Platform', 'text', 'platform', existing?.platform || 'ebay')}
@@ -350,10 +355,28 @@ function openTemplateModal(container, templateId, duplicateFromId = null) {
             updated_at: new Date().toISOString(),
         };
         try {
-            const { error } = isEdit
-                ? await supabase.from('listing_templates').update(payload).eq('id', templateId)
-                : await supabase.from('listing_templates').insert(payload);
-            if (error) throw error;
+            if (isEdit) {
+                const { error } = await supabase.from('listing_templates').update(payload).eq('id', templateId);
+                if (error) throw error;
+            } else {
+                const { data: newTemplate, error } = await supabase.from('listing_templates').insert(payload).select().single();
+                if (error) throw error;
+
+                if (duplicateSource) {
+                    const { data: sourceGroups, error: groupsErr } = await supabase
+                        .from('listing_card_groups')
+                        .select('name, profile_id')
+                        .eq('template_id', duplicateSource.id);
+                    if (groupsErr) throw groupsErr;
+
+                    if (sourceGroups?.length) {
+                        const { error: copyErr } = await supabase.from('listing_card_groups').insert(
+                            sourceGroups.map(g => ({ template_id: newTemplate.id, name: g.name, profile_id: g.profile_id }))
+                        );
+                        if (copyErr) throw copyErr;
+                    }
+                }
+            }
             root.innerHTML = '';
             await renderTemplatesList(container);
         } catch (err) {
