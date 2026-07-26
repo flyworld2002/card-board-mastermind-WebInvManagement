@@ -1,4 +1,4 @@
-import { supabase } from './shared.js';
+import { supabase, debounce } from './shared.js';
 
 // ── Issues tab ────────────────────────────────────────────────────────────
 // Lists rows from ebay_order_issues. Bookkeeping only: Resolve/Ignore just
@@ -206,9 +206,12 @@ function rowHtml(row) {
     const isOpen = row.status === 'open';
     const isReversible = row.reason === 'cancelled_after_recording' && isOpen;
 
+    const isUnmatched = row.reason === 'unmatched' && isOpen;
+
     const actions = isOpen
         ? `
             ${isReversible ? `<button class="btn" style="color:var(--danger); border-color:var(--danger);" data-action="reverse_sale" data-id="${row.id}">Reverse Sale</button>` : ''}
+            ${isUnmatched ? `<button class="btn" style="color:var(--accent); border-color:var(--accent);" data-action="add_mapping" data-id="${row.id}">Add mapping</button>` : ''}
             <button class="btn btn-primary" data-action="resolve" data-id="${row.id}">Resolve</button>
             <button class="btn" data-action="ignore" data-id="${row.id}">Ignore</button>
           `
@@ -251,6 +254,10 @@ function rowHtml(row) {
 async function handleAction(id, action) {
     if (action === 'reverse_sale') {
         await handleReverseSale(id);
+        return;
+    }
+    if (action === 'add_mapping') {
+        openAddMappingModal(id);
         return;
     }
 
@@ -328,6 +335,143 @@ async function handleReverseSale(id) {
     }
 
     loadIssues();
+}
+
+// ── Add mapping modal ────────────────────────────────────────────────────
+// For an 'unmatched' issue where the card/variant and its inventory ALREADY
+// exist correctly — the gap is purely a missing/wrong ebay_listing_map row
+// (e.g. pushed live before that got wired up, or eBay's variation text
+// changed after the fact). Unlike the "New Local Purchase" path in Staging
+// Review, this never touches inventory/purchases — it only searches for an
+// EXISTING variant and upserts the mapping. Doesn't touch this issue's own
+// status either (same bookkeeping-only philosophy as Resolve/Ignore) —
+// retry_open_issues() on the next --ebay-pullorders run is what actually
+// re-matches and resolves it.
+function openAddMappingModal(id) {
+    const row = issuesById.get(id);
+    if (!row) return;
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+        position:fixed; inset:0; background:rgba(0,0,0,0.6);
+        display:flex; align-items:center; justify-content:center;
+        z-index:1000; padding:16px;
+    `;
+    overlay.innerHTML = `
+        <div style="background:var(--bg-secondary); border:1px solid var(--border);
+                    border-radius:8px; padding:20px; width:520px; max-width:95vw;
+                    max-height:85vh; overflow-y:auto;">
+            <h3 style="margin:0 0 4px;">Add mapping</h3>
+            <p style="color:var(--text-secondary); font-size:12px; margin:0 0 14px;">
+                Links this exact eBay item/variation to an EXISTING catalog variant —
+                use this only when the card and its inventory are already correct and
+                the gap is purely a missing mapping. For a card that needs new
+                inventory too, use "New Local Purchase" on the Staging Review page instead.
+            </p>
+            <div style="background:var(--bg-tertiary); border:1px solid var(--border); border-radius:6px;
+                        padding:8px 10px; margin-bottom:14px; font-size:12px;">
+                <div><strong>Item ID:</strong> ${escapeHtml(row.item_id || '')}</div>
+                <div><strong>Variation:</strong> ${escapeHtml(row.variation_name || '')}</div>
+            </div>
+            <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">
+                Search for the card
+            </label>
+            <input type="text" id="am-search" placeholder="Card name..." style="width:100%; margin-bottom:10px;" autocomplete="off" />
+            <div id="am-results" style="max-height:260px; overflow-y:auto; margin-bottom:10px;"></div>
+            <div id="am-selected" style="font-size:13px; margin-bottom:10px;"></div>
+            <div id="am-msg" style="font-size:12px; margin-bottom:10px;"></div>
+            <div style="display:flex; gap:8px;">
+                <button class="btn btn-primary" id="am-save-btn" disabled>Save mapping</button>
+                <button class="btn" id="am-cancel-btn">Cancel</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    let selected = null;
+    const resultsEl  = overlay.querySelector('#am-results');
+    const selectedEl = overlay.querySelector('#am-selected');
+    const msgEl      = overlay.querySelector('#am-msg');
+    const saveBtn    = overlay.querySelector('#am-save-btn');
+
+    overlay.querySelector('#am-cancel-btn').addEventListener('click', () => overlay.remove());
+
+    overlay.querySelector('#am-search').addEventListener('input', debounce(async (e) => {
+        const term = e.target.value.trim();
+        if (!term) { resultsEl.innerHTML = ''; return; }
+
+        const { data, error } = await supabase
+            .from('v_card_variants')
+            .select('card_id, variant_id, card_name, set_name, display_number, rarity, image_url, '
+                   + 'foil_label, pattern_label, texture_label, material_label, size_label, stamp_label, source_label')
+            .ilike('card_name', `%${term}%`)
+            .order('card_name')
+            .limit(30);
+
+        if (error) {
+            resultsEl.innerHTML = `<p style="color:var(--danger); font-size:12px;">${escapeHtml(error.message)}</p>`;
+            return;
+        }
+        if (!data || !data.length) {
+            resultsEl.innerHTML = `<p style="color:var(--text-secondary); font-size:12px;">No matches.</p>`;
+            return;
+        }
+
+        resultsEl.innerHTML = data.map((v, i) => {
+            const variantLabel = [v.foil_label, v.pattern_label, v.texture_label, v.material_label, v.size_label, v.stamp_label, v.source_label]
+                .filter(Boolean).join(' · ') || 'Non-Holo';
+            return `
+                <div class="am-result" data-idx="${i}"
+                     style="padding:6px 8px; border:1px solid var(--border); border-radius:4px;
+                            margin-bottom:4px; cursor:pointer; font-size:13px;">
+                    <strong>${escapeHtml(v.card_name)}</strong>
+                    — ${escapeHtml(v.set_name || '')} #${escapeHtml(v.display_number || '')}
+                    <span style="color:var(--text-secondary);">(${escapeHtml(variantLabel)}${v.rarity ? ', ' + escapeHtml(v.rarity) : ''})</span>
+                </div>
+            `;
+        }).join('');
+
+        resultsEl.querySelectorAll('.am-result').forEach(el => {
+            el.addEventListener('click', () => {
+                selected = data[Number(el.dataset.idx)];
+                const variantLabel = [selected.foil_label, selected.pattern_label, selected.texture_label,
+                                       selected.material_label, selected.size_label, selected.stamp_label, selected.source_label]
+                    .filter(Boolean).join(' · ') || 'Non-Holo';
+                selectedEl.innerHTML = `<span style="color:var(--success);">Selected:</span> ${escapeHtml(selected.card_name)} `
+                    + `— ${escapeHtml(selected.set_name || '')} #${escapeHtml(selected.display_number || '')} `
+                    + `(${escapeHtml(variantLabel)})`;
+                saveBtn.disabled = false;
+            });
+        });
+    }, 300));
+
+    saveBtn.addEventListener('click', async () => {
+        if (!selected) return;
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving...';
+        msgEl.textContent = '';
+
+        const { error } = await supabase
+            .from('ebay_listing_map')
+            .upsert({
+                item_id: row.item_id,
+                variation_name: row.variation_name,
+                variant_id: selected.variant_id,
+                condition: 'Near Mint',
+                source: 'manual_map',
+                last_synced_at: new Date().toISOString(),
+            }, { onConflict: 'item_id,variation_name' });
+
+        if (error) {
+            msgEl.innerHTML = `<span style="color:var(--danger);">Failed: ${escapeHtml(error.message)}</span>`;
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save mapping';
+            return;
+        }
+
+        msgEl.innerHTML = `<span style="color:var(--success);">Mapping saved — this issue will auto-resolve on the next --ebay-pullorders run.</span>`;
+        setTimeout(() => overlay.remove(), 1800);
+    });
 }
 
 function escapeHtml(str) {
