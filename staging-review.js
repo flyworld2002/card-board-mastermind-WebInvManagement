@@ -2602,6 +2602,22 @@ function openNewLocalPurchaseModal(container) {
                 </label>
             </div>
 
+            <div style="margin-bottom:12px; padding:10px; border:1px solid var(--border); border-radius:6px;">
+                <label style="font-size:13px; display:flex; align-items:center; gap:6px;">
+                    <input type="checkbox" class="nlp-edit-ebay-link" />
+                    Link to an eBay listing (resolves an "unmatched" Issue for this exact variation on approval)
+                </label>
+                <div class="nlp-ebay-link-fields" style="display:none; gap:12px; margin-top:8px; flex-wrap:wrap;">
+                    <label>eBay Item ID
+                        <input type="text" class="nlp-edit-ebay-item-id" style="width:160px;" placeholder="e.g. 335777076705" />
+                    </label>
+                    <label>eBay variation name
+                        <input type="text" class="nlp-edit-ebay-variation-name" style="width:320px;"
+                               placeholder="exact string from the Issue, e.g. 072/131 Drakloak Master Ball RH Reverse Holo" />
+                    </label>
+                </div>
+            </div>
+
             <div class="nlp-rematch-results" style="margin-bottom:8px;"></div>
             <div class="nlp-vp-msg" style="margin-bottom:8px; font-size:13px;"></div>
 
@@ -2614,6 +2630,10 @@ function openNewLocalPurchaseModal(container) {
         const setInput   = formDiv.querySelector('.nlp-edit-set-name');
         const numInput   = formDiv.querySelector('.nlp-edit-card-number');
         const resultsEl  = formDiv.querySelector('.nlp-rematch-results');
+
+        formDiv.querySelector('.nlp-edit-ebay-link').addEventListener('change', (e) => {
+            formDiv.querySelector('.nlp-ebay-link-fields').style.display = e.target.checked ? 'flex' : 'none';
+        });
 
         // Reset match state for this fresh card
         vRow = { card_id: null, _matchedItem: null };
@@ -2869,10 +2889,20 @@ function openNewLocalPurchaseModal(container) {
             const srcType      = formDiv.querySelector('.nlp-edit-source-type').value || null;
             const notes        = formDiv.querySelector('.nlp-edit-notes').value.trim() || null;
 
+            const linkToEbay   = formDiv.querySelector('.nlp-edit-ebay-link').checked;
+            const ebayItemId   = formDiv.querySelector('.nlp-edit-ebay-item-id').value.trim() || null;
+            const ebayVarName  = formDiv.querySelector('.nlp-edit-ebay-variation-name').value.trim() || null;
+            if (linkToEbay && (!ebayItemId || !ebayVarName)) {
+                msg.innerHTML = `<span style="color:var(--danger)">eBay Item ID and variation name are both required to link a listing.</span>`;
+                return;
+            }
+
             addedCards.push({
                 card_id: cardId, card_name: cardName, set_name: setName, card_number: cardNumber,
                 condition, foil_type: foilType, foil_pattern: pattern, texture, material, size,
                 stamp_type: stamp, source_type: srcType, notes, qty, cost, listing_price: listingPrice,
+                ebay_item_id: linkToEbay ? ebayItemId : null,
+                ebay_variation_name: linkToEbay ? ebayVarName : null,
             });
 
             renderAddedList();
@@ -2973,6 +3003,7 @@ function openNewLocalPurchaseModal(container) {
                     <span style="color:var(--text-secondary); font-size:11px;">
                         ${escapeHtml(c.set_name)} #${escapeHtml(c.card_number)} · ${escapeHtml(c.foil_type)}
                     </span>
+                    ${c.ebay_item_id ? `<span style="color:var(--accent); font-size:11px; display:block;">🔗 linked to eBay item ${escapeHtml(c.ebay_item_id)}</span>` : ''}
                 </div>
                 <span style="font-size:12px; color:var(--text-secondary);">${c.qty} × ${formatPrice(c.cost)}</span>
                 <button class="btn nlp-remove-added-btn" data-idx="${i}" style="font-size:11px; padding:2px 8px; color:var(--danger); border-color:var(--danger);">✕</button>
@@ -3000,9 +3031,19 @@ function openNewLocalPurchaseModal(container) {
 
         msg.innerHTML = `<span style="color:var(--text-secondary)">Saving ${addedCards.length} card(s)...</span>`;
 
+        // A card checked "Link to an eBay listing" needs source='ebay' with
+        // order_number/variation_name set to the exact (item_id, variation
+        // name) pair — push_staging_row_to_inventory's step 7 only inserts
+        // into ebay_listing_map (and platform_listings) when source='ebay',
+        // so every other card in the batch is completely unaffected and
+        // keeps today's plain 'local' behavior.
         const rows = addedCards.map(c => ({
-            import_batch: batchRef, order_number: batchRef, order_date: orderDate,
-            source: 'local', card_name: c.card_name, set_name: c.set_name, card_number: c.card_number,
+            import_batch: batchRef,
+            order_number: c.ebay_item_id || batchRef,
+            order_date: orderDate,
+            source: c.ebay_item_id ? 'ebay' : 'local',
+            variation_name: c.ebay_variation_name || null,
+            card_name: c.card_name, set_name: c.set_name, card_number: c.card_number,
             condition: c.condition, quantity: c.qty, price: c.cost, listing_price: c.listing_price,
             card_id: c.card_id, match_status: 'matched', status: 'approved',
             foil_type: c.foil_type, foil_pattern: c.foil_pattern, texture: c.texture,
