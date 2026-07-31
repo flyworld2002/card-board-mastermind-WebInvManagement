@@ -1892,8 +1892,15 @@ async function openBalanceQtyModal(container, body, variantId, cardLabelText, ro
 
     const [{ data: invRows, error: invErr }, { data: plRows, error: plErr }] = await Promise.all([
         supabase.from('inventory').select('quantity, quantity_sold').eq('variant_id', variantId).eq('is_graded', false),
-        supabase.from('platform_listings').select('id, platform, listing_id, account, quantity_listed, external_id')
-            .eq('variant_id', variantId).eq('status', 'active').order('listing_id'),
+        // 'active' AND 'out_of_stock' — an OOS listing is still live on eBay
+        // (revise_single_variation_qty can still find and update its
+        // variation), it just currently shows 0. Excluding it here meant a
+        // listing that sold out silently dropped out of the balance pool
+        // and could never receive a fair share back on a later "Evenly
+        // split" — 'delisted' is the only status genuinely excluded, since
+        // that variation isn't live on eBay at all anymore to revise.
+        supabase.from('platform_listings').select('id, platform, listing_id, account, quantity_listed, external_id, status')
+            .eq('variant_id', variantId).in('status', ['active', 'out_of_stock']).order('listing_id'),
     ]);
     if (invErr || plErr) {
         root.querySelector('#lp-balance-loading').textContent = `Failed to load: ${(invErr || plErr).message}`;
@@ -1928,7 +1935,7 @@ function renderBalanceQtyBody(root, container, rows, totalInventory, templateNam
                 ${rows.map(r => `
                     <tr>
                         <td>
-                            <div>${escapeHtml(templateNameByListingId[r.listing_id] || '(no template)')}</div>
+                            <div>${escapeHtml(templateNameByListingId[r.listing_id] || '(no template)')}${r.status === 'out_of_stock' ? ' <span style="color:var(--warning, var(--text-secondary)); font-size:11px;">(out of stock)</span>' : ''}</div>
                             <div style="font-size:11px; color:var(--text-secondary);">${escapeHtml(r.listing_id)}${r.account ? ` · ${escapeHtml(r.account)}` : ''}</div>
                         </td>
                         <td><input type="number" min="0" class="lp-balance-qty-input" data-pl-id="${r.id}" value="${r.quantity_listed ?? 0}" style="width:70px;" /></td>
