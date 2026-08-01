@@ -17,8 +17,8 @@ import { supabase, formatPrice } from './shared.js';
 
 // picking_api.py config — mirrors picking.js's constants (same service,
 // same shared secret). Keep these two in sync with picking.js if the
-// desktop's LAN IP or token ever changes.
-const PICKING_API_URL = 'http://192.168.1.186:8765';
+// desktop's Tailscale address or token ever changes.
+const PICKING_API_URL = 'https://desktop-tu1m2fc.tail2c58d7.ts.net:8765';
 const PICKING_API_TOKEN = 'I1knbOJAve_UZJQHAFZANds9-HalgCxcRJw1GXDg404';
 
 function escapeHtml(str) {

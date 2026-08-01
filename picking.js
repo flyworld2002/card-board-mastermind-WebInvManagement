@@ -32,9 +32,12 @@
 
 import { supabase } from './shared.js';
 
-// ── Config — EDIT THESE TWO for your LAN ─────────────────────────────────────
-// Desktop's reserved LAN IP + the port picking_api.py listens on.
-const PICKING_API_URL = 'http://192.168.1.186:8765';
+// ── Config — EDIT THESE TWO for your setup ────────────────────────────────────
+// Desktop's Tailscale address (works from anywhere the caller's device is also
+// on the tailnet, not just the home LAN — see docs/plans/listing-pricing-system.md)
+// + the port picking_api.py listens on.
+const PICKING_API_URL = 'https://desktop-tu1m2fc.tail2c58d7.ts.net:8765';
+// const PICKING_API_URL = 'http://192.168.1.186:8765'  // home-LAN fallback
 // const PICKING_API_URL = 'http://localhost:8765'
 // Must equal PICKING_API_TOKEN in the desktop's .env.
 const PICKING_API_TOKEN = 'I1knbOJAve_UZJQHAFZANds9-HalgCxcRJw1GXDg404';

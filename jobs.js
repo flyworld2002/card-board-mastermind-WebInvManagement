@@ -14,7 +14,8 @@
 
 import { supabase } from './shared.js';
 
-const PICKING_API_URL = 'http://192.168.1.186:8765';
+const PICKING_API_URL = 'https://desktop-tu1m2fc.tail2c58d7.ts.net:8765';
+// const PICKING_API_URL = 'http://192.168.1.186:8765'  // home-LAN fallback
 // const PICKING_API_URL = 'http://localhost:8765'
 const PICKING_API_TOKEN = 'I1knbOJAve_UZJQHAFZANds9-HalgCxcRJw1GXDg404';
 

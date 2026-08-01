@@ -10,7 +10,7 @@ const PLATFORMS  = ['ebay', 'tcgplayer', 'amazon', 'shopify', 'wix'];
 // Same picking_api.py the Jobs page and Picking tab talk to — see jobs.js
 // for the full background-job flow. Inventory only ever fires the POST
 // that starts a refresh job; progress/history lives on the Jobs page.
-const PICKING_API_URL = 'http://192.168.1.186:8765';
+const PICKING_API_URL = 'https://desktop-tu1m2fc.tail2c58d7.ts.net:8765';
 const PICKING_API_TOKEN = 'I1knbOJAve_UZJQHAFZANds9-HalgCxcRJw1GXDg404';
 
 async function startMarketPriceRefresh(body) {
