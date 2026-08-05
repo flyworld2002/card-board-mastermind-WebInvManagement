@@ -727,7 +727,7 @@ function draftMetadataHTML() {
                     ${missing.length ? `Missing: ${escapeHtml(missing.join(', '))}` : 'Complete'}
                 </span>
                 <button class="btn" id="lp-clone-metadata-btn" style="margin-left:auto;">Clone from existing listing</button>
-                <button class="btn" id="lp-manual-metadata-btn">Edit manually</button>
+                <button class="btn" id="lp-manual-metadata-btn">Edit fields</button>
             </div>
             ${t.title ? `
                 <div style="font-size:12px; color:var(--text-secondary); margin-bottom:10px;">
