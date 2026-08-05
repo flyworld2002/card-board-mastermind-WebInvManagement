@@ -1,11 +1,12 @@
 // jobs.js
 // Jobs page: control room for long-running background work that runs on
 // picking_api.py's generic job registry (importer/job_runner.py on the
-// CBMM side). Currently the only job type is market price refresh —
-// adding a new job type later means adding one more POST endpoint in
-// picking_api.py plus one more "start" box below; the job list/progress
-// rendering is generic (keyed by job_type/label/status/progress) and
-// needs no changes to support it. See docs/plans/listing-pricing-system.md.
+// CBMM side). Two job types so far: market price refresh, and Excel-to-
+// staging import. Adding another one later means adding one more POST
+// endpoint in picking_api.py plus one more "start" box below; the job
+// list itself is generic (keyed by job_type/label/status/progress) and
+// needs no changes beyond a jobProgressText() case for the new type's
+// shape. See docs/plans/listing-pricing-system.md.
 //
 // Job state lives in picking_api.py's process memory only (lost on
 // restart) — this page just polls it. Polling only runs while at least
@@ -98,6 +99,25 @@ export async function renderJobs(container) {
             <div id="jobs-start-error" style="color:var(--danger); font-size:12px; margin-top:10px;"></div>
         </div>
 
+        <div style="border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:24px;">
+            <h3 style="margin:0 0 6px;">Import cards from Excel</h3>
+            <p style="color:var(--text-secondary); font-size:12px; margin:0 0 14px;">
+                Upload a filled-out spreadsheet (see docs/plans/card_import_template.xlsx in the
+                Card-Board-MasterMind repo for the expected columns) — matches each row to your
+                catalog, falls back to a live PokemonTCG API search, then creates the card
+                directly from the sheet as a last resort. Lands in staging just like any other
+                import; review/approve from the Staging Review page afterward.
+            </p>
+            <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+                <input type="file" id="jobs-excel-file" accept=".xlsx" />
+                <label style="font-size:12px; color:var(--text-secondary); display:flex; align-items:center; gap:6px;">
+                    <input type="checkbox" id="jobs-excel-dryrun" checked /> Dry run (preview only, writes nothing)
+                </label>
+                <button class="btn btn-primary" id="jobs-start-excel-btn">Start import</button>
+            </div>
+            <div id="jobs-excel-error" style="color:var(--danger); font-size:12px; margin-top:10px;"></div>
+        </div>
+
         <h3 style="margin:0 0 8px;">Recent jobs</h3>
         <div id="jobs-list-wrap"><p style="color:var(--text-secondary);">Loading...</p></div>
     `;
@@ -175,6 +195,36 @@ function wireStartControls(container) {
         cardBtn.disabled = true;
         await refreshJobsList(container);
     });
+
+    const excelErrBox = container.querySelector('#jobs-excel-error');
+    container.querySelector('#jobs-start-excel-btn').addEventListener('click', async () => {
+        excelErrBox.textContent = '';
+        const fileInput = container.querySelector('#jobs-excel-file');
+        const dryRun = container.querySelector('#jobs-excel-dryrun').checked;
+        const file = fileInput.files[0];
+        if (!file) { excelErrBox.textContent = 'Choose a spreadsheet first.'; return; }
+
+        const form = new FormData();
+        form.append('file', file);
+        form.append('dry_run', String(dryRun));
+
+        try {
+            const resp = await fetch(`${PICKING_API_URL}/api/jobs/excel-import`, {
+                method: 'POST',
+                headers: { 'x-picking-token': PICKING_API_TOKEN },
+                body: form,
+            });
+            if (!resp.ok) {
+                const detail = await resp.text().catch(() => '');
+                throw new Error(`${resp.status} ${detail}`);
+            }
+        } catch (err) {
+            excelErrBox.textContent = `Failed to start import: ${err.message} — is picking_api.py running and reachable at ${PICKING_API_URL}?`;
+            return;
+        }
+        fileInput.value = '';
+        await refreshJobsList(container);
+    });
 }
 
 function jobStatusBadge(status) {
@@ -193,6 +243,18 @@ function jobProgressText(job) {
         if (p.variants_updated != null) parts.push(`${p.variants_updated} prices updated`);
         if (p.failed) parts.push(`${p.failed} failed`);
         return parts.join(' · ');
+    }
+    if (job.job_type === 'excel_import') {
+        if (p.phase === 'parsing') return 'Parsing spreadsheet...';
+        if (p.phase === 'api_lookup') return `Checking PokemonTCG API: ${p.done ?? 0}/${p.total ?? '?'}`;
+        if (p.phase === 'writing') return 'Writing to staging...';
+        if (p.phase === 'done' || job.result) {
+            const r = job.result || p;
+            if (r.error) return r.error;
+            const created = (r.created_api ?? 0) + (r.created_manual ?? 0);
+            return `${r.staged ?? 0} staged · ${r.matched ?? 0} matched (${created} new) · `
+                + `${r.ambiguous ?? 0} ambiguous · ${r.skipped ?? 0} skipped`;
+        }
     }
     if (job.status === 'failed' && job.error) return job.error;
     return '-';
