@@ -738,7 +738,7 @@ function metadataPanelHTML(isDraft) {
         <span style="font-size:12px; color:var(--text-secondary);">
             ${t.title ? `"${escapeHtml(t.title)}"` : '<em>No title set</em>'}
             ${t.title ? (
-                selfSynced ? ' — synced from eBay'
+                selfSynced ? ' — header synced from eBay'
                 : t.source === 'cloned' ? ` — cloned from ${escapeHtml(t.cloned_from_listing_id || '?')}`
                 : ' — set manually'
             ) : ''}
@@ -750,8 +750,8 @@ function metadataPanelHTML(isDraft) {
         ` : ''}
         ${isDraft ? `<button class="btn" id="lp-clone-metadata-btn" style="margin-left:auto;">Clone from existing listing</button>` : ''}
         ${!isDraft ? `<button class="btn" id="lp-sync-metadata-btn" style="margin-left:auto;"
-                              title="Re-fetch this listing's current title/description/category/policies from eBay, overwriting anything stored locally">
-                          Sync from eBay
+                              title="Re-fetch this listing's header info (title/description/category/location/policies) from eBay, overwriting anything stored locally — does not touch cards, roster, pricing, or quantities">
+                          Sync header from eBay
                       </button>` : ''}
         <button class="btn" id="lp-manual-metadata-btn">Edit fields</button>
         ${isDraft ? `
@@ -782,9 +782,9 @@ async function doSyncFromEbay(container) {
     const listingId = state.template.listing_id;
 
     const confirmed = window.confirm(
-        `Re-fetch title/description/category/location/policies for eBay listing ${listingId} `
-        + `and overwrite whatever's stored locally? This only updates our own record — nothing is `
-        + `sent to eBay.`
+        `Re-fetch header info (title/description/category/location/policies) for eBay listing `
+        + `${listingId} and overwrite whatever's stored locally? Cards, roster, pricing, and `
+        + `quantities are untouched. This only updates our own record — nothing is sent to eBay.`
     );
     if (!confirmed) return;
 
