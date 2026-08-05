@@ -657,7 +657,10 @@ function renderBody(container) {
         </div>
         <div id="lp-push-msg" style="font-size:13px; margin-bottom:12px;"></div>
 
-        ${metadataPanelHTML(isDraft)}
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px; flex-wrap:wrap; padding-bottom:12px; border-bottom:1px solid var(--border);">
+            ${metadataPanelHTML(isDraft)}
+        </div>
+        <div id="lp-create-listing-msg" style="font-size:13px; margin-bottom:14px;"></div>
 
         ${state.unimportedCount > 0 ? `
             <div style="padding:10px 14px; background:rgba(74,140,255,0.1); border:1px solid var(--accent); border-radius:6px; margin-bottom:14px; display:flex; align-items:center; gap:12px;">
@@ -715,8 +718,12 @@ const METADATA_FIELDS = [
     ['shipping_policy_id', 'Shipping policy'],
 ];
 
-// Shown for BOTH draft templates (pre-creation: clone/edit + preview +
-// create) and already-live ones (post-creation: edit + revise only — no
+// Inline header-level content — NOT a boxed panel, deliberately (Fei's
+// call: this is top-level listing identity, not roster-page furniture,
+// so it lives directly in the header area renderBody() wraps this in,
+// not buried in its own box further down the page). Shown for BOTH
+// draft templates (pre-creation: clone/edit + preview + create) and
+// already-live ones (post-creation: edit + revise only — no
 // clone/preview/create, since the listing already exists). Same "Edit
 // fields" modal either way; only what happens on Save differs (DB-only
 // for a draft, a real ReviseFixedPriceItem call for a live listing —
@@ -726,35 +733,26 @@ function metadataPanelHTML(isDraft) {
     const missing = METADATA_FIELDS.filter(([key]) => !t[key]).map(([, label]) => label);
 
     return `
-        <div style="border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:14px;">
-            <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px; flex-wrap:wrap;">
-                <strong style="font-size:13px;">Listing metadata</strong>
-                ${isDraft ? `
-                    <span style="font-size:12px; color:${missing.length ? 'var(--warning)' : 'var(--success)'};">
-                        ${missing.length ? `Missing: ${escapeHtml(missing.join(', '))}` : 'Complete'}
-                    </span>
-                ` : ''}
-                ${isDraft ? `<button class="btn" id="lp-clone-metadata-btn" style="margin-left:auto;">Clone from existing listing</button>` : ''}
-                <button class="btn" id="lp-manual-metadata-btn" style="${isDraft ? '' : 'margin-left:auto;'}">Edit fields</button>
-            </div>
-            ${t.title ? `
-                <div style="font-size:12px; color:var(--text-secondary); margin-bottom:10px;">
-                    "${escapeHtml(t.title)}" — ${t.source === 'cloned'
-                        ? `cloned from ${escapeHtml(t.cloned_from_listing_id || '?')}`
-                        : 'set manually'}
-                </div>
-            ` : ''}
-            <div id="lp-create-listing-msg" style="font-size:13px; margin-bottom:8px;"></div>
-            ${isDraft ? `
-                <div style="display:flex; gap:8px;">
-                    <button class="btn" id="lp-preview-listing-btn">Preview readiness</button>
-                    <button class="btn btn-primary" id="lp-create-listing-btn" ${missing.length ? 'disabled' : ''}
-                            title="${missing.length ? 'Fill in the missing metadata above first' : ''}">
-                        Create listing
-                    </button>
-                </div>
-            ` : ''}
-        </div>
+        <span style="font-size:12px; color:var(--text-secondary);">
+            ${t.title ? `"${escapeHtml(t.title)}"` : '<em>No title set</em>'}
+            ${t.title ? (t.source === 'cloned'
+                ? ` — cloned from ${escapeHtml(t.cloned_from_listing_id || '?')}`
+                : ' — set manually') : ''}
+        </span>
+        ${isDraft ? `
+            <span style="font-size:12px; color:${missing.length ? 'var(--warning)' : 'var(--success)'};">
+                ${missing.length ? `Missing: ${escapeHtml(missing.join(', '))}` : 'Metadata complete'}
+            </span>
+        ` : ''}
+        ${isDraft ? `<button class="btn" id="lp-clone-metadata-btn" style="margin-left:auto;">Clone from existing listing</button>` : ''}
+        <button class="btn" id="lp-manual-metadata-btn" style="${isDraft ? '' : 'margin-left:auto;'}">Edit fields</button>
+        ${isDraft ? `
+            <button class="btn" id="lp-preview-listing-btn">Preview readiness</button>
+            <button class="btn btn-primary" id="lp-create-listing-btn" ${missing.length ? 'disabled' : ''}
+                    title="${missing.length ? 'Fill in the missing metadata above first' : ''}">
+                Create listing
+            </button>
+        ` : ''}
     `;
 }
 
