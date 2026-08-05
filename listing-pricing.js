@@ -732,12 +732,16 @@ function metadataPanelHTML(isDraft) {
     const t = state.template;
     const missing = METADATA_FIELDS.filter(([key]) => !t[key]).map(([, label]) => label);
 
+    const selfSynced = t.source === 'cloned' && t.cloned_from_listing_id === t.listing_id;
+
     return `
         <span style="font-size:12px; color:var(--text-secondary);">
             ${t.title ? `"${escapeHtml(t.title)}"` : '<em>No title set</em>'}
-            ${t.title ? (t.source === 'cloned'
-                ? ` — cloned from ${escapeHtml(t.cloned_from_listing_id || '?')}`
-                : ' — set manually') : ''}
+            ${t.title ? (
+                selfSynced ? ' — synced from eBay'
+                : t.source === 'cloned' ? ` — cloned from ${escapeHtml(t.cloned_from_listing_id || '?')}`
+                : ' — set manually'
+            ) : ''}
         </span>
         ${isDraft ? `
             <span style="font-size:12px; color:${missing.length ? 'var(--warning)' : 'var(--success)'};">
@@ -745,7 +749,11 @@ function metadataPanelHTML(isDraft) {
             </span>
         ` : ''}
         ${isDraft ? `<button class="btn" id="lp-clone-metadata-btn" style="margin-left:auto;">Clone from existing listing</button>` : ''}
-        <button class="btn" id="lp-manual-metadata-btn" style="${isDraft ? '' : 'margin-left:auto;'}">Edit fields</button>
+        ${!isDraft ? `<button class="btn" id="lp-sync-metadata-btn" style="margin-left:auto;"
+                              title="Re-fetch this listing's current title/description/category/policies from eBay, overwriting anything stored locally">
+                          Sync from eBay
+                      </button>` : ''}
+        <button class="btn" id="lp-manual-metadata-btn">Edit fields</button>
         ${isDraft ? `
             <button class="btn" id="lp-preview-listing-btn">Preview readiness</button>
             <button class="btn btn-primary" id="lp-create-listing-btn" ${missing.length ? 'disabled' : ''}
@@ -759,11 +767,36 @@ function metadataPanelHTML(isDraft) {
 function wireMetadataControls(container, body, isDraft) {
     const cloneBtn = body.querySelector('#lp-clone-metadata-btn');
     if (cloneBtn) cloneBtn.addEventListener('click', () => openCloneMetadataModal(container, body));
+    const syncBtn = body.querySelector('#lp-sync-metadata-btn');
+    if (syncBtn) syncBtn.addEventListener('click', () => doSyncFromEbay(container));
     body.querySelector('#lp-manual-metadata-btn').addEventListener('click', () => openManualMetadataModal(container, body, isDraft));
     const previewBtn = body.querySelector('#lp-preview-listing-btn');
     if (previewBtn) previewBtn.addEventListener('click', () => doPreviewNewListing(container));
     const createBtn = body.querySelector('#lp-create-listing-btn');
     if (createBtn && !createBtn.disabled) createBtn.addEventListener('click', () => doCreateListing(container));
+}
+
+async function doSyncFromEbay(container) {
+    const body = container.querySelector('#lp-body');
+    const msg = body.querySelector('#lp-create-listing-msg');
+    const listingId = state.template.listing_id;
+
+    const confirmed = window.confirm(
+        `Re-fetch title/description/category/location/policies for eBay listing ${listingId} `
+        + `and overwrite whatever's stored locally? This only updates our own record — nothing is `
+        + `sent to eBay.`
+    );
+    if (!confirmed) return;
+
+    msg.innerHTML = `<span style="color:var(--text-secondary);">Syncing from eBay...</span>`;
+    try {
+        await callCloneMetadata(listingId);
+        msg.innerHTML = `<span style="color:var(--success);">Synced.</span>`;
+        await loadListing(container);
+    } catch (err) {
+        console.error(err);
+        msg.innerHTML = `<span style="color:var(--danger)">Sync failed: ${escapeHtml(err.message)}</span>`;
+    }
 }
 
 async function callBusinessPolicies() {
