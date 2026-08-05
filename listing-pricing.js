@@ -905,13 +905,27 @@ async function openCloneMetadataModal(container, body) {
 async function openManualMetadataModal(container, body, isDraft) {
     const t = state.template;
     let policies = { payment: [], return: [], shipping: [] };
+    let priorTemplates = [];
     try {
-        policies = await callBusinessPolicies();
+        [policies, priorTemplates] = await Promise.all([
+            callBusinessPolicies(),
+            supabase.from('listing_templates')
+                .select('category_id, listing_duration, item_location, item_country, item_postal_code, condition_id')
+                .then(({ data }) => data || []),
+        ]);
     } catch (err) {
-        console.error('Failed to load business policies:', err);
+        console.error('Failed to load business policies / prior templates:', err);
     }
 
+    // Distinct non-null values already used on ANY template — for fields
+    // that are almost always the same across Fei's listings (category,
+    // duration, location, policies are already dropdowns for the same
+    // reason), a dropdown of "what you've used before" beats retyping a
+    // raw ID/code every time, with an escape hatch for a genuinely new one.
+    const priorValues = (key) => [...new Set(priorTemplates.map(r => r[key]).filter(Boolean))].sort();
+
     const root = body.querySelector('#lp-modal-root');
+    const OTHER = '__other__';
     const policySelect = (id, label, current, options) => `
         <label style="font-size:13px; display:block; margin-bottom:10px;">${label}
             <select id="${id}" style="width:100%; margin-top:4px;">
@@ -922,6 +936,24 @@ async function openManualMetadataModal(container, body, isDraft) {
             </select>
         </label>
     `;
+    // A dropdown of previously-used values plus "Other (type new)..." —
+    // selecting Other reveals a paired free-text input. wireSelectOrOther()
+    // toggles that input's visibility; valOrOther() reads whichever is active.
+    const selectOrOtherField = (id, label, value, options) => {
+        const known = options.includes(value);
+        return `
+            <label style="font-size:13px; display:block; margin-bottom:10px;">${label}
+                <select id="${id}" style="width:100%; margin-top:4px;">
+                    <option value="">(none)</option>
+                    ${options.map(o => `<option value="${escapeHtml(o)}" ${value === o ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('')}
+                    <option value="${OTHER}" ${value && !known ? 'selected' : ''}>Other (type new)...</option>
+                </select>
+                <input type="text" id="${id}-other" placeholder="Type a new value"
+                       value="${escapeHtml(value && !known ? value : '')}"
+                       style="width:100%; margin-top:4px; display:${value && !known ? 'block' : 'none'};" />
+            </label>
+        `;
+    };
     const textField = (id, label, value, multiline = false) => `
         <label style="font-size:13px; display:block; margin-bottom:10px;">${label}
             ${multiline
@@ -938,14 +970,14 @@ async function openManualMetadataModal(container, body, isDraft) {
                     This listing is already live — saving revises it on eBay for real
                     (${escapeHtml(t.listing_id || '')}), not just a local edit.
                 </p>` : ''}
-                ${textField('lp-meta-category', 'Category ID', t.category_id)}
+                ${selectOrOtherField('lp-meta-category', 'Category ID', t.category_id, priorValues('category_id'))}
                 ${textField('lp-meta-title', 'Title', t.title)}
                 ${textField('lp-meta-description', 'Description (HTML)', t.description_html, true)}
-                ${textField('lp-meta-duration', 'Listing duration (e.g. GTC)', t.listing_duration)}
-                ${textField('lp-meta-location', 'Location', t.item_location)}
-                ${textField('lp-meta-country', 'Country (e.g. US)', t.item_country)}
-                ${textField('lp-meta-postal', 'Postal code', t.item_postal_code)}
-                ${textField('lp-meta-condition', 'Condition ID (e.g. 4000 = Ungraded)', t.condition_id)}
+                ${selectOrOtherField('lp-meta-duration', 'Listing duration', t.listing_duration, priorValues('listing_duration'))}
+                ${selectOrOtherField('lp-meta-location', 'Location', t.item_location, priorValues('item_location'))}
+                ${selectOrOtherField('lp-meta-country', 'Country', t.item_country, priorValues('item_country'))}
+                ${selectOrOtherField('lp-meta-postal', 'Postal code', t.item_postal_code, priorValues('item_postal_code'))}
+                ${selectOrOtherField('lp-meta-condition', 'Condition ID', t.condition_id, priorValues('condition_id'))}
                 ${policySelect('lp-meta-payment', 'Payment policy', t.payment_policy_id, policies.payment)}
                 ${policySelect('lp-meta-return', 'Return policy', t.return_policy_id, policies.return)}
                 ${policySelect('lp-meta-shipping', 'Shipping policy', t.shipping_policy_id, policies.shipping)}
@@ -958,18 +990,34 @@ async function openManualMetadataModal(container, body, isDraft) {
         </div>
     `;
 
+    const wireSelectOrOther = (id) => {
+        const select = root.querySelector(`#${id}`);
+        const other = root.querySelector(`#${id}-other`);
+        select.addEventListener('change', () => {
+            other.style.display = select.value === OTHER ? 'block' : 'none';
+        });
+    };
+    ['lp-meta-category', 'lp-meta-duration', 'lp-meta-location', 'lp-meta-country',
+     'lp-meta-postal', 'lp-meta-condition'].forEach(wireSelectOrOther);
+
+    const valOrOther = (id) => {
+        const select = root.querySelector(`#${id}`);
+        if (select.value === OTHER) return root.querySelector(`#${id}-other`).value.trim() || null;
+        return select.value || null;
+    };
+
     root.querySelector('#lp-meta-cancel').addEventListener('click', () => { root.innerHTML = ''; });
     root.querySelector('#lp-meta-save').addEventListener('click', async () => {
         const val = id => root.querySelector(id).value.trim() || null;
         const fields = {
-            category_id: val('#lp-meta-category'),
+            category_id: valOrOther('lp-meta-category'),
             title: val('#lp-meta-title'),
             description_html: val('#lp-meta-description'),
-            listing_duration: val('#lp-meta-duration'),
-            item_location: val('#lp-meta-location'),
-            item_country: val('#lp-meta-country'),
-            item_postal_code: val('#lp-meta-postal'),
-            condition_id: val('#lp-meta-condition'),
+            listing_duration: valOrOther('lp-meta-duration'),
+            item_location: valOrOther('lp-meta-location'),
+            item_country: valOrOther('lp-meta-country'),
+            item_postal_code: valOrOther('lp-meta-postal'),
+            condition_id: valOrOther('lp-meta-condition'),
             payment_policy_id: val('#lp-meta-payment'),
             return_policy_id: val('#lp-meta-return'),
             shipping_policy_id: val('#lp-meta-shipping'),
