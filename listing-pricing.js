@@ -103,6 +103,8 @@ function setupImagePreview(container) {
 let state = {
     platform: 'ebay',
     listingId: '',
+    templateId: null,        // primary lookup key once a template is open — set by
+                              // openTemplate(), works whether or not listing_id is set yet
     accountNum: 1,
     templates: [],           // all listing_templates rows (landing view)
     template: null,          // the one currently open, or null when on the landing view
@@ -147,6 +149,7 @@ async function renderTemplatesList(container) {
     const body = container.querySelector('#lp-body');
     body.innerHTML = '<p>Loading templates...</p>';
     state.template = null;
+    state.templateId = null;
 
     const { data, error } = await supabase.from('listing_templates').select('*').order('platform').order('name');
     if (error) {
@@ -201,10 +204,7 @@ async function openTemplate(container, templateId) {
     if (!t) return;
     state.platform = t.platform;
     state.listingId = t.listing_id || '';
-    if (!state.listingId) {
-        window.alert('This template has no eBay Item # (listing_id) yet — edit it first to set one.');
-        return;
-    }
+    state.templateId = t.id;
     await loadListing(container);
 }
 
@@ -396,10 +396,17 @@ async function loadListing(container) {
     state.selected = new Set();
 
     try {
-        const { data: template, error: tErr } = await supabase
-            .from('listing_templates').select('*')
-            .eq('platform', state.platform).eq('listing_id', state.listingId)
-            .maybeSingle();
+        // Once a template's been opened once, state.templateId is the
+        // reliable lookup key — works whether or not listing_id is set
+        // yet (a draft template's listing_id is NULL, and Supabase's
+        // .eq('listing_id', null) never matches, same as raw SQL). Falls
+        // back to the old (platform, listing_id) lookup only for the
+        // legacy "typed an Item # with no template yet" path, where the
+        // template's id isn't known until after createTemplate() inserts it.
+        const { data: template, error: tErr } = state.templateId
+            ? await supabase.from('listing_templates').select('*').eq('id', state.templateId).maybeSingle()
+            : await supabase.from('listing_templates').select('*')
+                  .eq('platform', state.platform).eq('listing_id', state.listingId).maybeSingle();
         if (tErr) throw tErr;
 
         state.template = template;
@@ -410,8 +417,19 @@ async function loadListing(container) {
             return;
         }
 
-        const [{ data: resolved, error: rErr }, { data: groups, error: gErr }, { count: platformCount }] = await Promise.all([
-            supabase.rpc('resolve_listing_prices', { p_platform: state.platform, p_listing_id: state.listingId }),
+        state.templateId = template.id;
+        // A draft template (no eBay Item # yet) can't be resolved via the
+        // (platform, listing_id) RPC path — migration 016 added a
+        // p_template_id path for exactly this. Nothing about the
+        // "unimported existing platform_listings rows" check applies
+        // either — there's no live listing yet for anything to be
+        // unimported from.
+        const isDraft = !template.listing_id;
+
+        const [{ data: resolved, error: rErr }, { data: groups, error: gErr }, platformCountResult] = await Promise.all([
+            supabase.rpc('resolve_listing_prices', isDraft
+                ? { p_platform: state.platform, p_template_id: template.id }
+                : { p_platform: state.platform, p_listing_id: state.listingId }),
             supabase.from('listing_card_groups').select('*').eq('template_id', template.id).order('name'),
             // Excludes 'delisted' rows — those are cards Remove-from-listing
             // already pulled off eBay, retained purely as history. They're
@@ -421,7 +439,8 @@ async function loadListing(container) {
             // "Import into roster" as if they were new, which would create
             // a duplicate 'active' roster entry for a listing that isn't
             // actually live on eBay.
-            supabase.from('platform_listings').select('id', { count: 'exact', head: true })
+            isDraft ? Promise.resolve({ count: 0 }) : supabase.from('platform_listings')
+                .select('id', { count: 'exact', head: true })
                 .eq('platform', state.platform).eq('listing_id', state.listingId).neq('status', 'delisted'),
         ]);
         if (rErr) throw rErr;
@@ -442,7 +461,7 @@ async function loadListing(container) {
         }
 
         const rosterPLIds = new Set(plIds);
-        state.unimportedCount = Math.max((platformCount || 0) - rosterPLIds.size, 0);
+        state.unimportedCount = isDraft ? 0 : Math.max((platformCountResult.count || 0) - rosterPLIds.size, 0);
 
         renderBody(container);
     } catch (err) {
@@ -517,9 +536,10 @@ function resolvedQty(r) {
 // or re-wire any listeners — only text/attribute content of derived,
 // non-input cells changes, so nothing needs re-wiring.
 async function refreshRowDerivedCells(container, rowId) {
-    const { data, error } = await supabase.rpc('resolve_listing_prices', {
-        p_platform: state.platform, p_listing_id: state.listingId,
-    });
+    const isDraft = !state.template?.listing_id;
+    const { data, error } = await supabase.rpc('resolve_listing_prices', isDraft
+        ? { p_platform: state.platform, p_template_id: state.template.id }
+        : { p_platform: state.platform, p_listing_id: state.listingId });
     if (error) { console.error('Failed to refresh row:', error); return; }
 
     const fresh = (data || []).find(r => r.row_id === rowId);
@@ -598,6 +618,7 @@ function statusBadge(status) {
 function renderBody(container) {
     const body = container.querySelector('#lp-body');
     const rows = state.resolvedRows;
+    const isDraft = !state.template.listing_id;
     const pending = rows.filter(r => r.status === 'active' && needsPush(r));
     const pendingGated = pending.filter(r => isGatedIn(r));
     // Queued rows might get promoted by a push (250-cap logic, decided
@@ -620,18 +641,23 @@ function renderBody(container) {
         <div style="display:flex; align-items:center; gap:12px; margin:16px 0; flex-wrap:wrap;">
             <h3 style="margin:0;">${escapeHtml(state.template.name)}</h3>
             <span style="font-size:12px; color:var(--text-secondary);">${escapeHtml(state.template.listing_kind)} listing</span>
-            <span style="font-size:13px; color:var(--text-secondary);">
-                ${rows.length} card(s) on roster
-                ${pendingGated.length > 0 ? ` · <span style="color:var(--warning);">${pendingGated.length} need push</span>` : ''}
-                ${queuedCount > 0 ? ` · <span style="color:var(--warning);">${queuedCount} queued</span>` : ''}
-                ${pendingGated.length === 0 && queuedCount === 0 ? ' · in sync' : ''}
-            </span>
-            <button class="btn btn-primary" id="lp-push-btn" style="margin-left:auto;" ${pushEnabled ? '' : 'disabled'}>
-                Push ${pendingGated.length > 0 ? `(${pendingGated.length})` : ''}
-            </button>
-            <button class="btn" id="lp-push-dryrun-btn">Dry-run</button>
+            ${isDraft
+                ? `<span class="badge" style="background:rgba(245,166,35,0.15); color:var(--warning);">draft — not live on eBay yet</span>
+                   <span style="font-size:13px; color:var(--text-secondary);">${rows.length} card(s) queued</span>`
+                : `<span style="font-size:13px; color:var(--text-secondary);">
+                       ${rows.length} card(s) on roster
+                       ${pendingGated.length > 0 ? ` · <span style="color:var(--warning);">${pendingGated.length} need push</span>` : ''}
+                       ${queuedCount > 0 ? ` · <span style="color:var(--warning);">${queuedCount} queued</span>` : ''}
+                       ${pendingGated.length === 0 && queuedCount === 0 ? ' · in sync' : ''}
+                   </span>
+                   <button class="btn btn-primary" id="lp-push-btn" style="margin-left:auto;" ${pushEnabled ? '' : 'disabled'}>
+                       Push ${pendingGated.length > 0 ? `(${pendingGated.length})` : ''}
+                   </button>
+                   <button class="btn" id="lp-push-dryrun-btn">Dry-run</button>`}
         </div>
         <div id="lp-push-msg" style="font-size:13px; margin-bottom:12px;"></div>
+
+        ${isDraft ? draftMetadataHTML() : ''}
 
         ${state.unimportedCount > 0 ? `
             <div style="padding:10px 14px; background:rgba(74,140,255,0.1); border:1px solid var(--accent); border-radius:6px; margin-bottom:14px; display:flex; align-items:center; gap:12px;">
@@ -662,6 +688,302 @@ function renderBody(container) {
     `;
 
     wireControls(container, body);
+    if (isDraft) wireDraftControls(container, body);
+}
+
+// ----------------------------------------------------------------
+// Draft templates — a template with no listing_id yet. Cards go on the
+// roster (queued) exactly like normal, but instead of Push/Push-live
+// there's a listing-metadata panel (clone from an existing listing, or
+// fill in by hand) and a "Create listing" batch action that submits
+// AddFixedPriceItem for the first time — see
+// docs/plans/listing-pricing-system.md, PLANNING session 14 / BUILT
+// session 15, and importer/ebay_create_listing.py in the CBMM repo.
+// ----------------------------------------------------------------
+
+const METADATA_FIELDS = [
+    ['category_id', 'Category ID'],
+    ['title', 'Title'],
+    ['description_html', 'Description'],
+    ['listing_duration', 'Duration'],
+    ['item_location', 'Location'],
+    ['item_country', 'Country'],
+    ['item_postal_code', 'Postal code'],
+    ['condition_id', 'Condition ID'],
+    ['payment_policy_id', 'Payment policy'],
+    ['return_policy_id', 'Return policy'],
+    ['shipping_policy_id', 'Shipping policy'],
+];
+
+function draftMetadataHTML() {
+    const t = state.template;
+    const missing = METADATA_FIELDS.filter(([key]) => !t[key]).map(([, label]) => label);
+
+    return `
+        <div style="border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:14px;">
+            <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px; flex-wrap:wrap;">
+                <strong style="font-size:13px;">Listing metadata</strong>
+                <span style="font-size:12px; color:${missing.length ? 'var(--warning)' : 'var(--success)'};">
+                    ${missing.length ? `Missing: ${escapeHtml(missing.join(', '))}` : 'Complete'}
+                </span>
+                <button class="btn" id="lp-clone-metadata-btn" style="margin-left:auto;">Clone from existing listing</button>
+                <button class="btn" id="lp-manual-metadata-btn">Edit manually</button>
+            </div>
+            ${t.title ? `
+                <div style="font-size:12px; color:var(--text-secondary); margin-bottom:10px;">
+                    "${escapeHtml(t.title)}" — ${t.source === 'cloned'
+                        ? `cloned from ${escapeHtml(t.cloned_from_listing_id || '?')}`
+                        : 'set manually'}
+                </div>
+            ` : ''}
+            <div id="lp-create-listing-msg" style="font-size:13px; margin-bottom:8px;"></div>
+            <div style="display:flex; gap:8px;">
+                <button class="btn" id="lp-preview-listing-btn">Preview readiness</button>
+                <button class="btn btn-primary" id="lp-create-listing-btn" ${missing.length ? 'disabled' : ''}
+                        title="${missing.length ? 'Fill in the missing metadata above first' : ''}">
+                    Create listing
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+function wireDraftControls(container, body) {
+    body.querySelector('#lp-clone-metadata-btn').addEventListener('click', () => openCloneMetadataModal(container, body));
+    body.querySelector('#lp-manual-metadata-btn').addEventListener('click', () => openManualMetadataModal(container, body));
+    body.querySelector('#lp-preview-listing-btn').addEventListener('click', () => doPreviewNewListing(container));
+    const createBtn = body.querySelector('#lp-create-listing-btn');
+    if (createBtn && !createBtn.disabled) createBtn.addEventListener('click', () => doCreateListing(container));
+}
+
+async function callBusinessPolicies() {
+    const resp = await fetch(`${PICKING_API_URL}/api/business-policies?account_num=${state.accountNum}`, {
+        headers: { 'x-picking-token': PICKING_API_TOKEN },
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
+    return resp.json();
+}
+
+async function callCloneMetadata(sourceListingId) {
+    const resp = await fetch(`${PICKING_API_URL}/api/listing-metadata/clone`, {
+        method: 'POST',
+        headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+            template_id: state.template.id, source_listing_id: sourceListingId, account_num: state.accountNum,
+        }),
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
+    return resp.json();
+}
+
+async function callSetMetadata(fields) {
+    const resp = await fetch(`${PICKING_API_URL}/api/listing-metadata/manual`, {
+        method: 'POST',
+        headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ template_id: state.template.id, ...fields }),
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
+    return resp.json();
+}
+
+async function callPreviewNewListing() {
+    const resp = await fetch(
+        `${PICKING_API_URL}/api/preview-new-listing/${state.template.id}?account_num=${state.accountNum}`,
+        { headers: { 'x-picking-token': PICKING_API_TOKEN } },
+    );
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
+    return resp.json();
+}
+
+async function callCreateListing(dryRun) {
+    const resp = await fetch(`${PICKING_API_URL}/api/create-listing`, {
+        method: 'POST',
+        headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ template_id: state.template.id, account_num: state.accountNum, dry_run: dryRun }),
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
+    return resp.json();
+}
+
+async function openCloneMetadataModal(container, body) {
+    const root = body.querySelector('#lp-modal-root');
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:420px; max-width:90vw;">
+                <h3 style="margin:0 0 12px;">Clone listing metadata</h3>
+                <p style="color:var(--text-secondary); font-size:12px; margin:0 0 10px;">
+                    Copies category, description, location, duration, and business policies from an
+                    existing live listing — you can review/edit anything afterward before creating.
+                </p>
+                <label style="font-size:13px; display:block; margin-bottom:10px;">Existing eBay Item #
+                    <input type="text" id="lp-clone-source-id" placeholder="e.g. 336204674240" style="width:100%; margin-top:4px;" />
+                </label>
+                <div id="lp-clone-error" style="color:var(--danger); font-size:12px; margin-bottom:8px;"></div>
+                <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
+                    <button type="button" class="btn" id="lp-clone-cancel">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="lp-clone-go">Clone</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    root.querySelector('#lp-clone-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+    root.querySelector('#lp-clone-go').addEventListener('click', async () => {
+        const sourceId = root.querySelector('#lp-clone-source-id').value.trim();
+        const errBox = root.querySelector('#lp-clone-error');
+        if (!sourceId) { errBox.textContent = 'Enter an Item #.'; return; }
+
+        const goBtn = root.querySelector('#lp-clone-go');
+        goBtn.disabled = true;
+        errBox.textContent = '';
+        try {
+            await callCloneMetadata(sourceId);
+            root.innerHTML = '';
+            await loadListing(container);
+        } catch (err) {
+            errBox.textContent = err.message;
+            goBtn.disabled = false;
+        }
+    });
+}
+
+async function openManualMetadataModal(container, body) {
+    const t = state.template;
+    let policies = { payment: [], return: [], shipping: [] };
+    try {
+        policies = await callBusinessPolicies();
+    } catch (err) {
+        console.error('Failed to load business policies:', err);
+    }
+
+    const root = body.querySelector('#lp-modal-root');
+    const policySelect = (id, label, current, options) => `
+        <label style="font-size:13px; display:block; margin-bottom:10px;">${label}
+            <select id="${id}" style="width:100%; margin-top:4px;">
+                <option value="">(none)</option>
+                ${options.map(o => `<option value="${escapeHtml(o.profile_id)}" ${String(current) === String(o.profile_id) ? 'selected' : ''}>
+                    ${escapeHtml(o.profile_name)}
+                </option>`).join('')}
+            </select>
+        </label>
+    `;
+    const textField = (id, label, value, multiline = false) => `
+        <label style="font-size:13px; display:block; margin-bottom:10px;">${label}
+            ${multiline
+                ? `<textarea id="${id}" rows="4" style="width:100%; margin-top:4px;">${escapeHtml(value || '')}</textarea>`
+                : `<input type="text" id="${id}" value="${escapeHtml(value || '')}" style="width:100%; margin-top:4px;" />`}
+        </label>
+    `;
+
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100; overflow-y:auto;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:480px; max-width:90vw; max-height:85vh; overflow-y:auto;">
+                <h3 style="margin:0 0 12px;">Edit listing metadata</h3>
+                ${textField('lp-meta-category', 'Category ID', t.category_id)}
+                ${textField('lp-meta-title', 'Title', t.title)}
+                ${textField('lp-meta-description', 'Description (HTML)', t.description_html, true)}
+                ${textField('lp-meta-duration', 'Listing duration (e.g. GTC)', t.listing_duration)}
+                ${textField('lp-meta-location', 'Location', t.item_location)}
+                ${textField('lp-meta-country', 'Country (e.g. US)', t.item_country)}
+                ${textField('lp-meta-postal', 'Postal code', t.item_postal_code)}
+                ${textField('lp-meta-condition', 'Condition ID (e.g. 4000 = Ungraded)', t.condition_id)}
+                ${policySelect('lp-meta-payment', 'Payment policy', t.payment_policy_id, policies.payment)}
+                ${policySelect('lp-meta-return', 'Return policy', t.return_policy_id, policies.return)}
+                ${policySelect('lp-meta-shipping', 'Shipping policy', t.shipping_policy_id, policies.shipping)}
+                <div id="lp-meta-error" style="color:var(--danger); font-size:12px; margin-bottom:8px;"></div>
+                <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
+                    <button type="button" class="btn" id="lp-meta-cancel">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="lp-meta-save">Save</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    root.querySelector('#lp-meta-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+    root.querySelector('#lp-meta-save').addEventListener('click', async () => {
+        const val = id => root.querySelector(id).value.trim() || null;
+        const fields = {
+            category_id: val('#lp-meta-category'),
+            title: val('#lp-meta-title'),
+            description_html: val('#lp-meta-description'),
+            listing_duration: val('#lp-meta-duration'),
+            item_location: val('#lp-meta-location'),
+            item_country: val('#lp-meta-country'),
+            item_postal_code: val('#lp-meta-postal'),
+            condition_id: val('#lp-meta-condition'),
+            payment_policy_id: val('#lp-meta-payment'),
+            return_policy_id: val('#lp-meta-return'),
+            shipping_policy_id: val('#lp-meta-shipping'),
+        };
+        const saveBtn = root.querySelector('#lp-meta-save');
+        saveBtn.disabled = true;
+        try {
+            await callSetMetadata(fields);
+            root.innerHTML = '';
+            await loadListing(container);
+        } catch (err) {
+            root.querySelector('#lp-meta-error').textContent = err.message;
+            saveBtn.disabled = false;
+        }
+    });
+}
+
+async function doPreviewNewListing(container) {
+    const body = container.querySelector('#lp-body');
+    const msg = body.querySelector('#lp-create-listing-msg');
+    msg.innerHTML = `<span style="color:var(--text-secondary);">Checking...</span>`;
+    try {
+        const result = await callPreviewNewListing();
+        const readyLines = result.ready.map(r => `${cardLabel(r)}: ${formatPrice(r.resolved_price)} x${r.available_qty}`);
+        const notReadyLines = result.not_ready.map(r => `${cardLabel(r)}: ${r.reason}`);
+        msg.innerHTML = `
+            <div style="color:var(--success);">Ready: ${result.ready.length}</div>
+            ${readyLines.length ? `<ul style="margin:4px 0 8px; padding-left:18px;">${readyLines.map(l => `<li>${escapeHtml(l)}</li>`).join('')}</ul>` : ''}
+            ${result.not_ready.length ? `
+                <div style="color:var(--warning);">Not ready: ${result.not_ready.length}</div>
+                <ul style="margin:4px 0; padding-left:18px;">${notReadyLines.map(l => `<li>${escapeHtml(l)}</li>`).join('')}</ul>
+            ` : ''}
+        `;
+    } catch (err) {
+        console.error(err);
+        msg.innerHTML = `<span style="color:var(--danger)">Preview failed: ${escapeHtml(err.message)}</span>`;
+    }
+}
+
+async function doCreateListing(container) {
+    const body = container.querySelector('#lp-body');
+    const msg = body.querySelector('#lp-create-listing-msg');
+    const createBtn = body.querySelector('#lp-create-listing-btn');
+    if (createBtn) createBtn.disabled = true;
+
+    try {
+        msg.innerHTML = `<span style="color:var(--text-secondary);">Checking...</span>`;
+        const preview = await callCreateListing(true);
+        if (!preview.ready_count) {
+            msg.innerHTML = `<span style="color:var(--warning);">No ready cards — use Preview readiness above to see why.</span>`;
+            return;
+        }
+        const notReadyNote = preview.not_ready_count
+            ? ` (${preview.not_ready_count} card(s) staying queued — 0 available quantity)` : '';
+        const confirmed = window.confirm(
+            `This creates a brand-new, LIVE eBay listing with ${preview.ready_count} card(s)${notReadyNote}. `
+            + `This is real and public — continue?`
+        );
+        if (!confirmed) { msg.innerHTML = ''; return; }
+
+        msg.innerHTML = `<span style="color:var(--text-secondary);">Creating listing...</span>`;
+        const result = await callCreateListing(false);
+        msg.innerHTML = `<span style="color:var(--success);">
+            Created eBay listing ${escapeHtml(result.listing_id)} with ${result.ready_count} card(s).
+        </span>`;
+        await loadListing(container);
+    } catch (err) {
+        console.error(err);
+        msg.innerHTML = `<span style="color:var(--danger)">Create failed: ${escapeHtml(err.message)}
+            — is picking_api.py running and reachable at ${PICKING_API_URL}?</span>`;
+    } finally {
+        if (createBtn) createBtn.disabled = false;
+    }
 }
 
 function groupSectionHTML(group, rows) {
@@ -756,8 +1078,13 @@ function actionsHTML(r) {
         return `<button class="btn lp-remove-card-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px; color:var(--danger);">Remove</button>`;
     }
     if (r.status === 'queued') {
+        // "Push live" adds ONE variation to an ALREADY-LIVE listing —
+        // meaningless (and would fail server-side) for a draft template
+        // that has no listing_id yet. Those cards go live as a batch via
+        // the "Create listing" flow instead (see draftMetadataHTML()).
+        const isDraft = !state.template?.listing_id;
         return `
-            <button class="btn lp-push-card-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px;">Push live</button>
+            ${isDraft ? '' : `<button class="btn lp-push-card-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px;">Push live</button>`}
             <button class="btn lp-fix-card-btn" data-row-id="${r.row_id}" data-current-label="${escapeHtml(cardLabel(r))}" style="font-size:11px; padding:2px 8px;">Fix card</button>
             <button class="btn lp-delete-roster-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px; color:var(--danger);">Remove from roster</button>
         `;
@@ -980,8 +1307,12 @@ function wireControls(container, body) {
 
     body.querySelector('#lp-add-card-btn').addEventListener('click', () => openAddCardModal(container, body));
 
-    body.querySelector('#lp-push-btn').addEventListener('click', () => doPush(container, false));
-    body.querySelector('#lp-push-dryrun-btn').addEventListener('click', () => doPush(container, true));
+    // Not rendered at all for a draft template (no listing_id yet) — see
+    // wireDraftControls() for the "Create listing" equivalent.
+    const pushBtn = body.querySelector('#lp-push-btn');
+    const pushDryBtn = body.querySelector('#lp-push-dryrun-btn');
+    if (pushBtn) pushBtn.addEventListener('click', () => doPush(container, false));
+    if (pushDryBtn) pushDryBtn.addEventListener('click', () => doPush(container, true));
 
     body.querySelectorAll('.lp-push-card-btn').forEach(btn => {
         btn.addEventListener('click', () => pushCardLive(container, btn));
