@@ -657,7 +657,7 @@ function renderBody(container) {
         </div>
         <div id="lp-push-msg" style="font-size:13px; margin-bottom:12px;"></div>
 
-        ${isDraft ? draftMetadataHTML() : ''}
+        ${metadataPanelHTML(isDraft)}
 
         ${state.unimportedCount > 0 ? `
             <div style="padding:10px 14px; background:rgba(74,140,255,0.1); border:1px solid var(--accent); border-radius:6px; margin-bottom:14px; display:flex; align-items:center; gap:12px;">
@@ -688,7 +688,7 @@ function renderBody(container) {
     `;
 
     wireControls(container, body);
-    if (isDraft) wireDraftControls(container, body);
+    wireMetadataControls(container, body, isDraft);
 }
 
 // ----------------------------------------------------------------
@@ -715,7 +715,13 @@ const METADATA_FIELDS = [
     ['shipping_policy_id', 'Shipping policy'],
 ];
 
-function draftMetadataHTML() {
+// Shown for BOTH draft templates (pre-creation: clone/edit + preview +
+// create) and already-live ones (post-creation: edit + revise only — no
+// clone/preview/create, since the listing already exists). Same "Edit
+// fields" modal either way; only what happens on Save differs (DB-only
+// for a draft, a real ReviseFixedPriceItem call for a live listing —
+// see openManualMetadataModal's isDraft param).
+function metadataPanelHTML(isDraft) {
     const t = state.template;
     const missing = METADATA_FIELDS.filter(([key]) => !t[key]).map(([, label]) => label);
 
@@ -723,11 +729,13 @@ function draftMetadataHTML() {
         <div style="border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:14px;">
             <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px; flex-wrap:wrap;">
                 <strong style="font-size:13px;">Listing metadata</strong>
-                <span style="font-size:12px; color:${missing.length ? 'var(--warning)' : 'var(--success)'};">
-                    ${missing.length ? `Missing: ${escapeHtml(missing.join(', '))}` : 'Complete'}
-                </span>
-                <button class="btn" id="lp-clone-metadata-btn" style="margin-left:auto;">Clone from existing listing</button>
-                <button class="btn" id="lp-manual-metadata-btn">Edit fields</button>
+                ${isDraft ? `
+                    <span style="font-size:12px; color:${missing.length ? 'var(--warning)' : 'var(--success)'};">
+                        ${missing.length ? `Missing: ${escapeHtml(missing.join(', '))}` : 'Complete'}
+                    </span>
+                ` : ''}
+                ${isDraft ? `<button class="btn" id="lp-clone-metadata-btn" style="margin-left:auto;">Clone from existing listing</button>` : ''}
+                <button class="btn" id="lp-manual-metadata-btn" style="${isDraft ? '' : 'margin-left:auto;'}">Edit fields</button>
             </div>
             ${t.title ? `
                 <div style="font-size:12px; color:var(--text-secondary); margin-bottom:10px;">
@@ -737,21 +745,25 @@ function draftMetadataHTML() {
                 </div>
             ` : ''}
             <div id="lp-create-listing-msg" style="font-size:13px; margin-bottom:8px;"></div>
-            <div style="display:flex; gap:8px;">
-                <button class="btn" id="lp-preview-listing-btn">Preview readiness</button>
-                <button class="btn btn-primary" id="lp-create-listing-btn" ${missing.length ? 'disabled' : ''}
-                        title="${missing.length ? 'Fill in the missing metadata above first' : ''}">
-                    Create listing
-                </button>
-            </div>
+            ${isDraft ? `
+                <div style="display:flex; gap:8px;">
+                    <button class="btn" id="lp-preview-listing-btn">Preview readiness</button>
+                    <button class="btn btn-primary" id="lp-create-listing-btn" ${missing.length ? 'disabled' : ''}
+                            title="${missing.length ? 'Fill in the missing metadata above first' : ''}">
+                        Create listing
+                    </button>
+                </div>
+            ` : ''}
         </div>
     `;
 }
 
-function wireDraftControls(container, body) {
-    body.querySelector('#lp-clone-metadata-btn').addEventListener('click', () => openCloneMetadataModal(container, body));
-    body.querySelector('#lp-manual-metadata-btn').addEventListener('click', () => openManualMetadataModal(container, body));
-    body.querySelector('#lp-preview-listing-btn').addEventListener('click', () => doPreviewNewListing(container));
+function wireMetadataControls(container, body, isDraft) {
+    const cloneBtn = body.querySelector('#lp-clone-metadata-btn');
+    if (cloneBtn) cloneBtn.addEventListener('click', () => openCloneMetadataModal(container, body));
+    body.querySelector('#lp-manual-metadata-btn').addEventListener('click', () => openManualMetadataModal(container, body, isDraft));
+    const previewBtn = body.querySelector('#lp-preview-listing-btn');
+    if (previewBtn) previewBtn.addEventListener('click', () => doPreviewNewListing(container));
     const createBtn = body.querySelector('#lp-create-listing-btn');
     if (createBtn && !createBtn.disabled) createBtn.addEventListener('click', () => doCreateListing(container));
 }
@@ -781,6 +793,18 @@ async function callSetMetadata(fields) {
         method: 'POST',
         headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
         body: JSON.stringify({ template_id: state.template.id, ...fields }),
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
+    return resp.json();
+}
+
+async function callReviseMetadata(fields, dryRun) {
+    const resp = await fetch(`${PICKING_API_URL}/api/listing-metadata/revise`, {
+        method: 'POST',
+        headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+            template_id: state.template.id, account_num: state.accountNum, dry_run: dryRun, ...fields,
+        }),
     });
     if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
     return resp.json();
@@ -847,7 +871,7 @@ async function openCloneMetadataModal(container, body) {
     });
 }
 
-async function openManualMetadataModal(container, body) {
+async function openManualMetadataModal(container, body, isDraft) {
     const t = state.template;
     let policies = { payment: [], return: [], shipping: [] };
     try {
@@ -879,6 +903,10 @@ async function openManualMetadataModal(container, body) {
         <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100; overflow-y:auto;">
             <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:480px; max-width:90vw; max-height:85vh; overflow-y:auto;">
                 <h3 style="margin:0 0 12px;">Edit listing metadata</h3>
+                ${!isDraft ? `<p style="color:var(--warning); font-size:12px; margin:0 0 10px;">
+                    This listing is already live — saving revises it on eBay for real
+                    (${escapeHtml(t.listing_id || '')}), not just a local edit.
+                </p>` : ''}
                 ${textField('lp-meta-category', 'Category ID', t.category_id)}
                 ${textField('lp-meta-title', 'Title', t.title)}
                 ${textField('lp-meta-description', 'Description (HTML)', t.description_html, true)}
@@ -916,13 +944,37 @@ async function openManualMetadataModal(container, body) {
             shipping_policy_id: val('#lp-meta-shipping'),
         };
         const saveBtn = root.querySelector('#lp-meta-save');
+        const errBox = root.querySelector('#lp-meta-error');
         saveBtn.disabled = true;
+        errBox.textContent = '';
+
+        // Drop unset fields so a blank input doesn't overwrite an already
+        // -good value with null — same partial-update semantics either way.
+        const changed = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== null));
+
         try {
-            await callSetMetadata(fields);
+            if (isDraft) {
+                await callSetMetadata(changed);
+                root.innerHTML = '';
+                await loadListing(container);
+                return;
+            }
+
+            // Live listing: dry-run first so the confirm dialog can show
+            // exactly what's about to change on a real listing, same
+            // pattern as doPush()/doCreateListing().
+            const preview = await callReviseMetadata(changed, true);
+            const confirmed = window.confirm(
+                `This revises live eBay listing ${t.listing_id} — fields: ${Object.keys(changed).join(', ') || '(none)'}. `
+                + `Continue?`
+            );
+            if (!confirmed) { saveBtn.disabled = false; return; }
+
+            await callReviseMetadata(changed, false);
             root.innerHTML = '';
             await loadListing(container);
         } catch (err) {
-            root.querySelector('#lp-meta-error').textContent = err.message;
+            errBox.textContent = err.message;
             saveBtn.disabled = false;
         }
     });
