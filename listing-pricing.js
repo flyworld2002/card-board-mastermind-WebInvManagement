@@ -718,6 +718,29 @@ const METADATA_FIELDS = [
     ['shipping_policy_id', 'Shipping policy'],
 ];
 
+// eBay's "Card Condition" descriptor (ConditionDescriptors, Name=40001) —
+// separate from Condition type (condition_id: 4000 Ungraded / 2750
+// Graded). Values confirmed via eBay's docs for category 183454
+// ("Collectible Card Game", Fei's real category) — a different category
+// could use different values, not handled here.
+const CARD_CONDITION_OPTIONS = [
+    ['400010', 'Near mint or better'],
+    ['400015', 'Lightly played (Excellent)'],
+    ['400016', 'Moderately played (Very good)'],
+    ['400017', 'Heavily played (Poor)'],
+];
+
+// eBay ItemSpecifics — confirmed live on a real listing (Game, Set,
+// Language, Manufacturer, Year Manufactured, Card Type, Country/Region
+// of Manufacture, Country of Origin) plus Character (Fei's ask, free
+// text, not yet used). Stored as one item_specifics jsonb {name: value}
+// object — this list is just which inputs the modal renders, not a
+// fixed schema eBay enforces.
+const ITEM_SPECIFICS_FIELDS = [
+    'Game', 'Set', 'Language', 'Manufacturer', 'Year Manufactured',
+    'Card Type', 'Country/Region of Manufacture', 'Country of Origin', 'Character',
+];
+
 // Inline header-level content — NOT a boxed panel, deliberately (Fei's
 // call: this is top-level listing identity, not roster-page furniture,
 // so it lives directly in the header area renderBody() wraps this in,
@@ -910,7 +933,7 @@ async function openManualMetadataModal(container, body, isDraft) {
         [policies, priorTemplates] = await Promise.all([
             callBusinessPolicies(),
             supabase.from('listing_templates')
-                .select('category_id, listing_duration, item_location, item_country, item_postal_code, condition_id')
+                .select('category_id, listing_duration, item_location')
                 .then(({ data }) => data || []),
         ]);
     } catch (err) {
@@ -975,12 +998,27 @@ async function openManualMetadataModal(container, body, isDraft) {
                 ${textField('lp-meta-description', 'Description (HTML)', t.description_html, true)}
                 ${selectOrOtherField('lp-meta-duration', 'Listing duration', t.listing_duration, priorValues('listing_duration'))}
                 ${selectOrOtherField('lp-meta-location', 'Location', t.item_location, priorValues('item_location'))}
-                ${selectOrOtherField('lp-meta-country', 'Country', t.item_country, priorValues('item_country'))}
-                ${selectOrOtherField('lp-meta-postal', 'Postal code', t.item_postal_code, priorValues('item_postal_code'))}
-                ${selectOrOtherField('lp-meta-condition', 'Condition ID', t.condition_id, priorValues('condition_id'))}
+                ${textField('lp-meta-country', 'Country (e.g. US)', t.item_country)}
+                ${textField('lp-meta-postal', 'Postal code', t.item_postal_code)}
+                <label style="font-size:13px; display:block; margin-bottom:10px;">Condition type
+                    <select id="lp-meta-condition" style="width:100%; margin-top:4px;">
+                        <option value="">(none)</option>
+                        <option value="4000" ${t.condition_id === '4000' ? 'selected' : ''}>Ungraded</option>
+                        <option value="2750" ${t.condition_id === '2750' ? 'selected' : ''}>Graded</option>
+                    </select>
+                </label>
+                <label style="font-size:13px; display:block; margin-bottom:10px;">Card condition
+                    <select id="lp-meta-card-condition" style="width:100%; margin-top:4px;">
+                        <option value="">(none)</option>
+                        ${CARD_CONDITION_OPTIONS.map(([v, l]) => `<option value="${v}" ${t.condition_descriptor_value === v ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('')}
+                    </select>
+                </label>
+                ${textField('lp-meta-sku', 'Custom label (SKU)', t.sku)}
                 ${policySelect('lp-meta-payment', 'Payment policy', t.payment_policy_id, policies.payment)}
                 ${policySelect('lp-meta-return', 'Return policy', t.return_policy_id, policies.return)}
                 ${policySelect('lp-meta-shipping', 'Shipping policy', t.shipping_policy_id, policies.shipping)}
+                <strong style="font-size:13px; display:block; margin:14px 0 10px; border-top:1px solid var(--border); padding-top:12px;">Item specifics</strong>
+                ${ITEM_SPECIFICS_FIELDS.map((key, i) => textField(`lp-spec-${i}`, key, (t.item_specifics || {})[key])).join('')}
                 <div id="lp-meta-error" style="color:var(--danger); font-size:12px; margin-bottom:8px;"></div>
                 <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
                     <button type="button" class="btn" id="lp-meta-cancel">Cancel</button>
@@ -997,8 +1035,7 @@ async function openManualMetadataModal(container, body, isDraft) {
             other.style.display = select.value === OTHER ? 'block' : 'none';
         });
     };
-    ['lp-meta-category', 'lp-meta-duration', 'lp-meta-location', 'lp-meta-country',
-     'lp-meta-postal', 'lp-meta-condition'].forEach(wireSelectOrOther);
+    ['lp-meta-category', 'lp-meta-duration', 'lp-meta-location'].forEach(wireSelectOrOther);
 
     const valOrOther = (id) => {
         const select = root.querySelector(`#${id}`);
@@ -1009,18 +1046,28 @@ async function openManualMetadataModal(container, body, isDraft) {
     root.querySelector('#lp-meta-cancel').addEventListener('click', () => { root.innerHTML = ''; });
     root.querySelector('#lp-meta-save').addEventListener('click', async () => {
         const val = id => root.querySelector(id).value.trim() || null;
+
+        const itemSpecifics = {};
+        ITEM_SPECIFICS_FIELDS.forEach((key, i) => {
+            const v = val(`#lp-spec-${i}`);
+            if (v) itemSpecifics[key] = v;
+        });
+
         const fields = {
             category_id: valOrOther('lp-meta-category'),
             title: val('#lp-meta-title'),
             description_html: val('#lp-meta-description'),
             listing_duration: valOrOther('lp-meta-duration'),
             item_location: valOrOther('lp-meta-location'),
-            item_country: valOrOther('lp-meta-country'),
-            item_postal_code: valOrOther('lp-meta-postal'),
-            condition_id: valOrOther('lp-meta-condition'),
+            item_country: val('#lp-meta-country'),
+            item_postal_code: val('#lp-meta-postal'),
+            condition_id: val('#lp-meta-condition'),
+            condition_descriptor_value: val('#lp-meta-card-condition'),
+            sku: val('#lp-meta-sku'),
             payment_policy_id: val('#lp-meta-payment'),
             return_policy_id: val('#lp-meta-return'),
             shipping_policy_id: val('#lp-meta-shipping'),
+            item_specifics: Object.keys(itemSpecifics).length ? itemSpecifics : null,
         };
         const saveBtn = root.querySelector('#lp-meta-save');
         const errBox = root.querySelector('#lp-meta-error');
