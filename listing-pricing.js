@@ -718,6 +718,18 @@ const METADATA_FIELDS = [
     ['shipping_policy_id', 'Shipping policy'],
 ];
 
+// Save (in the Edit-fields modal) writes ONLY to the DB now, live listing
+// or not — Fei's explicit call: accumulate edits, then push everything
+// live for real via this button on your own schedule, same "push when
+// ready" model as the description system's Push-description button.
+// Full current snapshot, not a diff — revise_listing_metadata() doesn't
+// care either way (it doesn't diff against eBay's live values, only
+// merges caller-supplied fields over the DB row's own values, which is
+// what we're already reading them from).
+const ALL_METADATA_FIELD_KEYS = [
+    ...METADATA_FIELDS.map(([k]) => k), 'sku', 'condition_descriptor_value', 'item_specifics',
+];
+
 // eBay's "Card Condition" descriptor (ConditionDescriptors, Name=40001) —
 // separate from Condition type (condition_id: 4000 Ungraded / 2750
 // Graded). Values confirmed via eBay's docs for category 183454
@@ -762,9 +774,10 @@ const FINISH_KIND_OPTIONS = [
 // draft templates (pre-creation: clone/edit + preview + create) and
 // already-live ones (post-creation: edit + revise only — no
 // clone/preview/create, since the listing already exists). Same "Edit
-// fields" modal either way; only what happens on Save differs (DB-only
-// for a draft, a real ReviseFixedPriceItem call for a live listing —
-// see openManualMetadataModal's isDraft param).
+// fields" modal either way — Save is DB-only in both cases now; "Push
+// metadata live" sends whatever's currently saved to eBay for real, on
+// its own schedule, same "accumulate edits then push" model as the
+// description system's Push-description button.
 function metadataPanelHTML(isDraft) {
     const t = state.template;
     const missing = METADATA_FIELDS.filter(([key]) => !t[key]).map(([, label]) => label);
@@ -792,6 +805,7 @@ function metadataPanelHTML(isDraft) {
                       </button>` : ''}
         <button class="btn" id="lp-manual-metadata-btn">Edit fields</button>
         ${!isDraft ? `
+            <button class="btn" id="lp-push-metadata-btn">Push metadata live</button>
             <span id="lp-desc-staleness" style="font-size:12px; color:var(--text-secondary);">Description: checking...</span>
             <button class="btn" id="lp-push-description-btn">Push description</button>
         ` : ''}
@@ -819,6 +833,33 @@ function wireMetadataControls(container, body, isDraft) {
     if (pushDescBtn) {
         pushDescBtn.addEventListener('click', () => doPushDescription(container));
         checkDescriptionStaleness(body);
+    }
+    const pushMetaBtn = body.querySelector('#lp-push-metadata-btn');
+    if (pushMetaBtn) pushMetaBtn.addEventListener('click', () => doPushMetadataLive(container));
+}
+
+async function doPushMetadataLive(container) {
+    const body = container.querySelector('#lp-body');
+    const t = state.template;
+
+    const fields = {};
+    ALL_METADATA_FIELD_KEYS.forEach(k => {
+        if (t[k] !== null && t[k] !== undefined && t[k] !== '') fields[k] = t[k];
+    });
+
+    try {
+        await callReviseMetadata(fields, true); // dry-run, just to fail fast on a real API/auth problem
+        const confirmed = window.confirm(
+            `This pushes the currently saved metadata (title/description/category/location/policies/etc.) `
+            + `live to eBay listing ${t.listing_id}. Continue?`
+        );
+        if (!confirmed) return;
+
+        await callReviseMetadata(fields, false);
+        await loadListing(container);
+    } catch (err) {
+        console.error(err);
+        window.alert(`Push metadata failed: ${err.message}`);
     }
 }
 
@@ -1105,9 +1146,9 @@ async function openManualMetadataModal(container, body, isDraft) {
         <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100; overflow-y:auto;">
             <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:480px; max-width:90vw; max-height:85vh; overflow-y:auto;">
                 <h3 style="margin:0 0 12px;">Edit listing metadata</h3>
-                ${!isDraft ? `<p style="color:var(--warning); font-size:12px; margin:0 0 10px;">
-                    This listing is already live — saving revises it on eBay for real
-                    (${escapeHtml(t.listing_id || '')}), not just a local edit.
+                ${!isDraft ? `<p style="color:var(--text-secondary); font-size:12px; margin:0 0 10px;">
+                    Saving here only updates our own record for listing ${escapeHtml(t.listing_id || '')} —
+                    use "Push metadata live" on the listing page when you're ready to send these changes to eBay for real.
                 </p>` : ''}
                 ${selectOrOtherField('lp-meta-category', 'Category ID', t.category_id, priorValues('category_id'))}
                 ${textField('lp-meta-title', 'Title', t.title)}
@@ -1247,9 +1288,8 @@ async function openManualMetadataModal(container, body, isDraft) {
 
         // Description-nav fields (migration 020) are LOCAL ONLY — never
         // sent to eBay, so they save via a plain Supabase update rather
-        // than going through the eBay-revise flow below (and independent
-        // of it: they still save even if the eBay confirm dialog below is
-        // cancelled, since they have no eBay implication either way).
+        // than through /api/listing-metadata/manual's ALL_METADATA_FIELDS
+        // filter, which doesn't know about them.
         const rawNavRank = root.querySelector('#lp-nav-rank').value.trim();
         const navFields = {
             set_id: root.querySelector('#lp-nav-set').value || null,
@@ -1274,24 +1314,9 @@ async function openManualMetadataModal(container, body, isDraft) {
             const { error: navErr } = await supabase.from('listing_templates').update(navFields).eq('id', t.id);
             if (navErr) throw navErr;
 
-            if (isDraft) {
-                await callSetMetadata(changed);
-                root.innerHTML = '';
-                await loadListing(container);
-                return;
-            }
-
-            // Live listing: dry-run first so the confirm dialog can show
-            // exactly what's about to change on a real listing, same
-            // pattern as doPush()/doCreateListing().
-            const preview = await callReviseMetadata(changed, true);
-            const confirmed = window.confirm(
-                `This revises live eBay listing ${t.listing_id} — fields: ${Object.keys(changed).join(', ') || '(none)'}. `
-                + `Continue?`
-            );
-            if (!confirmed) { saveBtn.disabled = false; return; }
-
-            await callReviseMetadata(changed, false);
+            // DB-only, live listing or not — see "Push metadata live" for
+            // actually sending this to eBay, on your own schedule.
+            await callSetMetadata(changed);
             root.innerHTML = '';
             await loadListing(container);
         } catch (err) {
