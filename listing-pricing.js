@@ -741,6 +741,20 @@ const ITEM_SPECIFICS_FIELDS = [
     'Card Type', 'Country/Region of Manufacture', 'Country of Origin', 'Character',
 ];
 
+// Description navigation system (family strip / era hub-and-spoke / era
+// index) — see docs/plans/listing-pricing-system.md, "Plan: eBay
+// description navigation system", and CBMM migration 020. These columns
+// are LOCAL ONLY — never sent to eBay directly (sync_description() reads
+// them at render time), so they save via a plain Supabase update, not
+// through /api/listing-metadata/*.
+const FINISH_KIND_OPTIONS = [
+    ['non_holo', 'Non-Holo'],
+    ['reverse_holo', 'Reverse Holo'],
+    ['poke_ball', 'Poké Ball'],
+    ['master_ball', 'Master Ball'],
+    ['ultra_rare', 'Ultra Rare'],
+];
+
 // Inline header-level content — NOT a boxed panel, deliberately (Fei's
 // call: this is top-level listing identity, not roster-page furniture,
 // so it lives directly in the header area renderBody() wraps this in,
@@ -777,6 +791,10 @@ function metadataPanelHTML(isDraft) {
                           Sync header from eBay
                       </button>` : ''}
         <button class="btn" id="lp-manual-metadata-btn">Edit fields</button>
+        ${!isDraft ? `
+            <span id="lp-desc-staleness" style="font-size:12px; color:var(--text-secondary);">Description: checking...</span>
+            <button class="btn" id="lp-push-description-btn">Push description</button>
+        ` : ''}
         ${isDraft ? `
             <button class="btn" id="lp-preview-listing-btn">Preview readiness</button>
             <button class="btn btn-primary" id="lp-create-listing-btn" ${missing.length ? 'disabled' : ''}
@@ -797,6 +815,50 @@ function wireMetadataControls(container, body, isDraft) {
     if (previewBtn) previewBtn.addEventListener('click', () => doPreviewNewListing(container));
     const createBtn = body.querySelector('#lp-create-listing-btn');
     if (createBtn && !createBtn.disabled) createBtn.addEventListener('click', () => doCreateListing(container));
+    const pushDescBtn = body.querySelector('#lp-push-description-btn');
+    if (pushDescBtn) {
+        pushDescBtn.addEventListener('click', () => doPushDescription(container));
+        checkDescriptionStaleness(body);
+    }
+}
+
+// Staleness comes from a dry-run description-sync (renders fresh + hashes
+// vs. pushed_description_hash) — NOT from updated_at, which would false-
+// positive on any unrelated field edit (price, sku, ...) and false-
+// negative when a SIBLING template's family/era membership changed
+// without touching this template's own row. No eBay call, cheap.
+async function checkDescriptionStaleness(body) {
+    const badge = body.querySelector('#lp-desc-staleness');
+    if (!badge) return;
+    try {
+        const result = await callDescriptionSync(true);
+        badge.textContent = result.changed ? 'Description: not pushed since last change' : 'Description: up to date';
+        badge.style.color = result.changed ? 'var(--warning)' : 'var(--success)';
+    } catch (err) {
+        badge.textContent = `Description: couldn't check (${err.message})`;
+    }
+}
+
+async function doPushDescription(container) {
+    const body = container.querySelector('#lp-body');
+    const badge = body.querySelector('#lp-desc-staleness');
+    try {
+        const preview = await callDescriptionSync(true);
+        if (!preview.changed) {
+            window.alert('Description already matches what was last pushed — nothing to do.');
+            return;
+        }
+        const confirmed = window.confirm(
+            `This pushes the rendered description live to eBay listing ${state.template.listing_id}. Continue?`
+        );
+        if (!confirmed) return;
+
+        await callDescriptionSync(false);
+        await loadListing(container);
+    } catch (err) {
+        console.error(err);
+        if (badge) badge.textContent = `Description: push failed (${err.message})`;
+    }
 }
 
 async function doSyncFromEbay(container) {
@@ -859,6 +921,34 @@ async function callReviseMetadata(fields, dryRun) {
         body: JSON.stringify({
             template_id: state.template.id, account_num: state.accountNum, dry_run: dryRun, ...fields,
         }),
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
+    return resp.json();
+}
+
+async function callDescriptionPresets() {
+    const resp = await fetch(`${PICKING_API_URL}/api/description-presets`, {
+        headers: { 'x-picking-token': PICKING_API_TOKEN },
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
+    return resp.json();
+}
+
+async function callDescriptionPreview(descriptionHtml) {
+    const resp = await fetch(`${PICKING_API_URL}/api/description-preview/${state.template.id}`, {
+        method: 'POST',
+        headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ description_html: descriptionHtml }),
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
+    return resp.json();
+}
+
+async function callDescriptionSync(dryRun) {
+    const resp = await fetch(`${PICKING_API_URL}/api/description-sync/${state.template.id}`, {
+        method: 'POST',
+        headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ account_num: state.accountNum, dry_run: dryRun }),
     });
     if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
     return resp.json();
@@ -929,15 +1019,20 @@ async function openManualMetadataModal(container, body, isDraft) {
     const t = state.template;
     let policies = { payment: [], return: [], shipping: [] };
     let priorTemplates = [];
+    let cardSets = [];
+    let descriptionPresets = {};
     try {
-        [policies, priorTemplates] = await Promise.all([
+        [policies, priorTemplates, cardSets, descriptionPresets] = await Promise.all([
             callBusinessPolicies(),
             supabase.from('listing_templates')
                 .select('category_id, listing_duration, item_location')
                 .then(({ data }) => data || []),
+            supabase.from('card_sets').select('id, name, series').order('series').order('name')
+                .then(({ data }) => data || []),
+            callDescriptionPresets().catch(() => ({})),
         ]);
     } catch (err) {
-        console.error('Failed to load business policies / prior templates:', err);
+        console.error('Failed to load business policies / prior templates / card sets:', err);
     }
 
     // Distinct non-null values already used on ANY template — for fields
@@ -995,7 +1090,15 @@ async function openManualMetadataModal(container, body, isDraft) {
                 </p>` : ''}
                 ${selectOrOtherField('lp-meta-category', 'Category ID', t.category_id, priorValues('category_id'))}
                 ${textField('lp-meta-title', 'Title', t.title)}
-                ${textField('lp-meta-description', 'Description (HTML)', t.description_html, true)}
+                <label style="font-size:13px; display:block; margin-bottom:4px;">Description (HTML)</label>
+                <div style="display:flex; gap:6px; margin-bottom:4px;">
+                    <select id="lp-desc-layout-select" style="flex:1;">
+                        <option value="">Insert layout...</option>
+                        ${Object.entries(descriptionPresets).map(([key, p]) => `<option value="${escapeHtml(key)}">${escapeHtml(p.label)}</option>`).join('')}
+                    </select>
+                    <button type="button" class="btn" id="lp-desc-preview-btn">Preview</button>
+                </div>
+                <textarea id="lp-meta-description" rows="4" style="width:100%; margin-bottom:10px;">${escapeHtml(t.description_html || '')}</textarea>
                 ${selectOrOtherField('lp-meta-duration', 'Listing duration', t.listing_duration, priorValues('listing_duration'))}
                 ${selectOrOtherField('lp-meta-location', 'Location', t.item_location, priorValues('item_location'))}
                 ${textField('lp-meta-country', 'Country (e.g. US)', t.item_country)}
@@ -1019,6 +1122,36 @@ async function openManualMetadataModal(container, body, isDraft) {
                 ${policySelect('lp-meta-shipping', 'Shipping policy', t.shipping_policy_id, policies.shipping)}
                 <strong style="font-size:13px; display:block; margin:14px 0 10px; border-top:1px solid var(--border); padding-top:12px;">Item specifics</strong>
                 ${ITEM_SPECIFICS_FIELDS.map((key, i) => textField(`lp-spec-${i}`, key, (t.item_specifics || {})[key])).join('')}
+                <strong style="font-size:13px; display:block; margin:14px 0 10px; border-top:1px solid var(--border); padding-top:12px;">
+                    Description navigation (family strip / era hub-and-spoke / era index)
+                </strong>
+                <label style="font-size:13px; display:block; margin-bottom:10px;">Set
+                    <select id="lp-nav-set" style="width:100%; margin-top:4px;">
+                        <option value="">(none — not part of the nav system)</option>
+                        ${cardSets.map(s => `<option value="${escapeHtml(s.id)}" ${t.set_id === s.id ? 'selected' : ''}>
+                            ${escapeHtml(s.series ? `${s.series} — ${s.name}` : s.name)}
+                        </option>`).join('')}
+                    </select>
+                </label>
+                <label style="font-size:13px; display:block; margin-bottom:10px;">Finish kind
+                    <select id="lp-nav-finish" style="width:100%; margin-top:4px;">
+                        <option value="">(none)</option>
+                        ${FINISH_KIND_OPTIONS.map(([v, l]) => `<option value="${v}" ${t.finish_kind === v ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('')}
+                    </select>
+                </label>
+                ${textField('lp-nav-family-label', 'Family label (buyer-facing, e.g. "Reverse Holo")', t.family_label)}
+                <label style="font-size:13px; display:block; margin-bottom:10px;">Nav rank (order within the family strip)
+                    <input type="number" id="lp-nav-rank" value="${t.nav_rank ?? ''}" style="width:100%; margin-top:4px;" />
+                </label>
+                <label style="font-size:13px; display:block; margin-bottom:10px;">
+                    <input type="checkbox" id="lp-nav-primary" ${t.is_set_primary ? 'checked' : ''} />
+                    Primary listing for this set (fallback front door — at most one per set)
+                </label>
+                <label style="font-size:13px; display:block; margin-bottom:10px;">
+                    <input type="checkbox" id="lp-nav-show" ${t.show_in_nav !== false ? 'checked' : ''} />
+                    Show in nav
+                </label>
+                ${textField('lp-nav-image-url', 'Nav image URL (eBay-hosted gallery photo)', t.nav_image_url)}
                 <div id="lp-meta-error" style="color:var(--danger); font-size:12px; margin-bottom:8px;"></div>
                 <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
                     <button type="button" class="btn" id="lp-meta-cancel">Cancel</button>
@@ -1036,6 +1169,32 @@ async function openManualMetadataModal(container, body, isDraft) {
         });
     };
     ['lp-meta-category', 'lp-meta-duration', 'lp-meta-location'].forEach(wireSelectOrOther);
+
+    const layoutSelect = root.querySelector('#lp-desc-layout-select');
+    layoutSelect.addEventListener('change', () => {
+        const key = layoutSelect.value;
+        layoutSelect.value = '';
+        if (!key || !descriptionPresets[key]) return;
+        const textarea = root.querySelector('#lp-meta-description');
+        if (textarea.value.trim()
+            && !window.confirm("Replace the current Description with this layout? This overwrites what's in the box now.")) {
+            return;
+        }
+        textarea.value = descriptionPresets[key].html;
+    });
+
+    root.querySelector('#lp-desc-preview-btn').addEventListener('click', async () => {
+        const previewBtn = root.querySelector('#lp-desc-preview-btn');
+        previewBtn.disabled = true;
+        try {
+            const result = await callDescriptionPreview(root.querySelector('#lp-meta-description').value);
+            openDescriptionPreviewModal(result.html);
+        } catch (err) {
+            window.alert(`Preview failed: ${err.message}`);
+        } finally {
+            previewBtn.disabled = false;
+        }
+    });
 
     const valOrOther = (id) => {
         const select = root.querySelector(`#${id}`);
@@ -1069,6 +1228,23 @@ async function openManualMetadataModal(container, body, isDraft) {
             shipping_policy_id: val('#lp-meta-shipping'),
             item_specifics: Object.keys(itemSpecifics).length ? itemSpecifics : null,
         };
+
+        // Description-nav fields (migration 020) are LOCAL ONLY — never
+        // sent to eBay, so they save via a plain Supabase update rather
+        // than going through the eBay-revise flow below (and independent
+        // of it: they still save even if the eBay confirm dialog below is
+        // cancelled, since they have no eBay implication either way).
+        const rawNavRank = root.querySelector('#lp-nav-rank').value.trim();
+        const navFields = {
+            set_id: root.querySelector('#lp-nav-set').value || null,
+            finish_kind: root.querySelector('#lp-nav-finish').value || null,
+            family_label: val('#lp-nav-family-label'),
+            nav_rank: rawNavRank === '' ? null : parseInt(rawNavRank, 10),
+            is_set_primary: root.querySelector('#lp-nav-primary').checked,
+            show_in_nav: root.querySelector('#lp-nav-show').checked,
+            nav_image_url: val('#lp-nav-image-url'),
+        };
+
         const saveBtn = root.querySelector('#lp-meta-save');
         const errBox = root.querySelector('#lp-meta-error');
         saveBtn.disabled = true;
@@ -1079,6 +1255,9 @@ async function openManualMetadataModal(container, body, isDraft) {
         const changed = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== null));
 
         try {
+            const { error: navErr } = await supabase.from('listing_templates').update(navFields).eq('id', t.id);
+            if (navErr) throw navErr;
+
             if (isDraft) {
                 await callSetMetadata(changed);
                 root.innerHTML = '';
@@ -1104,6 +1283,34 @@ async function openManualMetadataModal(container, body, isDraft) {
             saveBtn.disabled = false;
         }
     });
+}
+
+// Top-level overlay (not inside #lp-modal-root) so it can layer on top of
+// the still-open Edit-fields modal without clobbering it. iframe + srcdoc
+// is a faithful render since eBay strips JS from descriptions anyway.
+function openDescriptionPreviewModal(html) {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); '
+        + 'display:flex; align-items:center; justify-content:center; z-index:200;';
+    overlay.innerHTML = `
+        <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:16px; width:820px; max-width:95vw; max-height:90vh; display:flex; flex-direction:column;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <h3 style="margin:0;">Description preview</h3>
+                <div style="display:flex; gap:6px;">
+                    <button type="button" class="btn" id="lp-preview-desktop">Desktop</button>
+                    <button type="button" class="btn" id="lp-preview-mobile">Mobile</button>
+                    <button type="button" class="btn" id="lp-preview-close">Close</button>
+                </div>
+            </div>
+            <iframe id="lp-preview-frame" style="border:1px solid var(--border); width:100%; height:70vh; background:#fff; align-self:center;"></iframe>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+    const frame = overlay.querySelector('#lp-preview-frame');
+    frame.srcdoc = html;
+    overlay.querySelector('#lp-preview-desktop').addEventListener('click', () => { frame.style.width = '100%'; });
+    overlay.querySelector('#lp-preview-mobile').addEventListener('click', () => { frame.style.width = '375px'; });
+    overlay.querySelector('#lp-preview-close').addEventListener('click', () => overlay.remove());
 }
 
 async function doPreviewNewListing(container) {
