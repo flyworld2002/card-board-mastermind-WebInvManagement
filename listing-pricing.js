@@ -1072,6 +1072,27 @@ async function openManualMetadataModal(container, body, isDraft) {
             </label>
         `;
     };
+    // Same dropdown-of-known-values + "Other (type new)..." pattern as
+    // selectOrOtherField, but for [value, label] pairs whose display label
+    // differs from the stored value (e.g. finish_kind 'reverse_holo' shows
+    // as "Reverse Holo") — the value column has no DB-level enum, so a
+    // typed-in custom value works fine, it just won't get a friendly label
+    // anywhere it's displayed later (falls back to showing the raw value).
+    const selectOrOtherFieldLabeled = (id, label, value, options) => {
+        const known = options.some(([v]) => v === value);
+        return `
+            <label style="font-size:13px; display:block; margin-bottom:10px;">${label}
+                <select id="${id}" style="width:100%; margin-top:4px;">
+                    <option value="">(none)</option>
+                    ${options.map(([v, l]) => `<option value="${escapeHtml(v)}" ${value === v ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('')}
+                    <option value="${OTHER}" ${value && !known ? 'selected' : ''}>Other (type new)...</option>
+                </select>
+                <input type="text" id="${id}-other" placeholder="Type a new value"
+                       value="${escapeHtml(value && !known ? value : '')}"
+                       style="width:100%; margin-top:4px; display:${value && !known ? 'block' : 'none'};" />
+            </label>
+        `;
+    };
     const textField = (id, label, value, multiline = false) => `
         <label style="font-size:13px; display:block; margin-bottom:10px;">${label}
             ${multiline
@@ -1133,12 +1154,7 @@ async function openManualMetadataModal(container, body, isDraft) {
                         </option>`).join('')}
                     </select>
                 </label>
-                <label style="font-size:13px; display:block; margin-bottom:10px;">Finish kind
-                    <select id="lp-nav-finish" style="width:100%; margin-top:4px;">
-                        <option value="">(none)</option>
-                        ${FINISH_KIND_OPTIONS.map(([v, l]) => `<option value="${v}" ${t.finish_kind === v ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('')}
-                    </select>
-                </label>
+                ${selectOrOtherFieldLabeled('lp-nav-finish', 'Finish kind', t.finish_kind, FINISH_KIND_OPTIONS)}
                 ${textField('lp-nav-family-label', 'Family label (buyer-facing, e.g. "Reverse Holo")', t.family_label)}
                 <label style="font-size:13px; display:block; margin-bottom:10px;">Nav rank (order within the family strip)
                     <input type="number" id="lp-nav-rank" value="${t.nav_rank ?? ''}" style="width:100%; margin-top:4px;" />
@@ -1168,7 +1184,7 @@ async function openManualMetadataModal(container, body, isDraft) {
             other.style.display = select.value === OTHER ? 'block' : 'none';
         });
     };
-    ['lp-meta-category', 'lp-meta-duration', 'lp-meta-location'].forEach(wireSelectOrOther);
+    ['lp-meta-category', 'lp-meta-duration', 'lp-meta-location', 'lp-nav-finish'].forEach(wireSelectOrOther);
 
     const layoutSelect = root.querySelector('#lp-desc-layout-select');
     layoutSelect.addEventListener('change', () => {
@@ -1237,7 +1253,7 @@ async function openManualMetadataModal(container, body, isDraft) {
         const rawNavRank = root.querySelector('#lp-nav-rank').value.trim();
         const navFields = {
             set_id: root.querySelector('#lp-nav-set').value || null,
-            finish_kind: root.querySelector('#lp-nav-finish').value || null,
+            finish_kind: valOrOther('lp-nav-finish'),
             family_label: val('#lp-nav-family-label'),
             nav_rank: rawNavRank === '' ? null : parseInt(rawNavRank, 10),
             is_set_primary: root.querySelector('#lp-nav-primary').checked,
