@@ -1419,13 +1419,15 @@ function openGroupModal(container, groupId) {
     });
 }
 
-// ── Description templates section (description_sections library) ──────────
-// Reusable HTML blocks for eBay listing descriptions — 'layout' rows are
-// whole-description starters (Insert-layout dropdown on the Listing
-// pricing page, replaces the textarea), 'section' rows are small blocks
-// (Insert-section dropdown, inserts at cursor). Moved here from a modal
-// inside the Listing pricing page's Edit-fields panel — that space was
-// too cramped for a real HTML editor + preview workflow.
+// ── Description templates section (description_sections module library) ───
+// Named, reusable blocks for eBay listing descriptions, referenced from a
+// description as {{key}} — kind='static' is plain HTML, 'repeater' loops
+// over related listings by rule, 'single' renders exactly one block (see
+// importer/ebay_descriptions.py's module-dispatch section, migration 029).
+// The Listing pricing page's visual builder picks from this library; this
+// page is where modules get created/edited. Moved here from a modal inside
+// the Listing pricing page's Edit-fields panel — that space was too
+// cramped for a real editor + preview workflow.
 
 function descTemplatesSectionHTML() {
     return `
