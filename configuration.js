@@ -1466,7 +1466,8 @@ async function loadDescTemplates(container) {
 
 function renderDescTemplatesTable(container) {
     const wrap = container.querySelector('#desc-templates-table-wrap');
-    const rows = descTemplatesState.sections;
+    const layouts = descTemplatesState.sections.filter(s => s.kind === 'layout');
+    const sections = descTemplatesState.sections.filter(s => s.kind !== 'layout');
 
     const picker = container.querySelector('#desc-preview-target');
     picker.innerHTML = descTemplatesState.templates.length
@@ -1477,26 +1478,29 @@ function renderDescTemplatesTable(container) {
         picker.addEventListener('change', () => { descTemplatesState.previewTemplateId = picker.value || null; });
     }
 
-    if (!rows.length) {
-        wrap.innerHTML = `<p style="color:var(--text-secondary)">No description templates yet.</p>`;
-    } else {
-        wrap.innerHTML = `
-            <table>
-                <thead><tr><th>Label</th><th>Key</th><th>Kind</th><th>Order</th><th style="width:60px;"></th></tr></thead>
+    const groupTable = (label, hint, rows) => `
+        <h4 style="margin:0 0 4px;">${label}</h4>
+        <p style="color:var(--text-secondary); font-size:11px; margin:0 0 8px;">${hint}</p>
+        ${!rows.length ? `<p style="color:var(--text-secondary); font-size:12px; margin:0 0 20px;">None yet.</p>` : `
+            <table style="margin-bottom:20px;">
+                <thead><tr><th>Label</th><th>Key</th><th>Order</th><th style="width:60px;"></th></tr></thead>
                 <tbody>
                     ${rows.map(s => `
                         <tr>
                             <td>${escapeHTML(s.label)}</td>
                             <td><code>${escapeHTML(s.key)}</code></td>
-                            <td>${escapeHTML(s.kind)}</td>
                             <td>${s.sort_order}</td>
                             <td><button class="btn edit-desc-template-btn" data-id="${s.id}">Edit</button></td>
                         </tr>
                     `).join('')}
                 </tbody>
             </table>
-        `;
-    }
+        `}
+    `;
+
+    wrap.innerHTML =
+        groupTable('Layouts', 'Whole-description starters — replace the Description box entirely.', layouts)
+        + groupTable('Sections', 'Small reusable blocks — insert at the cursor without touching the rest.', sections);
 
     const addBtn = container.querySelector('#new-desc-template-btn');
     if (!addBtn.dataset.wired) {
