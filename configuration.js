@@ -51,7 +51,8 @@ let descTemplatesState = {
     sections: [],
     templates: [],       // live listing_templates, for the Preview-against picker
     previewTemplateId: null,
-    theme: [],           // description_theme_settings rows
+    theme: [],           // description_theme_settings rows, ALL theme_keys (filtered client-side by activeThemeKey)
+    activeThemeKey: 'default',
 };
 
 // Only used for the Preview call (real token rendering lives in
@@ -123,7 +124,7 @@ export async function renderConfiguration(container, initialKey = 'sets') {
         wireConfigNav(container, 'groups');
         await loadGroups(container);
     } else if (initialKey === 'description-templates') {
-        descTemplatesState = { tab: 'templates', sections: [], templates: [], previewTemplateId: null, theme: [] };
+        descTemplatesState = { tab: 'templates', sections: [], templates: [], previewTemplateId: null, theme: [], activeThemeKey: 'default' };
         container.innerHTML = configShell(descTemplatesSectionHTML());
         wireConfigNav(container, 'description-templates');
         wireDescTabs(container);
@@ -1475,13 +1476,12 @@ function renderDescTabContent(container) {
                 or {{era_index}} looks like &mdash; Python still handles the repeating and the DB lookups,
                 your template just controls the markup. Use <code>{{item_label}}</code>,
                 <code>{{item_url}}</code>, <code>{{item_image_url}}</code> as placeholders inside one.
-                Reserved keys that apply everywhere automatically: <code>family_tile</code>
-                (+ optional <code>family_tile_current</code> for the "you're here" tile),
-                <code>era_row</code>, <code>era_chip</code> (+ optional <code>era_chip_current</code>).
-                Give a template any OTHER key and reference it by name in one listing's description
-                with <code>{{family_nav:your_key}}</code> / <code>{{era_nav:your_key}}</code> /
-                <code>{{era_index:your_key}}</code> to override just that listing. Until you create a
-                matching row, everything renders using the built-in look from the Theme tab.
+                One design per block type, under a fixed reserved key &mdash; create a row named exactly
+                <code>family_tile</code> (+ optional <code>family_tile_current</code> for the "you're here"
+                tile), <code>era_row</code>, or <code>era_chip</code> (+ optional
+                <code>era_chip_current</code>) and it applies everywhere automatically, no extra syntax
+                needed. Until you create a matching row, everything renders using the built-in look from
+                the Theme tab.
             </p>
             <div class="filters-bar" style="justify-content:space-between; margin-bottom:12px;">
                 <label style="font-size:12px; color:var(--text-secondary);">
@@ -1525,10 +1525,25 @@ async function loadDescTemplates(container) {
 // family_nav/era_nav/era_index renderer in importer/ebay_descriptions.py
 // — a fixed, code-referenced key set (not a freeform library), so this
 // is a plain list + per-row Save, not a full CRUD-with-Add UI.
+//
+// Migration 028 (8/09) added theme_key scoping so different shops/listing
+// groups can each run their own theme instead of one theme applying
+// everywhere — descTemplatesState.theme holds rows for EVERY theme_key at
+// once (cheap, it's a small fixed-size table); this function filters to
+// activeThemeKey client-side and re-renders itself in place on picker
+// change, same pattern as every other in-place redraw in this file.
 function renderThemeSettings(wrap) {
     const CATEGORY_LABELS = { color: 'Colors', size: 'Sizing', text: 'Text' };
+    const themeKeys = [...new Set(descTemplatesState.theme.map(r => r.theme_key))]
+        .sort((a, b) => (a === 'default' ? -1 : b === 'default' ? 1 : a.localeCompare(b)));
+    if (!themeKeys.includes(descTemplatesState.activeThemeKey)) {
+        descTemplatesState.activeThemeKey = themeKeys[0] || 'default';
+    }
+    const activeKey = descTemplatesState.activeThemeKey;
+    const rows = descTemplatesState.theme.filter(r => r.theme_key === activeKey);
+
     const byCategory = {};
-    descTemplatesState.theme.forEach(row => {
+    rows.forEach(row => {
         (byCategory[row.category] ||= []).push(row);
     });
 
@@ -1555,6 +1570,15 @@ function renderThemeSettings(wrap) {
             Small tweaks to how {{family_nav}}/{{era_nav}}/{{era_index}} render — no code change or
             deploy needed. Changes apply the next time a description is previewed or pushed.
         </p>
+        <div class="filters-bar" style="justify-content:space-between; margin-bottom:16px;">
+            <label style="font-size:12px; color:var(--text-secondary);">
+                Theme
+                <select id="theme-key-picker" style="margin-left:6px;">
+                    ${themeKeys.map(k => `<option value="${escapeAttr(k)}" ${k === activeKey ? 'selected' : ''}>${escapeHTML(k)}</option>`).join('')}
+                </select>
+            </label>
+            <button class="btn" id="new-theme-btn">+ New theme</button>
+        </div>
         ${Object.entries(CATEGORY_LABELS).map(([cat, label]) => `
             <h4 style="margin:16px 0 8px;">${label}</h4>
             <table style="margin-bottom:8px;">
@@ -1562,6 +1586,30 @@ function renderThemeSettings(wrap) {
             </table>
         `).join('')}
     `;
+
+    wrap.querySelector('#theme-key-picker').addEventListener('change', (e) => {
+        descTemplatesState.activeThemeKey = e.target.value;
+        renderThemeSettings(wrap);
+    });
+
+    wrap.querySelector('#new-theme-btn').addEventListener('click', async () => {
+        const raw = (prompt(`New theme name — copies all current "${activeKey}" values as a starting point.\nAssign it to listings via the Theme dropdown on the Edit-fields modal.`) || '').trim();
+        if (!raw) return;
+        const name = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+        if (!name) { alert('Invalid theme name.'); return; }
+        if (themeKeys.includes(name)) { alert(`A theme named "${name}" already exists.`); return; }
+        const insertRows = rows.map(r => ({ theme_key: name, key: r.key, value: r.value, label: r.label, category: r.category }));
+        try {
+            const { data, error } = await supabase.from('description_theme_settings').insert(insertRows).select();
+            if (error) throw error;
+            descTemplatesState.theme.push(...(data || insertRows));
+            descTemplatesState.activeThemeKey = name;
+            renderThemeSettings(wrap);
+        } catch (err) {
+            console.error(err);
+            alert(err.message || 'Failed to create theme.');
+        }
+    });
 
     // Keep the color swatch and its hex text input in sync with each other.
     (byCategory.color || []).forEach(row => {
@@ -1576,7 +1624,7 @@ function renderThemeSettings(wrap) {
     wrap.querySelectorAll('.theme-save-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
             const key = btn.dataset.key;
-            const row = descTemplatesState.theme.find(r => r.key === key);
+            const row = rows.find(r => r.key === key);
             const tr = wrap.querySelector(`tr[data-key="${key}"]`);
             const status = tr.querySelector('.theme-save-status');
             const value = row.category === 'color'
@@ -1586,7 +1634,8 @@ function renderThemeSettings(wrap) {
             status.textContent = '';
             status.style.color = 'var(--success)';
             try {
-                const { error } = await supabase.from('description_theme_settings').update({ value }).eq('key', key);
+                const { error } = await supabase.from('description_theme_settings')
+                    .update({ value }).eq('key', key).eq('theme_key', activeKey);
                 if (error) throw error;
                 row.value = value;
                 status.textContent = 'Saved';

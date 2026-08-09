@@ -1062,8 +1062,9 @@ async function openManualMetadataModal(container, body, isDraft) {
     let priorTemplates = [];
     let cardSets = [];
     let descriptionPresets = {};
+    let themeKeys = ['default'];
     try {
-        [policies, priorTemplates, cardSets, descriptionPresets] = await Promise.all([
+        [policies, priorTemplates, cardSets, descriptionPresets, themeKeys] = await Promise.all([
             callBusinessPolicies(),
             supabase.from('listing_templates')
                 .select('category_id, listing_duration, item_location')
@@ -1071,6 +1072,12 @@ async function openManualMetadataModal(container, body, isDraft) {
             supabase.from('card_sets').select('id, name, series').order('series').order('name')
                 .then(({ data }) => data || []),
             callDescriptionPresets().catch(() => ({})),
+            supabase.from('description_theme_settings').select('theme_key')
+                .then(({ data }) => {
+                    const keys = [...new Set((data || []).map(r => r.theme_key || 'default'))];
+                    return (keys.length ? keys : ['default'])
+                        .sort((a, b) => (a === 'default' ? -1 : b === 'default' ? 1 : a.localeCompare(b)));
+                }),
         ]);
     } catch (err) {
         console.error('Failed to load business policies / prior templates / card sets:', err);
@@ -1205,6 +1212,7 @@ async function openManualMetadataModal(container, body, isDraft) {
                     </select>
                 </label>
                 ${selectOrOtherFieldLabeled('lp-nav-finish', 'Finish kind', t.finish_kind, FINISH_KIND_OPTIONS)}
+                ${selectOrOtherField('lp-nav-theme', 'Theme ((none) = default — manage themes in Configuration → Description templates)', t.theme_key, themeKeys)}
                 ${textField('lp-nav-family-label', 'Family label (buyer-facing, e.g. "Reverse Holo")', t.family_label)}
                 ${textField('lp-nav-family-description', 'Family description (only shown by a custom item template, via {{item_description}})', t.family_description, true)}
                 <label style="font-size:13px; display:block; margin-bottom:10px;">Nav rank (order within the family strip)
@@ -1235,7 +1243,7 @@ async function openManualMetadataModal(container, body, isDraft) {
             other.style.display = select.value === OTHER ? 'block' : 'none';
         });
     };
-    ['lp-meta-category', 'lp-meta-duration', 'lp-meta-location', 'lp-nav-finish'].forEach(wireSelectOrOther);
+    ['lp-meta-category', 'lp-meta-duration', 'lp-meta-location', 'lp-nav-finish', 'lp-nav-theme'].forEach(wireSelectOrOther);
 
     const layoutSelect = root.querySelector('#lp-desc-layout-select');
     layoutSelect.addEventListener('change', () => {
@@ -1319,6 +1327,7 @@ async function openManualMetadataModal(container, body, isDraft) {
         const navFields = {
             set_id: root.querySelector('#lp-nav-set').value || null,
             finish_kind: valOrOther('lp-nav-finish'),
+            theme_key: valOrOther('lp-nav-theme'),
             family_label: val('#lp-nav-family-label'),
             family_description: val('#lp-nav-family-description'),
             nav_rank: rawNavRank === '' ? null : parseInt(rawNavRank, 10),
