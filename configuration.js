@@ -47,9 +47,11 @@ let groupsState = {
 };
 
 let descTemplatesState = {
+    tab: 'templates',    // 'templates' | 'theme'
     sections: [],
     templates: [],       // live listing_templates, for the Preview-against picker
     previewTemplateId: null,
+    theme: [],           // description_theme_settings rows
 };
 
 // Only used for the Preview call (real token rendering lives in
@@ -121,9 +123,10 @@ export async function renderConfiguration(container, initialKey = 'sets') {
         wireConfigNav(container, 'groups');
         await loadGroups(container);
     } else if (initialKey === 'description-templates') {
-        descTemplatesState = { sections: [], templates: [], previewTemplateId: null };
+        descTemplatesState = { tab: 'templates', sections: [], templates: [], previewTemplateId: null, theme: [] };
         container.innerHTML = configShell(descTemplatesSectionHTML());
         wireConfigNav(container, 'description-templates');
+        wireDescTabs(container);
         await loadDescTemplates(container);
     } else {
         container.innerHTML = configShell(`<p style="color:var(--text-secondary)">${labelFor(initialKey)} coming soon.</p>`);
@@ -1425,43 +1428,164 @@ function openGroupModal(container, groupId) {
 
 function descTemplatesSectionHTML() {
     return `
-        <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
-            Reusable description HTML, may contain {{tokens}} ({{family_nav}}, {{era_nav}},
-            {{era_hub_link}}, {{era_index}}, {{set_name}}, {{series_name}}). "Layout" rows
-            replace the whole Description box on the Listing pricing page; "Section" rows
-            insert at the cursor. Preview renders tokens against whichever listing you pick below.
-        </p>
-        <div class="filters-bar" style="justify-content:space-between; margin-bottom:12px;">
-            <label style="font-size:12px; color:var(--text-secondary);">
-                Preview against
-                <select id="desc-preview-target" style="margin-left:6px;"></select>
-            </label>
-            <button class="btn btn-primary" id="new-desc-template-btn">+ Add new</button>
+        <div style="display:flex; gap:4px; margin-bottom:16px; border-bottom:1px solid var(--border);">
+            <button class="desc-tab-btn" data-tab="templates">Layouts &amp; sections</button>
+            <button class="desc-tab-btn" data-tab="theme">Theme</button>
         </div>
-        <div id="desc-templates-table-wrap"><p>Loading...</p></div>
+        <div id="desc-tab-content"><p>Loading...</p></div>
         <div id="desc-templates-modal-root"></div>
+        <style>
+            .desc-tab-btn {
+                background:none; border:none; color:var(--text-secondary);
+                padding:8px 14px; font-size:13px; cursor:pointer;
+                border-bottom:2px solid transparent; margin-bottom:-1px;
+            }
+            .desc-tab-btn:hover { color:var(--text); }
+            .desc-tab-btn.active { color:var(--accent); border-bottom-color:var(--accent); }
+        </style>
     `;
 }
 
+function wireDescTabs(container) {
+    container.querySelectorAll('.desc-tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === descTemplatesState.tab);
+        btn.addEventListener('click', () => {
+            if (btn.dataset.tab === descTemplatesState.tab) return;
+            descTemplatesState.tab = btn.dataset.tab;
+            container.querySelectorAll('.desc-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === descTemplatesState.tab));
+            renderDescTabContent(container);
+        });
+    });
+}
+
+function renderDescTabContent(container) {
+    const wrap = container.querySelector('#desc-tab-content');
+    if (descTemplatesState.tab === 'theme') {
+        renderThemeSettings(wrap);
+    } else {
+        wrap.innerHTML = `
+            <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
+                Reusable description HTML, may contain {{tokens}} ({{family_nav}}, {{era_nav}},
+                {{era_hub_link}}, {{era_index}}, {{set_name}}, {{series_name}}). "Layout" rows
+                replace the whole Description box on the Listing pricing page; "Section" rows
+                insert at the cursor. Preview renders tokens against whichever listing you pick below.
+            </p>
+            <div class="filters-bar" style="justify-content:space-between; margin-bottom:12px;">
+                <label style="font-size:12px; color:var(--text-secondary);">
+                    Preview against
+                    <select id="desc-preview-target" style="margin-left:6px;"></select>
+                </label>
+                <button class="btn btn-primary" id="new-desc-template-btn">+ Add new</button>
+            </div>
+            <div id="desc-templates-table-wrap"><p>Loading...</p></div>
+        `;
+        renderDescTemplatesTable(container);
+    }
+}
+
 async function loadDescTemplates(container) {
-    const wrap = container.querySelector('#desc-templates-table-wrap');
+    const wrap = container.querySelector('#desc-tab-content');
     try {
-        const [{ data: sections, error: sErr }, { data: templates, error: tErr }] = await Promise.all([
+        const [{ data: sections, error: sErr }, { data: templates, error: tErr },
+               { data: theme, error: thErr }] = await Promise.all([
             supabase.from('description_sections').select('*').order('sort_order').order('label'),
             supabase.from('listing_templates').select('id, name, listing_id').not('listing_id', 'is', null).order('name'),
+            supabase.from('description_theme_settings').select('*').order('category').order('label'),
         ]);
         if (sErr) throw sErr;
         if (tErr) throw tErr;
+        if (thErr) throw thErr;
         descTemplatesState.sections = sections || [];
         descTemplatesState.templates = templates || [];
+        descTemplatesState.theme = theme || [];
         if (!descTemplatesState.previewTemplateId && descTemplatesState.templates.length) {
             descTemplatesState.previewTemplateId = descTemplatesState.templates[0].id;
         }
-        renderDescTemplatesTable(container);
+        renderDescTabContent(container);
     } catch (err) {
         console.error(err);
         wrap.innerHTML = `<p style="color:var(--danger)">Failed to load description templates: ${err.message}</p>`;
     }
+}
+
+// Quick, inline-editable knobs (colors/sizing/button+label text) for the
+// family_nav/era_nav/era_index renderer in importer/ebay_descriptions.py
+// — a fixed, code-referenced key set (not a freeform library), so this
+// is a plain list + per-row Save, not a full CRUD-with-Add UI.
+function renderThemeSettings(wrap) {
+    const CATEGORY_LABELS = { color: 'Colors', size: 'Sizing', text: 'Text' };
+    const byCategory = {};
+    descTemplatesState.theme.forEach(row => {
+        (byCategory[row.category] ||= []).push(row);
+    });
+
+    const rowHTML = (row) => {
+        const inputId = `theme-input-${row.key}`;
+        const valueInput = row.category === 'color'
+            ? `<input type="color" id="${inputId}" value="${escapeAttr(row.value)}" style="width:44px; height:30px; padding:2px; vertical-align:middle;" />
+               <input type="text" id="${inputId}-hex" value="${escapeAttr(row.value)}" style="width:90px; margin-left:6px;" />`
+            : row.category === 'size'
+                ? `<input type="number" id="${inputId}" value="${escapeAttr(row.value)}" style="width:90px;" />`
+                : `<input type="text" id="${inputId}" value="${escapeAttr(row.value)}" style="width:280px;" />`;
+        return `
+            <tr data-key="${escapeAttr(row.key)}">
+                <td style="white-space:nowrap;">${escapeHTML(row.label)}</td>
+                <td>${valueInput}</td>
+                <td style="width:70px;"><button class="btn theme-save-btn" data-key="${escapeAttr(row.key)}">Save</button></td>
+                <td class="theme-save-status" style="font-size:11px; color:var(--success);"></td>
+            </tr>
+        `;
+    };
+
+    wrap.innerHTML = `
+        <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
+            Small tweaks to how {{family_nav}}/{{era_nav}}/{{era_index}} render — no code change or
+            deploy needed. Changes apply the next time a description is previewed or pushed.
+        </p>
+        ${Object.entries(CATEGORY_LABELS).map(([cat, label]) => `
+            <h4 style="margin:16px 0 8px;">${label}</h4>
+            <table style="margin-bottom:8px;">
+                <tbody>${(byCategory[cat] || []).map(rowHTML).join('')}</tbody>
+            </table>
+        `).join('')}
+    `;
+
+    // Keep the color swatch and its hex text input in sync with each other.
+    (byCategory.color || []).forEach(row => {
+        const swatch = wrap.querySelector(`#theme-input-${row.key}`);
+        const hex = wrap.querySelector(`#theme-input-${row.key}-hex`);
+        swatch.addEventListener('input', () => { hex.value = swatch.value; });
+        hex.addEventListener('input', () => {
+            if (/^#[0-9a-fA-F]{6}$/.test(hex.value)) swatch.value = hex.value;
+        });
+    });
+
+    wrap.querySelectorAll('.theme-save-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const key = btn.dataset.key;
+            const row = descTemplatesState.theme.find(r => r.key === key);
+            const tr = wrap.querySelector(`tr[data-key="${key}"]`);
+            const status = tr.querySelector('.theme-save-status');
+            const value = row.category === 'color'
+                ? wrap.querySelector(`#theme-input-${key}-hex`).value
+                : wrap.querySelector(`#theme-input-${key}`).value;
+            btn.disabled = true;
+            status.textContent = '';
+            status.style.color = 'var(--success)';
+            try {
+                const { error } = await supabase.from('description_theme_settings').update({ value }).eq('key', key);
+                if (error) throw error;
+                row.value = value;
+                status.textContent = 'Saved';
+            } catch (err) {
+                console.error(err);
+                status.style.color = 'var(--danger)';
+                status.textContent = err.message || 'Failed to save.';
+            } finally {
+                btn.disabled = false;
+            }
+        });
+    });
 }
 
 function renderDescTemplatesTable(container) {
