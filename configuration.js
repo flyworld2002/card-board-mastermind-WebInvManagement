@@ -1483,6 +1483,14 @@ function renderDescTabContent(container) {
                 needed. Until you create a matching row, everything renders using the built-in look from
                 the Theme tab.
             </p>
+            <p style="color:var(--text-secondary); font-size:12px; margin:0 0 16px; padding:10px 12px; background:var(--bg-tertiary); border-radius:6px;">
+                Any item template can ALSO be dropped straight into a description on its own, standalone
+                &mdash; just type <code>{{your_key}}</code> (no <code>family_nav</code>/<code>era_nav</code>
+                wrapper needed), e.g. <code>{{family_tile_example}}</code>. It renders using THIS listing's
+                own family label/nav image/family description, with an empty url (it's a link to itself).
+                Useful for e.g. a small "you are here" card outside the family strip, or just to preview
+                what an <code>_example</code> row looks like before promoting its key to a reserved one.
+            </p>
             <div class="filters-bar" style="justify-content:space-between; margin-bottom:12px;">
                 <label style="font-size:12px; color:var(--text-secondary);">
                     Preview against
