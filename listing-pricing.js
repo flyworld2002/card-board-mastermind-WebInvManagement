@@ -1206,6 +1206,7 @@ async function openManualMetadataModal(container, body, isDraft) {
                 </label>
                 ${selectOrOtherFieldLabeled('lp-nav-finish', 'Finish kind', t.finish_kind, FINISH_KIND_OPTIONS)}
                 ${textField('lp-nav-family-label', 'Family label (buyer-facing, e.g. "Reverse Holo")', t.family_label)}
+                ${textField('lp-nav-family-description', 'Family description (only shown by a custom item template, via {{item_description}})', t.family_description, true)}
                 <label style="font-size:13px; display:block; margin-bottom:10px;">Nav rank (order within the family strip)
                     <input type="number" id="lp-nav-rank" value="${t.nav_rank ?? ''}" style="width:100%; margin-top:4px;" />
                 </label>
@@ -1319,6 +1320,7 @@ async function openManualMetadataModal(container, body, isDraft) {
             set_id: root.querySelector('#lp-nav-set').value || null,
             finish_kind: valOrOther('lp-nav-finish'),
             family_label: val('#lp-nav-family-label'),
+            family_description: val('#lp-nav-family-description'),
             nav_rank: rawNavRank === '' ? null : parseInt(rawNavRank, 10),
             is_set_primary: root.querySelector('#lp-nav-primary').checked,
             show_in_nav: root.querySelector('#lp-nav-show').checked,
