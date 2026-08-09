@@ -1470,6 +1470,19 @@ function renderDescTabContent(container) {
                 replace the whole Description box on the Listing pricing page; "Section" rows
                 insert at the cursor. Preview renders tokens against whichever listing you pick below.
             </p>
+            <p style="color:var(--text-secondary); font-size:12px; margin:0 0 16px; padding:10px 12px; background:var(--bg-tertiary); border-radius:6px;">
+                <b>Item templates</b> control what ONE tile/row/chip inside {{family_nav}}, {{era_nav}},
+                or {{era_index}} looks like &mdash; Python still handles the repeating and the DB lookups,
+                your template just controls the markup. Use <code>{{item_label}}</code>,
+                <code>{{item_url}}</code>, <code>{{item_image_url}}</code> as placeholders inside one.
+                Reserved keys that apply everywhere automatically: <code>family_tile</code>
+                (+ optional <code>family_tile_current</code> for the "you're here" tile),
+                <code>era_row</code>, <code>era_chip</code> (+ optional <code>era_chip_current</code>).
+                Give a template any OTHER key and reference it by name in one listing's description
+                with <code>{{family_nav:your_key}}</code> / <code>{{era_nav:your_key}}</code> /
+                <code>{{era_index:your_key}}</code> to override just that listing. Until you create a
+                matching row, everything renders using the built-in look from the Theme tab.
+            </p>
             <div class="filters-bar" style="justify-content:space-between; margin-bottom:12px;">
                 <label style="font-size:12px; color:var(--text-secondary);">
                     Preview against
@@ -1591,7 +1604,8 @@ function renderThemeSettings(wrap) {
 function renderDescTemplatesTable(container) {
     const wrap = container.querySelector('#desc-templates-table-wrap');
     const layouts = descTemplatesState.sections.filter(s => s.kind === 'layout');
-    const sections = descTemplatesState.sections.filter(s => s.kind !== 'layout');
+    const sections = descTemplatesState.sections.filter(s => s.kind === 'section');
+    const itemTemplates = descTemplatesState.sections.filter(s => s.kind === 'item_template');
 
     const picker = container.querySelector('#desc-preview-target');
     picker.innerHTML = descTemplatesState.templates.length
@@ -1624,7 +1638,8 @@ function renderDescTemplatesTable(container) {
 
     wrap.innerHTML =
         groupTable('Layouts', 'Whole-description starters — replace the Description box entirely.', layouts)
-        + groupTable('Sections', 'Small reusable blocks — insert at the cursor without touching the rest.', sections);
+        + groupTable('Sections', 'Small reusable blocks — insert at the cursor without touching the rest.', sections)
+        + groupTable('Item templates', 'One tile/row/chip inside {{family_nav}}/{{era_nav}}/{{era_index}} — see the note above.', itemTemplates);
 
     const addBtn = container.querySelector('#new-desc-template-btn');
     if (!addBtn.dataset.wired) {
@@ -1655,8 +1670,9 @@ function openDescTemplateModal(container, sectionId) {
                         <label style="font-size:12px; color:var(--text-secondary); flex:1;">
                             Kind
                             <select name="kind" style="width:100%; margin-top:4px;">
-                                <option value="section" ${existing?.kind !== 'layout' ? 'selected' : ''}>Section (insert at cursor)</option>
+                                <option value="section" ${!existing || existing.kind === 'section' ? 'selected' : ''}>Section (insert at cursor)</option>
                                 <option value="layout" ${existing?.kind === 'layout' ? 'selected' : ''}>Layout (replaces textarea)</option>
+                                <option value="item_template" ${existing?.kind === 'item_template' ? 'selected' : ''}>Item template (one tile/row/chip)</option>
                             </select>
                         </label>
                         ${field('Sort order', 'number', 'sort_order', existing?.sort_order ?? 0)}
@@ -1687,6 +1703,21 @@ function openDescTemplateModal(container, sectionId) {
     }
 
     root.querySelector('#desc-template-preview').addEventListener('click', async () => {
+        const kind = root.querySelector('select[name="kind"]').value;
+        if (kind === 'item_template') {
+            // Its {{item_label}}/{{item_url}}/{{item_image_url}} placeholders
+            // are only understood in the substitution pass that runs INSIDE
+            // family_nav/era_nav/era_index — previewing the raw HTML directly
+            // against /api/description-preview wouldn't render anything
+            // meaningful (those tokens aren't in its vocabulary).
+            const key = root.querySelector('input[name="key"]').value.trim();
+            window.alert(key
+                ? `Item templates can't be previewed standalone. Save this, then put `
+                  + `{{family_nav:${key}}} (or era_nav:/era_index:) in a Layout or Section and Preview that instead.`
+                : `Item templates can't be previewed standalone — set a Key, Save, then reference it as `
+                  + `{{family_nav:your_key}} (or era_nav:/era_index:) from a Layout or Section.`);
+            return;
+        }
         const html = root.querySelector('textarea[name="html"]').value;
         const templateId = descTemplatesState.previewTemplateId;
         if (!templateId) { window.alert('No live listing available to preview against.'); return; }
