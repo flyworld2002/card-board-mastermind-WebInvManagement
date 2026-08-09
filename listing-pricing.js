@@ -995,43 +995,6 @@ async function callDescriptionSync(dryRun) {
     return resp.json();
 }
 
-async function callListDescriptionSections() {
-    const resp = await fetch(`${PICKING_API_URL}/api/description-sections`, {
-        headers: { 'x-picking-token': PICKING_API_TOKEN },
-    });
-    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
-    return resp.json();
-}
-
-async function callCreateDescriptionSection(payload) {
-    const resp = await fetch(`${PICKING_API_URL}/api/description-sections`, {
-        method: 'POST',
-        headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-    });
-    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
-    return resp.json();
-}
-
-async function callUpdateDescriptionSection(id, payload) {
-    const resp = await fetch(`${PICKING_API_URL}/api/description-sections/${id}`, {
-        method: 'PUT',
-        headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-    });
-    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
-    return resp.json();
-}
-
-async function callDeleteDescriptionSection(id) {
-    const resp = await fetch(`${PICKING_API_URL}/api/description-sections/${id}`, {
-        method: 'DELETE',
-        headers: { 'x-picking-token': PICKING_API_TOKEN },
-    });
-    if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
-    return resp.json();
-}
-
 async function callPreviewNewListing() {
     const resp = await fetch(
         `${PICKING_API_URL}/api/preview-new-listing/${state.template.id}?account_num=${state.accountNum}`,
@@ -1202,8 +1165,10 @@ async function openManualMetadataModal(container, body, isDraft) {
                             .map(([key, p]) => `<option value="${escapeHtml(key)}">${escapeHtml(p.label)}</option>`).join('')}
                     </select>
                     <button type="button" class="btn" id="lp-desc-preview-btn">Preview</button>
-                    <button type="button" class="btn" id="lp-desc-manage-sections-btn" title="Add/edit/delete reusable sections and layouts">Manage sections</button>
                 </div>
+                <p style="font-size:11px; color:var(--text-secondary); margin:0 0 4px;">
+                    Add/edit/reorder templates in Configuration &rarr; Description templates.
+                </p>
                 <textarea id="lp-meta-description" rows="4" style="width:100%; margin-bottom:10px;">${escapeHtml(t.description_html || '')}</textarea>
                 ${selectOrOtherField('lp-meta-duration', 'Listing duration', t.listing_duration, priorValues('listing_duration'))}
                 ${selectOrOtherField('lp-meta-location', 'Location', t.item_location, priorValues('item_location'))}
@@ -1271,33 +1236,26 @@ async function openManualMetadataModal(container, body, isDraft) {
     };
     ['lp-meta-category', 'lp-meta-duration', 'lp-meta-location', 'lp-nav-finish'].forEach(wireSelectOrOther);
 
-    // ._presets holds the live preset map for each select — a property on
-    // the element itself rather than closing over `descriptionPresets`, so
-    // refreshDescriptionPresetOptions() (called after the section manager
-    // closes) can update what these handlers see without needing access
-    // to this function's closure.
     const layoutSelect = root.querySelector('#lp-desc-layout-select');
-    layoutSelect._presets = descriptionPresets;
     layoutSelect.addEventListener('change', () => {
         const key = layoutSelect.value;
         layoutSelect.value = '';
-        if (!key || !layoutSelect._presets[key]) return;
+        if (!key || !descriptionPresets[key]) return;
         const textarea = root.querySelector('#lp-meta-description');
         if (textarea.value.trim()
             && !window.confirm("Replace the current Description with this layout? This overwrites what's in the box now.")) {
             return;
         }
-        textarea.value = layoutSelect._presets[key].html;
+        textarea.value = descriptionPresets[key].html;
     });
 
     const sectionSelect = root.querySelector('#lp-desc-section-select');
-    sectionSelect._presets = descriptionPresets;
     sectionSelect.addEventListener('change', () => {
         const key = sectionSelect.value;
         sectionSelect.value = '';
-        if (!key || !sectionSelect._presets[key]) return;
+        if (!key || !descriptionPresets[key]) return;
         const textarea = root.querySelector('#lp-meta-description');
-        const insertText = sectionSelect._presets[key].html;
+        const insertText = descriptionPresets[key].html;
         const start = textarea.selectionStart ?? textarea.value.length;
         const end = textarea.selectionEnd ?? textarea.value.length;
         textarea.value = textarea.value.slice(0, start) + insertText + textarea.value.slice(end);
@@ -1305,8 +1263,6 @@ async function openManualMetadataModal(container, body, isDraft) {
         textarea.focus();
         textarea.setSelectionRange(newPos, newPos);
     });
-
-    root.querySelector('#lp-desc-manage-sections-btn').addEventListener('click', () => openSectionManagerModal());
 
     root.querySelector('#lp-desc-preview-btn').addEventListener('click', async () => {
         const previewBtn = root.querySelector('#lp-desc-preview-btn');
@@ -1420,179 +1376,6 @@ function openDescriptionPreviewModal(html) {
     overlay.querySelector('#lp-preview-desktop').addEventListener('click', () => { frame.style.width = '100%'; });
     overlay.querySelector('#lp-preview-mobile').addEventListener('click', () => { frame.style.width = '375px'; });
     overlay.querySelector('#lp-preview-close').addEventListener('click', () => overlay.remove());
-}
-
-// After the section manager closes, refresh the Insert-layout/Insert-
-// section dropdowns (options list AND each select's ._presets lookup —
-// see openManualMetadataModal) if the Edit-fields modal is still open, so
-// a newly added/edited section shows up without having to reopen it.
-async function refreshDescriptionPresetOptions() {
-    const layoutSelect = document.querySelector('#lp-desc-layout-select');
-    const sectionSelect = document.querySelector('#lp-desc-section-select');
-    if (!layoutSelect && !sectionSelect) return;
-    try {
-        const presets = await callDescriptionPresets();
-        if (layoutSelect) {
-            layoutSelect._presets = presets;
-            layoutSelect.innerHTML = '<option value="">Insert layout... (replaces everything)</option>'
-                + Object.entries(presets).filter(([, p]) => p.kind === 'layout')
-                    .map(([key, p]) => `<option value="${escapeHtml(key)}">${escapeHtml(p.label)}</option>`).join('');
-        }
-        if (sectionSelect) {
-            sectionSelect._presets = presets;
-            sectionSelect.innerHTML = '<option value="">Insert section... (at cursor)</option>'
-                + Object.entries(presets).filter(([, p]) => p.kind === 'section')
-                    .map(([key, p]) => `<option value="${escapeHtml(key)}">${escapeHtml(p.label)}</option>`).join('');
-        }
-    } catch (err) {
-        console.error('Failed to refresh description presets:', err);
-    }
-}
-
-// Top-level overlay, same reasoning as openDescriptionPreviewModal — Fei's
-// library of reusable layouts/sections, edited once here, drawn from by
-// every listing's Insert-layout / Insert-section dropdowns.
-function openSectionManagerModal() {
-    const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); '
-        + 'display:flex; align-items:center; justify-content:center; z-index:200;';
-    overlay.innerHTML = `
-        <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:640px; max-width:95vw; max-height:85vh; overflow-y:auto;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-                <h3 style="margin:0;">Manage description sections</h3>
-                <button type="button" class="btn" id="lp-sections-close">Close</button>
-            </div>
-            <button type="button" class="btn btn-primary" id="lp-sections-add" style="margin-bottom:12px;">Add new</button>
-            <div id="lp-sections-list">Loading...</div>
-        </div>
-    `;
-    document.body.appendChild(overlay);
-    overlay.querySelector('#lp-sections-close').addEventListener('click', async () => {
-        overlay.remove();
-        await refreshDescriptionPresetOptions();
-    });
-    overlay.querySelector('#lp-sections-add').addEventListener('click', () => openSectionEditForm(overlay, null));
-    loadSectionList(overlay);
-}
-
-async function loadSectionList(overlay) {
-    const listEl = overlay.querySelector('#lp-sections-list');
-    listEl.innerHTML = 'Loading...';
-    try {
-        const sections = await callListDescriptionSections();
-        if (!sections.length) {
-            listEl.innerHTML = '<p style="color:var(--text-secondary);">No sections yet.</p>';
-            return;
-        }
-        listEl.innerHTML = sections.map(s => `
-            <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border);">
-                <div>
-                    <span style="font-weight:bold;">${escapeHtml(s.label)}</span>
-                    <span style="font-size:11px; color:var(--text-secondary); margin-left:6px;">
-                        ${escapeHtml(s.kind)} &middot; key: ${escapeHtml(s.key)} &middot; order ${s.sort_order}
-                    </span>
-                </div>
-                <div style="display:flex; gap:6px;">
-                    <button type="button" class="btn" data-edit="${escapeHtml(s.id)}">Edit</button>
-                    <button type="button" class="btn" data-delete="${escapeHtml(s.id)}">Delete</button>
-                </div>
-            </div>
-        `).join('');
-        listEl.querySelectorAll('[data-edit]').forEach(btn => {
-            const section = sections.find(s => s.id === btn.dataset.edit);
-            btn.addEventListener('click', () => openSectionEditForm(overlay, section));
-        });
-        listEl.querySelectorAll('[data-delete]').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                if (!window.confirm(`Delete "${sections.find(s => s.id === btn.dataset.delete)?.label}"? This cannot be undone.`)) return;
-                try {
-                    await callDeleteDescriptionSection(btn.dataset.delete);
-                    await loadSectionList(overlay);
-                } catch (err) {
-                    window.alert(`Delete failed: ${err.message}`);
-                }
-            });
-        });
-    } catch (err) {
-        listEl.innerHTML = `<p style="color:var(--danger);">Failed to load: ${escapeHtml(err.message)}</p>`;
-    }
-}
-
-function openSectionEditForm(overlay, section) {
-    const isNew = !section;
-    const formOverlay = document.createElement('div');
-    formOverlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.7); '
-        + 'display:flex; align-items:center; justify-content:center; z-index:210;';
-    formOverlay.innerHTML = `
-        <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:560px; max-width:95vw; max-height:90vh; overflow-y:auto;">
-            <h3 style="margin:0 0 12px;">${isNew ? 'Add section' : 'Edit section'}</h3>
-            <label style="font-size:13px; display:block; margin-bottom:10px;">Key (unique, used internally)
-                <input type="text" id="lp-sec-key" value="${escapeHtml(section?.key || '')}" style="width:100%; margin-top:4px;" ${isNew ? '' : 'readonly'} />
-            </label>
-            <label style="font-size:13px; display:block; margin-bottom:10px;">Label (shown in the dropdown)
-                <input type="text" id="lp-sec-label" value="${escapeHtml(section?.label || '')}" style="width:100%; margin-top:4px;" />
-            </label>
-            <label style="font-size:13px; display:block; margin-bottom:10px;">Kind
-                <select id="lp-sec-kind" style="width:100%; margin-top:4px;">
-                    <option value="section" ${section?.kind !== 'layout' ? 'selected' : ''}>Section (insert at cursor)</option>
-                    <option value="layout" ${section?.kind === 'layout' ? 'selected' : ''}>Layout (replaces textarea)</option>
-                </select>
-            </label>
-            <label style="font-size:13px; display:block; margin-bottom:10px;">Sort order
-                <input type="number" id="lp-sec-sort" value="${section?.sort_order ?? 0}" style="width:100%; margin-top:4px;" />
-            </label>
-            <label style="font-size:13px; display:block; margin-bottom:4px;">HTML (may contain {{tokens}})</label>
-            <textarea id="lp-sec-html" rows="8" style="width:100%; margin-bottom:10px; font-family:monospace; font-size:12px;">${escapeHtml(section?.html || '')}</textarea>
-            <div id="lp-sec-error" style="color:var(--danger); font-size:12px; margin-bottom:8px;"></div>
-            <div style="display:flex; justify-content:space-between; gap:8px;">
-                <button type="button" class="btn" id="lp-sec-preview">Preview</button>
-                <div style="display:flex; gap:8px;">
-                    <button type="button" class="btn" id="lp-sec-cancel">Cancel</button>
-                    <button type="button" class="btn btn-primary" id="lp-sec-save">Save</button>
-                </div>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(formOverlay);
-
-    formOverlay.querySelector('#lp-sec-cancel').addEventListener('click', () => formOverlay.remove());
-    formOverlay.querySelector('#lp-sec-preview').addEventListener('click', async () => {
-        try {
-            const result = await callDescriptionPreview(formOverlay.querySelector('#lp-sec-html').value);
-            openDescriptionPreviewModal(result.html);
-        } catch (err) {
-            window.alert(`Preview failed: ${err.message}`);
-        }
-    });
-    formOverlay.querySelector('#lp-sec-save').addEventListener('click', async () => {
-        const errBox = formOverlay.querySelector('#lp-sec-error');
-        const saveBtn = formOverlay.querySelector('#lp-sec-save');
-        const payload = {
-            key: formOverlay.querySelector('#lp-sec-key').value.trim(),
-            label: formOverlay.querySelector('#lp-sec-label').value.trim(),
-            html: formOverlay.querySelector('#lp-sec-html').value,
-            kind: formOverlay.querySelector('#lp-sec-kind').value,
-            sort_order: parseInt(formOverlay.querySelector('#lp-sec-sort').value, 10) || 0,
-        };
-        if (!payload.key || !payload.label) {
-            errBox.textContent = 'Key and label are required.';
-            return;
-        }
-        saveBtn.disabled = true;
-        errBox.textContent = '';
-        try {
-            if (isNew) {
-                await callCreateDescriptionSection(payload);
-            } else {
-                await callUpdateDescriptionSection(section.id, payload);
-            }
-            formOverlay.remove();
-            await loadSectionList(overlay);
-        } catch (err) {
-            errBox.textContent = err.message;
-            saveBtn.disabled = false;
-        }
-    });
 }
 
 async function doPreviewNewListing(container) {

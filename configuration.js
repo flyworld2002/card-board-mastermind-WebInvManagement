@@ -46,6 +46,23 @@ let groupsState = {
     templates: [],
 };
 
+let descTemplatesState = {
+    sections: [],
+    templates: [],       // live listing_templates, for the Preview-against picker
+    previewTemplateId: null,
+};
+
+// Only used for the Preview call (real token rendering lives in
+// importer/ebay_descriptions.py, reached via picking_api.py) — every
+// other description_sections operation here is a plain Supabase CRUD,
+// same as every other Configuration table, deliberately NOT routed
+// through picking_api's /api/description-sections endpoints (those still
+// exist for other callers, e.g. the CLI, but going direct is simpler and
+// doesn't depend on the Tailscale-only desktop service being up for
+// what's otherwise a plain settings edit).
+const PICKING_API_URL = 'https://desktop-tu1m2fc.tail2c58d7.ts.net:8765';
+const PICKING_API_TOKEN = 'I1knbOJAve_UZJQHAFZANds9-HalgCxcRJw1GXDg404';
+
 // The 7 variant lookup tables card_variants references by `code` — all
 // share the identical (code, display_name, sort_order) shape, so one
 // generic CRUD component handles all of them instead of 7 near-copies.
@@ -103,6 +120,11 @@ export async function renderConfiguration(container, initialKey = 'sets') {
         container.innerHTML = configShell(groupsSectionHTML());
         wireConfigNav(container, 'groups');
         await loadGroups(container);
+    } else if (initialKey === 'description-templates') {
+        descTemplatesState = { sections: [], templates: [], previewTemplateId: null };
+        container.innerHTML = configShell(descTemplatesSectionHTML());
+        wireConfigNav(container, 'description-templates');
+        await loadDescTemplates(container);
     } else {
         container.innerHTML = configShell(`<p style="color:var(--text-secondary)">${labelFor(initialKey)} coming soon.</p>`);
         wireConfigNav(container, initialKey);
@@ -123,6 +145,7 @@ function configShell(bodyHTML) {
                 <a href="#pricing-rules" data-config-nav="pricing-rules" class="config-nav-item">Pricing rules</a>
                 <a href="#pricing-profiles" data-config-nav="pricing-profiles" class="config-nav-item">Pricing profiles</a>
                 <a href="#groups" data-config-nav="groups" class="config-nav-item">Groups</a>
+                <a href="#description-templates" data-config-nav="description-templates" class="config-nav-item">Description templates</a>
                 <a href="#variant-attributes" data-config-nav="variant-attributes" class="config-nav-item">Variant attributes</a>
                 <a href="#sync-controls" data-config-nav="sync-controls" class="config-nav-item">Sync controls</a>
             </div>
@@ -167,6 +190,8 @@ function wireConfigNav(container, activeKey) {
                 await renderConfiguration(container, 'pricing-profiles');
             } else if (key === 'groups') {
                 await renderConfiguration(container, 'groups');
+            } else if (key === 'description-templates') {
+                await renderConfiguration(container, 'description-templates');
             } else {
                 // Other configuration sub-pages land here later.
                 container.innerHTML = configShell(`<p style="color:var(--text-secondary)">${labelFor(key)} coming soon.</p>`);
@@ -183,6 +208,7 @@ function labelFor(key) {
         'sync-controls': 'Sync controls',
         'pricing-profiles': 'Pricing profiles',
         'groups': 'Groups',
+        'description-templates': 'Description templates',
     }[key] || key;
 }
 
@@ -1387,6 +1413,217 @@ function openGroupModal(container, groupId) {
                 : (err.message || 'Failed to save group.');
         }
     });
+}
+
+// ── Description templates section (description_sections library) ──────────
+// Reusable HTML blocks for eBay listing descriptions — 'layout' rows are
+// whole-description starters (Insert-layout dropdown on the Listing
+// pricing page, replaces the textarea), 'section' rows are small blocks
+// (Insert-section dropdown, inserts at cursor). Moved here from a modal
+// inside the Listing pricing page's Edit-fields panel — that space was
+// too cramped for a real HTML editor + preview workflow.
+
+function descTemplatesSectionHTML() {
+    return `
+        <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
+            Reusable description HTML, may contain {{tokens}} ({{family_nav}}, {{era_nav}},
+            {{era_hub_link}}, {{era_index}}, {{set_name}}, {{series_name}}). "Layout" rows
+            replace the whole Description box on the Listing pricing page; "Section" rows
+            insert at the cursor. Preview renders tokens against whichever listing you pick below.
+        </p>
+        <div class="filters-bar" style="justify-content:space-between; margin-bottom:12px;">
+            <label style="font-size:12px; color:var(--text-secondary);">
+                Preview against
+                <select id="desc-preview-target" style="margin-left:6px;"></select>
+            </label>
+            <button class="btn btn-primary" id="new-desc-template-btn">+ Add new</button>
+        </div>
+        <div id="desc-templates-table-wrap"><p>Loading...</p></div>
+        <div id="desc-templates-modal-root"></div>
+    `;
+}
+
+async function loadDescTemplates(container) {
+    const wrap = container.querySelector('#desc-templates-table-wrap');
+    try {
+        const [{ data: sections, error: sErr }, { data: templates, error: tErr }] = await Promise.all([
+            supabase.from('description_sections').select('*').order('sort_order').order('label'),
+            supabase.from('listing_templates').select('id, name, listing_id').not('listing_id', 'is', null).order('name'),
+        ]);
+        if (sErr) throw sErr;
+        if (tErr) throw tErr;
+        descTemplatesState.sections = sections || [];
+        descTemplatesState.templates = templates || [];
+        if (!descTemplatesState.previewTemplateId && descTemplatesState.templates.length) {
+            descTemplatesState.previewTemplateId = descTemplatesState.templates[0].id;
+        }
+        renderDescTemplatesTable(container);
+    } catch (err) {
+        console.error(err);
+        wrap.innerHTML = `<p style="color:var(--danger)">Failed to load description templates: ${err.message}</p>`;
+    }
+}
+
+function renderDescTemplatesTable(container) {
+    const wrap = container.querySelector('#desc-templates-table-wrap');
+    const rows = descTemplatesState.sections;
+
+    const picker = container.querySelector('#desc-preview-target');
+    picker.innerHTML = descTemplatesState.templates.length
+        ? descTemplatesState.templates.map(t => `<option value="${t.id}" ${t.id === descTemplatesState.previewTemplateId ? 'selected' : ''}>${escapeHTML(t.name)}</option>`).join('')
+        : `<option value="">(no live listings to preview against)</option>`;
+    if (!picker.dataset.wired) {
+        picker.dataset.wired = '1';
+        picker.addEventListener('change', () => { descTemplatesState.previewTemplateId = picker.value || null; });
+    }
+
+    if (!rows.length) {
+        wrap.innerHTML = `<p style="color:var(--text-secondary)">No description templates yet.</p>`;
+    } else {
+        wrap.innerHTML = `
+            <table>
+                <thead><tr><th>Label</th><th>Key</th><th>Kind</th><th>Order</th><th style="width:60px;"></th></tr></thead>
+                <tbody>
+                    ${rows.map(s => `
+                        <tr>
+                            <td>${escapeHTML(s.label)}</td>
+                            <td><code>${escapeHTML(s.key)}</code></td>
+                            <td>${escapeHTML(s.kind)}</td>
+                            <td>${s.sort_order}</td>
+                            <td><button class="btn edit-desc-template-btn" data-id="${s.id}">Edit</button></td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+    }
+
+    const addBtn = container.querySelector('#new-desc-template-btn');
+    if (!addBtn.dataset.wired) {
+        addBtn.dataset.wired = '1';
+        addBtn.addEventListener('click', () => openDescTemplateModal(container, null));
+    }
+    wrap.querySelectorAll('.edit-desc-template-btn').forEach(btn => {
+        btn.addEventListener('click', () => openDescTemplateModal(container, btn.dataset.id));
+    });
+}
+
+function openDescTemplateModal(container, sectionId) {
+    const isEdit = sectionId !== null;
+    const existing = isEdit ? descTemplatesState.sections.find(s => s.id === sectionId) : null;
+    if (isEdit && !existing) return;
+    const root = container.querySelector('#desc-templates-modal-root');
+
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:760px; max-width:95vw; max-height:88vh; overflow-y:auto;">
+                <h3 style="margin:0 0 16px;">${isEdit ? 'Edit' : 'Add'} description template</h3>
+                <form id="desc-template-form">
+                    <div style="display:flex; gap:12px; margin-bottom:10px;">
+                        ${field('Key (unique)', 'text', 'key', existing?.key || '')}
+                        ${field('Label', 'text', 'label', existing?.label || '')}
+                    </div>
+                    <div style="display:flex; gap:12px; margin-bottom:10px; align-items:flex-end;">
+                        <label style="font-size:12px; color:var(--text-secondary); flex:1;">
+                            Kind
+                            <select name="kind" style="width:100%; margin-top:4px;">
+                                <option value="section" ${existing?.kind !== 'layout' ? 'selected' : ''}>Section (insert at cursor)</option>
+                                <option value="layout" ${existing?.kind === 'layout' ? 'selected' : ''}>Layout (replaces textarea)</option>
+                            </select>
+                        </label>
+                        ${field('Sort order', 'number', 'sort_order', existing?.sort_order ?? 0)}
+                    </div>
+                    <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">HTML</label>
+                    <textarea name="html" rows="16" style="width:100%; font-family:monospace; font-size:12px; margin-bottom:10px;" required>${escapeHTML(existing?.html || '')}</textarea>
+                    <div id="desc-template-error" style="color:var(--danger); font-size:12px; margin-bottom:10px;"></div>
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        ${isEdit ? `<button type="button" class="btn" id="desc-template-delete" style="color:var(--danger); border-color:var(--danger);">Delete</button>` : '<span></span>'}
+                        <div style="display:flex; gap:8px;">
+                            <button type="button" class="btn" id="desc-template-preview">Preview</button>
+                            <button type="button" class="btn" id="desc-template-cancel">Cancel</button>
+                            <button type="submit" class="btn btn-primary">${isEdit ? 'Save changes' : 'Create'}</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    `;
+
+    root.querySelector('#desc-template-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+
+    if (isEdit) {
+        root.querySelector('#desc-template-delete').addEventListener('click', async () => {
+            root.innerHTML = '';
+            await confirmDelete(container, 'description_sections', sectionId, `"${existing.label}"`, () => loadDescTemplates(container));
+        });
+    }
+
+    root.querySelector('#desc-template-preview').addEventListener('click', async () => {
+        const html = root.querySelector('textarea[name="html"]').value;
+        const templateId = descTemplatesState.previewTemplateId;
+        if (!templateId) { window.alert('No live listing available to preview against.'); return; }
+        try {
+            const resp = await fetch(`${PICKING_API_URL}/api/description-preview/${templateId}`, {
+                method: 'POST',
+                headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+                body: JSON.stringify({ description_html: html }),
+            });
+            if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
+            const result = await resp.json();
+            openDescTemplatePreviewWindow(result.html);
+        } catch (err) {
+            window.alert(`Preview failed: ${err.message}`);
+        }
+    });
+
+    root.querySelector('#desc-template-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#desc-template-error');
+        errBox.textContent = '';
+        const fd = new FormData(e.target);
+        const payload = {
+            key: fd.get('key').trim(),
+            label: fd.get('label').trim(),
+            kind: fd.get('kind'),
+            sort_order: parseInt(fd.get('sort_order'), 10) || 0,
+            html: fd.get('html'),
+        };
+        try {
+            const { error } = isEdit
+                ? await supabase.from('description_sections').update(payload).eq('id', sectionId)
+                : await supabase.from('description_sections').insert(payload);
+            if (error) throw error;
+            root.innerHTML = '';
+            await loadDescTemplates(container);
+        } catch (err) {
+            console.error(err);
+            errBox.textContent = err.code === '23505' ? `Key "${payload.key}" is already in use.` : (err.message || 'Failed to save.');
+        }
+    });
+}
+
+function openDescTemplatePreviewWindow(html) {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:200;';
+    overlay.innerHTML = `
+        <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:16px; width:820px; max-width:95vw; max-height:90vh; display:flex; flex-direction:column;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <h3 style="margin:0;">Preview</h3>
+                <div style="display:flex; gap:6px;">
+                    <button type="button" class="btn" id="desc-preview-desktop">Desktop</button>
+                    <button type="button" class="btn" id="desc-preview-mobile">Mobile</button>
+                    <button type="button" class="btn" id="desc-preview-close">Close</button>
+                </div>
+            </div>
+            <iframe id="desc-preview-frame" style="border:1px solid var(--border); width:100%; height:70vh; background:#fff; align-self:center;"></iframe>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+    const frame = overlay.querySelector('#desc-preview-frame');
+    frame.srcdoc = html;
+    overlay.querySelector('#desc-preview-desktop').addEventListener('click', () => { frame.style.width = '100%'; });
+    overlay.querySelector('#desc-preview-mobile').addEventListener('click', () => { frame.style.width = '375px'; });
+    overlay.querySelector('#desc-preview-close').addEventListener('click', () => overlay.remove());
 }
 
 // ── Sync controls section (platform_sync_status kill switches) ─────────────
