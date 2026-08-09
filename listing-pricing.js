@@ -1162,13 +1162,13 @@ async function openManualMetadataModal(container, body, isDraft) {
                 <label style="font-size:13px; display:block; margin-bottom:4px;">Description (HTML)</label>
                 <div style="display:flex; gap:6px; margin-bottom:4px;">
                     <select id="lp-desc-layout-select" style="flex:1;">
-                        <option value="">Insert layout... (replaces everything)</option>
-                        ${Object.entries(descriptionPresets).filter(([, p]) => p.kind === 'layout')
+                        <option value="">Insert content... (replaces everything)</option>
+                        ${Object.entries(descriptionPresets).filter(([, p]) => p.kind === 'static')
                             .map(([key, p]) => `<option value="${escapeHtml(key)}">${escapeHtml(p.label)}</option>`).join('')}
                     </select>
                     <select id="lp-desc-section-select" style="flex:1;">
-                        <option value="">Insert section... (at cursor)</option>
-                        ${Object.entries(descriptionPresets).filter(([, p]) => p.kind === 'section')
+                        <option value="">Insert content... (at cursor)</option>
+                        ${Object.entries(descriptionPresets).filter(([, p]) => p.kind === 'static')
                             .map(([key, p]) => `<option value="${escapeHtml(key)}">${escapeHtml(p.label)}</option>`).join('')}
                     </select>
                     <button type="button" class="btn" id="lp-desc-preview-btn">Preview</button>

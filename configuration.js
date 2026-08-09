@@ -1430,7 +1430,7 @@ function openGroupModal(container, groupId) {
 function descTemplatesSectionHTML() {
     return `
         <div style="display:flex; gap:4px; margin-bottom:16px; border-bottom:1px solid var(--border);">
-            <button class="desc-tab-btn" data-tab="templates">Layouts &amp; sections</button>
+            <button class="desc-tab-btn" data-tab="templates">Modules</button>
             <button class="desc-tab-btn" data-tab="theme">Theme</button>
         </div>
         <div id="desc-tab-content"><p>Loading...</p></div>
@@ -1466,30 +1466,25 @@ function renderDescTabContent(container) {
     } else {
         wrap.innerHTML = `
             <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
-                Reusable description HTML, may contain {{tokens}} ({{family_nav}}, {{era_nav}},
-                {{era_hub_link}}, {{era_index}}, {{set_name}}, {{series_name}}). "Layout" rows
-                replace the whole Description box on the Listing pricing page; "Section" rows
-                insert at the cursor. Preview renders tokens against whichever listing you pick below.
+                A module is any named, reusable block, referenced from a description as <code>{{its_key}}</code>.
+                Every module declares its own shape via <b>Kind</b>: <b>Static</b> is plain reusable HTML
+                (may itself reference other modules/{{set_name}}/{{series_name}}); <b>Repeater</b> loops over
+                related listings automatically, by a <b>Repeat rule</b> (<code>family</code> = finish
+                variants of this set, <code>era_siblings</code> = other sets in this era &mdash; hub
+                listings only, <code>era_index</code> = every era's hub set); <b>Single</b> renders exactly
+                one block, either <code>self</code> (this listing, standalone) or <code>era_hub</code>
+                (a banner link to the era hub, non-hub listings only). The 4 built-in modules
+                (<code>family_nav</code>, <code>era_nav</code>, <code>era_hub_link</code>, <code>era_index</code>)
+                are just Repeater/Single rows seeded under those names &mdash; edit them here like any other
+                module.
             </p>
             <p style="color:var(--text-secondary); font-size:12px; margin:0 0 16px; padding:10px 12px; background:var(--bg-tertiary); border-radius:6px;">
-                <b>Item templates</b> control what ONE tile/row/chip inside {{family_nav}}, {{era_nav}},
-                or {{era_index}} looks like &mdash; Python still handles the repeating and the DB lookups,
-                your template just controls the markup. Use <code>{{item_label}}</code>,
-                <code>{{item_url}}</code>, <code>{{item_image_url}}</code> as placeholders inside one.
-                One design per block type, under a fixed reserved key &mdash; create a row named exactly
-                <code>family_tile</code> (+ optional <code>family_tile_current</code> for the "you're here"
-                tile), <code>era_row</code>, or <code>era_chip</code> (+ optional
-                <code>era_chip_current</code>) and it applies everywhere automatically, no extra syntax
-                needed. Until you create a matching row, everything renders using the built-in look from
-                the Theme tab.
-            </p>
-            <p style="color:var(--text-secondary); font-size:12px; margin:0 0 16px; padding:10px 12px; background:var(--bg-tertiary); border-radius:6px;">
-                Any item template can ALSO be dropped straight into a description on its own, standalone
-                &mdash; just type <code>{{your_key}}</code> (no <code>family_nav</code>/<code>era_nav</code>
-                wrapper needed), e.g. <code>{{family_tile_example}}</code>. It renders using THIS listing's
-                own family label/nav image/family description, with an empty url (it's a link to itself).
-                Useful for e.g. a small "you are here" card outside the family strip, or just to preview
-                what an <code>_example</code> row looks like before promoting its key to a reserved one.
+                Repeater/Single modules also take an optional <b>Item template HTML</b> &mdash; what ONE
+                tile/row/chip looks like, using <code>{{item_label}}</code>/<code>{{item_url}}</code>/
+                <code>{{item_image_url}}</code>/<code>{{item_description}}</code> as placeholders. Leave it
+                blank to use the built-in look (Static/Repeater/Single structure and DB lookups always stay
+                Python's job either way &mdash; a module only ever controls markup, never the query behind
+                it). Preview renders against whichever listing you pick below.
             </p>
             <div class="filters-bar" style="justify-content:space-between; margin-bottom:12px;">
                 <label style="font-size:12px; color:var(--text-secondary);">
@@ -1660,9 +1655,12 @@ function renderThemeSettings(wrap) {
 
 function renderDescTemplatesTable(container) {
     const wrap = container.querySelector('#desc-templates-table-wrap');
-    const layouts = descTemplatesState.sections.filter(s => s.kind === 'layout');
-    const sections = descTemplatesState.sections.filter(s => s.kind === 'section');
-    const itemTemplates = descTemplatesState.sections.filter(s => s.kind === 'item_template');
+    const staticRows = descTemplatesState.sections.filter(s => s.kind === 'static');
+    const repeaters = descTemplatesState.sections.filter(s => s.kind === 'repeater');
+    const singles = descTemplatesState.sections.filter(s => s.kind === 'single');
+    // Legacy — migration 029's backfill converts these away; this group
+    // only ever shows something if that conversion hasn't run yet.
+    const legacyItemTemplates = descTemplatesState.sections.filter(s => s.kind === 'item_template');
 
     const picker = container.querySelector('#desc-preview-target');
     picker.innerHTML = descTemplatesState.templates.length
@@ -1673,17 +1671,18 @@ function renderDescTemplatesTable(container) {
         picker.addEventListener('change', () => { descTemplatesState.previewTemplateId = picker.value || null; });
     }
 
-    const groupTable = (label, hint, rows) => `
+    const groupTable = (label, hint, rows, showRule = false) => `
         <h4 style="margin:0 0 4px;">${label}</h4>
         <p style="color:var(--text-secondary); font-size:11px; margin:0 0 8px;">${hint}</p>
         ${!rows.length ? `<p style="color:var(--text-secondary); font-size:12px; margin:0 0 20px;">None yet.</p>` : `
             <table style="margin-bottom:20px;">
-                <thead><tr><th>Label</th><th>Key</th><th>Order</th><th style="width:60px;"></th></tr></thead>
+                <thead><tr><th>Label</th><th>Key</th>${showRule ? '<th>Rule</th>' : ''}<th>Order</th><th style="width:60px;"></th></tr></thead>
                 <tbody>
                     ${rows.map(s => `
                         <tr>
                             <td>${escapeHTML(s.label)}</td>
                             <td><code>${escapeHTML(s.key)}</code></td>
+                            ${showRule ? `<td>${escapeHTML(s.repeat_rule || '')}</td>` : ''}
                             <td>${s.sort_order}</td>
                             <td><button class="btn edit-desc-template-btn" data-id="${s.id}">Edit</button></td>
                         </tr>
@@ -1694,9 +1693,10 @@ function renderDescTemplatesTable(container) {
     `;
 
     wrap.innerHTML =
-        groupTable('Layouts', 'Whole-description starters — replace the Description box entirely.', layouts)
-        + groupTable('Sections', 'Small reusable blocks — insert at the cursor without touching the rest.', sections)
-        + groupTable('Item templates', 'One tile/row/chip inside {{family_nav}}/{{era_nav}}/{{era_index}} — see the note above.', itemTemplates);
+        groupTable('Static content', 'Plain reusable HTML — insert at the cursor, or reference by {{key}} once placed via the visual builder.', staticRows)
+        + groupTable('Repeaters', 'Loop over related listings automatically (family/era rules) — one design per module, referenced as {{key}}.', repeaters, true)
+        + groupTable('Single blocks', 'Exactly one block per render (this listing itself, or a link to the era hub) — referenced as {{key}}.', singles, true)
+        + (legacyItemTemplates.length ? groupTable('Legacy item templates', 'Pre-module-builder rows not yet converted — run backfill_description_modules() again if you see any here.', legacyItemTemplates) : '');
 
     const addBtn = container.querySelector('#new-desc-template-btn');
     if (!addBtn.dataset.wired) {
@@ -1708,16 +1708,36 @@ function renderDescTemplatesTable(container) {
     });
 }
 
+// repeat_rule options per kind (migration 029's module builder) — a
+// 'repeater' loops over related listings, a 'single' renders exactly one
+// block. item_template_current_html only makes sense for the two loops
+// that can include "myself" — family (this listing among its siblings)
+// and era_index (this series' hub chip); era_siblings excludes self from
+// its query entirely and never has a "current" cell.
+const _REPEAT_RULE_OPTIONS = {
+    repeater: [
+        ['family', 'family — finish variants of this set'],
+        ['era_siblings', 'era_siblings — other sets in this era (hub only)'],
+        ['era_index', 'era_index — every era’s hub set'],
+    ],
+    single: [
+        ['self', 'self — this listing, standalone'],
+        ['era_hub', 'era_hub — banner link to the era hub (non-hub listings only)'],
+    ],
+};
+const _CURRENT_HTML_RULES = new Set(['family', 'era_index']);
+
 function openDescTemplateModal(container, sectionId) {
     const isEdit = sectionId !== null;
     const existing = isEdit ? descTemplatesState.sections.find(s => s.id === sectionId) : null;
     if (isEdit && !existing) return;
     const root = container.querySelector('#desc-templates-modal-root');
+    const initialKind = existing?.kind || 'static';
 
     root.innerHTML = `
-        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100; overflow-y:auto;">
             <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:760px; max-width:95vw; max-height:88vh; overflow-y:auto;">
-                <h3 style="margin:0 0 16px;">${isEdit ? 'Edit' : 'Add'} description template</h3>
+                <h3 style="margin:0 0 16px;">${isEdit ? 'Edit' : 'Add'} module</h3>
                 <form id="desc-template-form">
                     <div style="display:flex; gap:12px; margin-bottom:10px;">
                         ${field('Key (unique)', 'text', 'key', existing?.key || '')}
@@ -1727,15 +1747,49 @@ function openDescTemplateModal(container, sectionId) {
                         <label style="font-size:12px; color:var(--text-secondary); flex:1;">
                             Kind
                             <select name="kind" style="width:100%; margin-top:4px;">
-                                <option value="section" ${!existing || existing.kind === 'section' ? 'selected' : ''}>Section (insert at cursor)</option>
-                                <option value="layout" ${existing?.kind === 'layout' ? 'selected' : ''}>Layout (replaces textarea)</option>
-                                <option value="item_template" ${existing?.kind === 'item_template' ? 'selected' : ''}>Item template (one tile/row/chip)</option>
+                                <option value="static" ${initialKind === 'static' ? 'selected' : ''}>Static (plain reusable HTML)</option>
+                                <option value="repeater" ${initialKind === 'repeater' ? 'selected' : ''}>Repeater (loops over related listings)</option>
+                                <option value="single" ${initialKind === 'single' ? 'selected' : ''}>Single (exactly one block)</option>
+                                ${initialKind === 'item_template' ? `<option value="item_template" selected>Item template (legacy, not converted yet)</option>` : ''}
                             </select>
                         </label>
                         ${field('Sort order', 'number', 'sort_order', existing?.sort_order ?? 0)}
                     </div>
-                    <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">HTML</label>
-                    <textarea name="html" rows="16" style="width:100%; font-family:monospace; font-size:12px; margin-bottom:10px;" required>${escapeHTML(existing?.html || '')}</textarea>
+                    <div data-for="repeater single" style="display:flex; gap:12px; margin-bottom:10px; align-items:flex-end;">
+                        <label style="font-size:12px; color:var(--text-secondary); flex:1;">
+                            Repeat rule
+                            <select name="repeat_rule" style="width:100%; margin-top:4px;"></select>
+                        </label>
+                        <label data-for="repeater" style="font-size:12px; color:var(--text-secondary); flex:1;">
+                            Layout
+                            <select name="layout" style="width:100%; margin-top:4px;">
+                                <option value="">(default for the rule)</option>
+                                <option value="grid" ${existing?.layout === 'grid' ? 'selected' : ''}>Grid (2-column tiles)</option>
+                                <option value="chips" ${existing?.layout === 'chips' ? 'selected' : ''}>Chips (inline wrap)</option>
+                            </select>
+                        </label>
+                    </div>
+                    <div data-for="repeater" style="display:flex; gap:12px; margin-bottom:10px;">
+                        ${field('Title override (optional — {{finish_label}}/{{set_name}}/{{series_name}} allowed)', 'text', 'title', existing?.title || '', '', '', true)}
+                        ${field('Subtitle override (optional)', 'text', 'subtitle', existing?.subtitle || '', '', '', true)}
+                    </div>
+                    <div data-for="static">
+                        <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">HTML</label>
+                        <textarea name="html" rows="14" style="width:100%; font-family:monospace; font-size:12px; margin-bottom:10px;">${escapeHTML(existing?.html || '')}</textarea>
+                    </div>
+                    <div data-for="repeater single">
+                        <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">
+                            Item template HTML — placeholders: <code>{{item_label}}</code> <code>{{item_url}}</code>
+                            <code>{{item_image_url}}</code> <code>{{item_description}}</code>. Leave blank to use the built-in look.
+                        </label>
+                        <textarea name="item_template_html" rows="8" style="width:100%; font-family:monospace; font-size:12px; margin-bottom:10px;">${escapeHTML(existing?.item_template_html || '')}</textarea>
+                    </div>
+                    <div data-for="current-html">
+                        <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">
+                            Item template HTML — "current" variant (this listing itself, e.g. "Viewing this"). Leave blank to reuse the one above.
+                        </label>
+                        <textarea name="item_template_current_html" rows="8" style="width:100%; font-family:monospace; font-size:12px; margin-bottom:10px;">${escapeHTML(existing?.item_template_current_html || '')}</textarea>
+                    </div>
                     <div id="desc-template-error" style="color:var(--danger); font-size:12px; margin-bottom:10px;"></div>
                     <div style="display:flex; justify-content:space-between; align-items:center;">
                         ${isEdit ? `<button type="button" class="btn" id="desc-template-delete" style="color:var(--danger); border-color:var(--danger);">Delete</button>` : '<span></span>'}
@@ -1750,6 +1804,35 @@ function openDescTemplateModal(container, sectionId) {
         </div>
     `;
 
+    const kindSelect = root.querySelector('select[name="kind"]');
+    const ruleSelect = root.querySelector('select[name="repeat_rule"]');
+
+    const populateRuleOptions = () => {
+        const kind = kindSelect.value;
+        const options = _REPEAT_RULE_OPTIONS[kind] || [];
+        const current = existing?.repeat_rule;
+        ruleSelect.innerHTML = options.map(([v, l]) =>
+            `<option value="${escapeAttr(v)}" ${v === current ? 'selected' : ''}>${escapeHTML(l)}</option>`).join('');
+    };
+
+    const updateVisibility = () => {
+        const kind = kindSelect.value;
+        root.querySelectorAll('[data-for]').forEach(el => {
+            const forKinds = el.dataset.for.split(' ');
+            let visible = forKinds.includes(kind);
+            if (forKinds[0] === 'current-html') {
+                visible = kind === 'repeater' && _CURRENT_HTML_RULES.has(ruleSelect.value);
+            }
+            el.style.display = visible ? '' : 'none';
+        });
+        root.querySelector('textarea[name="html"]').required = kind === 'static';
+    };
+
+    populateRuleOptions();
+    updateVisibility();
+    kindSelect.addEventListener('change', () => { populateRuleOptions(); updateVisibility(); });
+    ruleSelect.addEventListener('change', updateVisibility);
+
     root.querySelector('#desc-template-cancel').addEventListener('click', () => { root.innerHTML = ''; });
 
     if (isEdit) {
@@ -1760,29 +1843,27 @@ function openDescTemplateModal(container, sectionId) {
     }
 
     root.querySelector('#desc-template-preview').addEventListener('click', async () => {
-        const kind = root.querySelector('select[name="kind"]').value;
-        if (kind === 'item_template') {
-            // Its {{item_label}}/{{item_url}}/{{item_image_url}} placeholders
-            // are only understood in the substitution pass that runs INSIDE
-            // family_nav/era_nav/era_index — previewing the raw HTML directly
-            // against /api/description-preview wouldn't render anything
-            // meaningful (those tokens aren't in its vocabulary).
-            const key = root.querySelector('input[name="key"]').value.trim();
-            window.alert(key
-                ? `Item templates can't be previewed standalone. Save this, then put `
-                  + `{{family_nav:${key}}} (or era_nav:/era_index:) in a Layout or Section and Preview that instead.`
-                : `Item templates can't be previewed standalone — set a Key, Save, then reference it as `
-                  + `{{family_nav:your_key}} (or era_nav:/era_index:) from a Layout or Section.`);
-            return;
-        }
-        const html = root.querySelector('textarea[name="html"]').value;
+        const kind = kindSelect.value;
         const templateId = descTemplatesState.previewTemplateId;
         if (!templateId) { window.alert('No live listing available to preview against.'); return; }
+        const key = root.querySelector('input[name="key"]').value.trim();
+        let sourceHtml;
+        if (kind === 'static') {
+            sourceHtml = root.querySelector('textarea[name="html"]').value;
+        } else if (isEdit && key) {
+            // Repeater/single modules only render inside their own rule
+            // (looped or self) — previewed by reference, which means this
+            // shows the last SAVED item_template_html, not unsaved edits.
+            sourceHtml = `{{${key}}}`;
+        } else {
+            window.alert('Save this module first, then Preview shows it live via {{its key}}.');
+            return;
+        }
         try {
             const resp = await fetch(`${PICKING_API_URL}/api/description-preview/${templateId}`, {
                 method: 'POST',
                 headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
-                body: JSON.stringify({ description_html: html }),
+                body: JSON.stringify({ description_html: sourceHtml }),
             });
             if (!resp.ok) throw new Error(`${resp.status} ${await resp.text().catch(() => '')}`);
             const result = await resp.json();
@@ -1797,12 +1878,20 @@ function openDescTemplateModal(container, sectionId) {
         const errBox = root.querySelector('#desc-template-error');
         errBox.textContent = '';
         const fd = new FormData(e.target);
+        const kind = fd.get('kind');
         const payload = {
             key: fd.get('key').trim(),
             label: fd.get('label').trim(),
-            kind: fd.get('kind'),
+            kind,
             sort_order: parseInt(fd.get('sort_order'), 10) || 0,
-            html: fd.get('html'),
+            html: kind === 'static' ? fd.get('html') : null,
+            repeat_rule: (kind === 'repeater' || kind === 'single') ? (fd.get('repeat_rule') || null) : null,
+            layout: kind === 'repeater' ? (fd.get('layout') || null) : null,
+            item_template_html: (kind === 'repeater' || kind === 'single') ? (fd.get('item_template_html').trim() || null) : null,
+            item_template_current_html: (kind === 'repeater' && _CURRENT_HTML_RULES.has(fd.get('repeat_rule')))
+                ? (fd.get('item_template_current_html').trim() || null) : null,
+            title: kind === 'repeater' ? (fd.get('title').trim() || null) : null,
+            subtitle: kind === 'repeater' ? (fd.get('subtitle').trim() || null) : null,
         };
         try {
             const { error } = isEdit
