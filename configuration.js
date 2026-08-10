@@ -1485,7 +1485,8 @@ function renderDescTabContent(container) {
             <p style="color:var(--text-secondary); font-size:12px; margin:0 0 16px; padding:10px 12px; background:var(--bg-tertiary); border-radius:6px;">
                 Repeater/Single modules also take an optional <b>Item template HTML</b> &mdash; what ONE
                 tile/row/chip looks like, using <code>{{item_label}}</code>/<code>{{item_url}}</code>/
-                <code>{{item_image_url}}</code>/<code>{{item_description}}</code> as placeholders. Leave it
+                <code>{{item_image_url}}</code>/<code>{{item_description}}</code>/<code>{{item_title}}</code>
+                (the real eBay listing title, not the short tile label) as placeholders. Leave it
                 blank to use the built-in look (Static/Repeater/Single structure and DB lookups always stay
                 Python's job either way &mdash; a module only ever controls markup, never the query behind
                 it). Preview renders against whichever listing you pick below.
@@ -1787,7 +1788,8 @@ function openDescTemplateModal(container, sectionId) {
                     <div data-for="repeater single">
                         <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">
                             Item template HTML — placeholders: <code>{{item_label}}</code> <code>{{item_url}}</code>
-                            <code>{{item_image_url}}</code> <code>{{item_description}}</code>. Leave blank to use the built-in look.
+                            <code>{{item_image_url}}</code> <code>{{item_description}}</code> <code>{{item_title}}</code>
+                            (real eBay listing title). Leave blank to use the built-in look.
                         </label>
                         <textarea name="item_template_html" rows="8" style="width:100%; font-family:monospace; font-size:12px; margin-bottom:10px;">${escapeHTML(existing?.item_template_html || '')}</textarea>
                     </div>
