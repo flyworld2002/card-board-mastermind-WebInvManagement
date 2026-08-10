@@ -985,98 +985,20 @@ async function callDescriptionPreview(descriptionHtml) {
     return resp.json();
 }
 
-// Plain-text tokens the backend resolves itself (importer/ebay_descriptions
-// .py's _render_simple_tokens) — not description_sections rows, so they'd
-// never show up in descriptionPresets. Parsed as their own block type
-// (informational, not a warning) rather than lumped in with genuinely
-// unknown/deleted module references.
-const DESC_SIMPLE_TOKENS = ['set_name', 'series_name'];
-
-// Splits a description_html string into an ordered list of
-// {type:'text', value} / {type:'simple', key} / {type:'module', key} /
-// {type:'unknown', key} blocks — the visual builder's read side.
-// compileDescriptionBlocks() is the exact inverse. presets is
-// descriptionPresets' shape ({key: {label, html, kind}}), used only to
-// tell a real module reference apart from a stray/deleted {{token}}.
-function parseDescriptionBlocks(html, presets) {
-    const pattern = /\{\{(\w+)\}\}/g;
-    const blocks = [];
-    let lastIndex = 0;
-    let match;
-    while ((match = pattern.exec(html)) !== null) {
-        if (match.index > lastIndex) {
-            blocks.push({ type: 'text', value: html.slice(lastIndex, match.index) });
-        }
-        const key = match[1];
-        if (DESC_SIMPLE_TOKENS.includes(key)) {
-            blocks.push({ type: 'simple', key });
-        } else if (presets[key]) {
-            blocks.push({ type: 'module', key });
-        } else {
-            blocks.push({ type: 'unknown', key });
-        }
-        lastIndex = pattern.lastIndex;
-    }
-    if (lastIndex < html.length) {
-        blocks.push({ type: 'text', value: html.slice(lastIndex) });
-    }
-    return blocks;
-}
-
-// Inverse of parseDescriptionBlocks() — flattens the block list back into
-// the same {{key}}-containing string. Empty/zero-length text blocks are
-// preserved exactly (an empty string just contributes nothing), so
-// repeated open/edit/save cycles with no real change don't accumulate
-// spurious whitespace diffs.
-function compileDescriptionBlocks(blocks) {
-    return blocks.map(b => (b.type === 'text' ? b.value : `{{${b.key}}}`)).join('');
-}
-
-function descBlockHTML(block, i, total, presets) {
-    const controls = `
-        <div style="display:flex; gap:4px;">
-            <button type="button" class="btn lp-block-up" data-i="${i}" ${i === 0 ? 'disabled' : ''} style="padding:2px 8px;">&uarr;</button>
-            <button type="button" class="btn lp-block-down" data-i="${i}" ${i === total - 1 ? 'disabled' : ''} style="padding:2px 8px;">&darr;</button>
-            <button type="button" class="btn lp-block-remove" data-i="${i}" style="padding:2px 8px; color:var(--danger); border-color:var(--danger);">Remove</button>
-        </div>
-    `;
-    if (block.type === 'text') {
-        return `
-            <div style="border:1px solid var(--border); border-radius:6px; padding:8px; margin-bottom:6px;">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-                    <span style="font-size:11px; color:var(--text-secondary);">Text</span>
-                    ${controls}
-                </div>
-                <textarea class="lp-block-text" data-i="${i}" rows="3"
-                          style="width:100%; font-family:monospace; font-size:12px;">${escapeHtml(block.value)}</textarea>
-            </div>
-        `;
-    }
-    if (block.type === 'simple') {
-        return `
-            <div style="border:1px solid var(--border); border-radius:6px; padding:8px; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center;">
-                <span style="font-size:12px;">Plain token: <code>{{${escapeHtml(block.key)}}}</code></span>
-                ${controls}
-            </div>
-        `;
-    }
-    if (block.type === 'unknown') {
-        return `
-            <div style="border:1px solid var(--danger); border-radius:6px; padding:8px; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center;">
-                <span style="font-size:12px; color:var(--danger);">Unknown module: <code>{{${escapeHtml(block.key)}}}</code> &mdash; renders empty</span>
-                ${controls}
-            </div>
-        `;
-    }
-    const preset = presets[block.key] || {};
-    return `
-        <div style="border:1px solid var(--border); border-radius:6px; padding:8px; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center;">
-            <span style="font-size:12px;"><strong>${escapeHtml(preset.label || block.key)}</strong>
-                <span style="color:var(--text-secondary);"> &middot; ${escapeHtml(preset.kind || '?')} &middot; <code>{{${escapeHtml(block.key)}}}</code></span>
-            </span>
-            ${controls}
-        </div>
-    `;
+// The listing editor picks ONE layout (kind='layout' module) rather than
+// hand-building a block list — that building happens once in Configuration,
+// not per-listing (Fei, 8/10: "I don't want all these module and block
+// build within Edit listing Meta page... just pick a layout and done!").
+// This detects whether a listing's CURRENT description_html is already
+// exactly one {{layout_key}} reference, so the dropdown can pre-select it;
+// anything else (hand-written HTML, multiple tokens, no tokens) is treated
+// as custom content and shown via the Advanced raw-HTML toggle instead of
+// silently replaced.
+function matchedLayoutKey(html, presets) {
+    const m = (html || '').trim().match(/^\{\{(\w+)\}\}$/);
+    if (!m) return null;
+    const preset = presets[m[1]];
+    return preset && preset.kind === 'layout' ? m[1] : null;
 }
 
 async function callDescriptionSync(dryRun) {
@@ -1255,23 +1177,18 @@ async function openManualMetadataModal(container, body, isDraft) {
                 ${textField('lp-meta-title', 'Title', t.title)}
                 <label style="font-size:13px; display:block; margin-bottom:4px;">Description</label>
                 <p style="font-size:11px; color:var(--text-secondary); margin:0 0 6px;">
-                    Add/edit modules in Configuration &rarr; Description templates. Reorder with &uarr;/&darr;.
+                    Build/edit layouts in Configuration &rarr; Description templates.
                 </p>
                 <div style="display:flex; gap:6px; margin-bottom:6px;">
-                    <select id="lp-desc-add-module" style="flex:1;">
-                        <option value="">+ Add module...</option>
-                        ${['static', 'repeater', 'single'].map(kind => {
-                            const opts = Object.entries(descriptionPresets).filter(([, p]) => p.kind === kind);
-                            if (!opts.length) return '';
-                            return `<optgroup label="${kind[0].toUpperCase()}${kind.slice(1)}">
-                                ${opts.map(([key, p]) => `<option value="${escapeHtml(key)}">${escapeHtml(p.label)}</option>`).join('')}
-                            </optgroup>`;
-                        }).join('')}
+                    <select id="lp-desc-layout-select" style="flex:1;">
+                        <option value="">(choose a layout)</option>
+                        ${Object.entries(descriptionPresets).filter(([, p]) => p.kind === 'layout')
+                            .map(([key, p]) => `<option value="${escapeHtml(key)}"
+                                ${key === matchedLayoutKey(t.description_html, descriptionPresets) ? 'selected' : ''}>
+                                ${escapeHtml(p.label)}</option>`).join('')}
                     </select>
-                    <button type="button" class="btn" id="lp-desc-add-text">+ Add text</button>
                     <button type="button" class="btn" id="lp-desc-preview-btn">Preview</button>
                 </div>
-                <div id="lp-desc-blocks" style="margin-bottom:6px;"></div>
                 <label style="font-size:11px; color:var(--text-secondary); display:block; margin-bottom:4px;">
                     <input type="checkbox" id="lp-desc-advanced-toggle" /> Advanced (edit raw HTML instead)
                 </label>
@@ -1344,92 +1261,41 @@ async function openManualMetadataModal(container, body, isDraft) {
     };
     ['lp-meta-category', 'lp-meta-duration', 'lp-meta-location', 'lp-nav-finish', 'lp-nav-theme'].forEach(wireSelectOrOther);
 
-    // Visual builder (migration 029's module redesign): description_html
-    // stays a plain {{key}}-containing string in storage — the block list
-    // below is purely a nicer way to construct/edit that same string, not
-    // a new storage format. descBlocks is the in-memory source of truth
-    // while the modal is open (re-rendered from scratch on every change,
-    // same pattern as renderThemeSettings/renderDescTemplatesTable
-    // elsewhere in this codebase) — DOM edits inside a text block sync
-    // back into descBlocks via an 'input' listener, everything else
-    // (add/remove/reorder) mutates the array directly and redraws.
-    let descBlocks = parseDescriptionBlocks(t.description_html || '', descriptionPresets);
-    let descAdvancedMode = false;
-
-    const blocksWrap = root.querySelector('#lp-desc-blocks');
+    // Layout picker (8/10 redesign): description_html stays a plain
+    // {{key}}-containing string in storage — picking a layout just sets it
+    // to a single {{layout_key}} reference. Building/arranging modules
+    // happens in Configuration, not here; Advanced mode is the escape
+    // hatch for content that isn't a clean single-layout reference (a
+    // legacy hand-written description, or genuinely custom HTML for just
+    // this one listing) so nothing gets silently overwritten by opening
+    // this modal.
+    const layoutSelect = root.querySelector('#lp-desc-layout-select');
     const rawTextarea = root.querySelector('#lp-meta-description-raw');
     const advancedToggle = root.querySelector('#lp-desc-advanced-toggle');
-    const addModuleSelect = root.querySelector('#lp-desc-add-module');
-    const addTextBtn = root.querySelector('#lp-desc-add-text');
+
+    let descAdvancedMode = !matchedLayoutKey(t.description_html, descriptionPresets);
+    rawTextarea.value = t.description_html || '';
+    advancedToggle.checked = descAdvancedMode;
 
     const currentDescriptionHtml = () =>
-        descAdvancedMode ? rawTextarea.value : compileDescriptionBlocks(descBlocks);
-
-    function renderDescBlocks() {
-        blocksWrap.innerHTML = descBlocks.length
-            ? descBlocks.map((b, i) => descBlockHTML(b, i, descBlocks.length, descriptionPresets)).join('')
-            : `<p style="color:var(--text-secondary); font-size:12px; margin:6px 0;">No content yet — add a module or some text above.</p>`;
-
-        blocksWrap.querySelectorAll('.lp-block-text').forEach(ta => {
-            ta.addEventListener('input', () => { descBlocks[parseInt(ta.dataset.i, 10)].value = ta.value; });
-        });
-        blocksWrap.querySelectorAll('.lp-block-up').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const i = parseInt(btn.dataset.i, 10);
-                if (i === 0) return;
-                [descBlocks[i - 1], descBlocks[i]] = [descBlocks[i], descBlocks[i - 1]];
-                renderDescBlocks();
-            });
-        });
-        blocksWrap.querySelectorAll('.lp-block-down').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const i = parseInt(btn.dataset.i, 10);
-                if (i === descBlocks.length - 1) return;
-                [descBlocks[i + 1], descBlocks[i]] = [descBlocks[i], descBlocks[i + 1]];
-                renderDescBlocks();
-            });
-        });
-        blocksWrap.querySelectorAll('.lp-block-remove').forEach(btn => {
-            btn.addEventListener('click', () => {
-                descBlocks.splice(parseInt(btn.dataset.i, 10), 1);
-                renderDescBlocks();
-            });
-        });
-    }
+        descAdvancedMode ? rawTextarea.value : (layoutSelect.value ? `{{${layoutSelect.value}}}` : '');
 
     function syncAdvancedVisibility() {
-        blocksWrap.style.display = descAdvancedMode ? 'none' : '';
-        addModuleSelect.style.display = descAdvancedMode ? 'none' : '';
-        addTextBtn.style.display = descAdvancedMode ? 'none' : '';
+        layoutSelect.style.display = descAdvancedMode ? 'none' : '';
         rawTextarea.style.display = descAdvancedMode ? '' : 'none';
     }
 
     advancedToggle.addEventListener('change', () => {
         if (advancedToggle.checked) {
-            rawTextarea.value = compileDescriptionBlocks(descBlocks);
+            if (layoutSelect.value) rawTextarea.value = `{{${layoutSelect.value}}}`;
             descAdvancedMode = true;
         } else {
-            descBlocks = parseDescriptionBlocks(rawTextarea.value, descriptionPresets);
+            layoutSelect.value = matchedLayoutKey(rawTextarea.value, descriptionPresets) || '';
             descAdvancedMode = false;
-            renderDescBlocks();
         }
         syncAdvancedVisibility();
     });
 
-    addModuleSelect.addEventListener('change', () => {
-        const key = addModuleSelect.value;
-        addModuleSelect.value = '';
-        if (!key) return;
-        descBlocks.push({ type: 'module', key });
-        renderDescBlocks();
-    });
-
-    addTextBtn.addEventListener('click', () => {
-        descBlocks.push({ type: 'text', value: '' });
-        renderDescBlocks();
-    });
-
-    renderDescBlocks();
     syncAdvancedVisibility();
 
     root.querySelector('#lp-desc-preview-btn').addEventListener('click', async () => {

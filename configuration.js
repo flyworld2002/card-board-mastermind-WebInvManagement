@@ -1469,16 +1469,18 @@ function renderDescTabContent(container) {
         wrap.innerHTML = `
             <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
                 A module is any named, reusable block, referenced from a description as <code>{{its_key}}</code>.
-                Every module declares its own shape via <b>Kind</b>: <b>Static</b> is plain reusable HTML
-                (may itself reference other modules/{{set_name}}/{{series_name}}); <b>Repeater</b> loops over
-                related listings automatically, by a <b>Repeat rule</b> (<code>family</code> = finish
-                variants of this set, <code>era_siblings</code> = other sets in this era &mdash; hub
-                listings only, <code>era_index</code> = every era's hub set); <b>Single</b> renders exactly
-                one block, either <code>self</code> (this listing, standalone) or <code>era_hub</code>
-                (a banner link to the era hub, non-hub listings only). The 4 built-in modules
-                (<code>family_nav</code>, <code>era_nav</code>, <code>era_hub_link</code>, <code>era_index</code>)
-                are just Repeater/Single rows seeded under those names &mdash; edit them here like any other
-                module.
+                Every module declares its own shape via <b>Kind</b>: <b>Layout</b> is the complete thing you
+                pick on a listing's Edit-fields page &mdash; usually just a wrapper referencing other modules,
+                e.g. <code>{{header}}{{family_nav}}{{footer}}</code>; <b>Static</b> is a small reusable piece
+                (header, footer, ...) meant to be used INSIDE a Layout, not picked directly; <b>Repeater</b>
+                loops over related listings automatically, by a <b>Repeat rule</b> (<code>family</code> =
+                finish variants of this set, <code>era_siblings</code> = every other set in this era,
+                <code>era_index</code> = every era's hub set); <b>Single</b> renders exactly one block,
+                either <code>self</code> (this listing, standalone) or <code>era_hub</code> (a banner link
+                to the era hub, non-hub listings only). The 4 built-in modules (<code>family_nav</code>,
+                <code>era_nav</code>, <code>era_hub_link</code>, <code>era_index</code>) are just
+                Repeater/Single rows seeded under those names &mdash; edit them here like any other module,
+                and reference them from your own Layouts.
             </p>
             <p style="color:var(--text-secondary); font-size:12px; margin:0 0 16px; padding:10px 12px; background:var(--bg-tertiary); border-radius:6px;">
                 Repeater/Single modules also take an optional <b>Item template HTML</b> &mdash; what ONE
@@ -1657,6 +1659,7 @@ function renderThemeSettings(wrap) {
 
 function renderDescTemplatesTable(container) {
     const wrap = container.querySelector('#desc-templates-table-wrap');
+    const layouts = descTemplatesState.sections.filter(s => s.kind === 'layout');
     const staticRows = descTemplatesState.sections.filter(s => s.kind === 'static');
     const repeaters = descTemplatesState.sections.filter(s => s.kind === 'repeater');
     const singles = descTemplatesState.sections.filter(s => s.kind === 'single');
@@ -1695,9 +1698,10 @@ function renderDescTemplatesTable(container) {
     `;
 
     wrap.innerHTML =
-        groupTable('Static content', 'Plain reusable HTML — insert at the cursor, or reference by {{key}} once placed via the visual builder.', staticRows)
-        + groupTable('Repeaters', 'Loop over related listings automatically (family/era rules) — one design per module, referenced as {{key}}.', repeaters, true)
-        + groupTable('Single blocks', 'Exactly one block per render (this listing itself, or a link to the era hub) — referenced as {{key}}.', singles, true)
+        groupTable('Layouts', 'A complete, ready-to-use description — this is what shows up in the Layout dropdown on a listing\'s Edit-fields page. Usually just a wrapper referencing other modules by {{key}}, e.g. {{header}}{{family_nav}}{{footer}}.', layouts)
+        + groupTable('Static content', 'Small reusable HTML pieces (header, footer, ...) — building blocks for a Layout, referenced by {{key}}. Not shown on the listing page directly.', staticRows)
+        + groupTable('Repeaters', 'Loop over related listings automatically (family/era rules) — one design per module, referenced as {{key}} inside a Layout.', repeaters, true)
+        + groupTable('Single blocks', 'Exactly one block per render (this listing itself, or a link to the era hub) — referenced as {{key}} inside a Layout.', singles, true)
         + (legacyItemTemplates.length ? groupTable('Legacy item templates', 'Pre-module-builder rows not yet converted — run backfill_description_modules() again if you see any here.', legacyItemTemplates) : '');
 
     const addBtn = container.querySelector('#new-desc-template-btn');
@@ -1749,7 +1753,8 @@ function openDescTemplateModal(container, sectionId) {
                         <label style="font-size:12px; color:var(--text-secondary); flex:1;">
                             Kind
                             <select name="kind" style="width:100%; margin-top:4px;">
-                                <option value="static" ${initialKind === 'static' ? 'selected' : ''}>Static (plain reusable HTML)</option>
+                                <option value="layout" ${initialKind === 'layout' ? 'selected' : ''}>Layout (complete, pick-one-and-done description)</option>
+                                <option value="static" ${initialKind === 'static' ? 'selected' : ''}>Static (small reusable piece)</option>
                                 <option value="repeater" ${initialKind === 'repeater' ? 'selected' : ''}>Repeater (loops over related listings)</option>
                                 <option value="single" ${initialKind === 'single' ? 'selected' : ''}>Single (exactly one block)</option>
                                 ${initialKind === 'item_template' ? `<option value="item_template" selected>Item template (legacy, not converted yet)</option>` : ''}
@@ -1775,7 +1780,7 @@ function openDescTemplateModal(container, sectionId) {
                         ${field('Title override (optional — {{finish_label}}/{{set_name}}/{{series_name}} allowed)', 'text', 'title', existing?.title || '', '', '', true)}
                         ${field('Subtitle override (optional)', 'text', 'subtitle', existing?.subtitle || '', '', '', true)}
                     </div>
-                    <div data-for="static">
+                    <div data-for="static layout">
                         <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:4px;">HTML</label>
                         <textarea name="html" rows="14" style="width:100%; font-family:monospace; font-size:12px; margin-bottom:10px;">${escapeHTML(existing?.html || '')}</textarea>
                     </div>
@@ -1827,7 +1832,7 @@ function openDescTemplateModal(container, sectionId) {
             }
             el.style.display = visible ? '' : 'none';
         });
-        root.querySelector('textarea[name="html"]').required = kind === 'static';
+        root.querySelector('textarea[name="html"]').required = kind === 'static' || kind === 'layout';
     };
 
     populateRuleOptions();
@@ -1850,7 +1855,7 @@ function openDescTemplateModal(container, sectionId) {
         if (!templateId) { window.alert('No live listing available to preview against.'); return; }
         const key = root.querySelector('input[name="key"]').value.trim();
         let sourceHtml;
-        if (kind === 'static') {
+        if (kind === 'static' || kind === 'layout') {
             sourceHtml = root.querySelector('textarea[name="html"]').value;
         } else if (isEdit && key) {
             // Repeater/single modules only render inside their own rule
@@ -1886,7 +1891,7 @@ function openDescTemplateModal(container, sectionId) {
             label: fd.get('label').trim(),
             kind,
             sort_order: parseInt(fd.get('sort_order'), 10) || 0,
-            html: kind === 'static' ? fd.get('html') : null,
+            html: (kind === 'static' || kind === 'layout') ? fd.get('html') : null,
             repeat_rule: (kind === 'repeater' || kind === 'single') ? (fd.get('repeat_rule') || null) : null,
             layout: kind === 'repeater' ? (fd.get('layout') || null) : null,
             item_template_html: (kind === 'repeater' || kind === 'single') ? (fd.get('item_template_html').trim() || null) : null,
