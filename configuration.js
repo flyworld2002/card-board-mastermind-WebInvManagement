@@ -1719,7 +1719,7 @@ function renderDescTemplatesTable(container) {
 const _REPEAT_RULE_OPTIONS = {
     repeater: [
         ['family', 'family — finish variants of this set'],
-        ['era_siblings', 'era_siblings — other sets in this era (hub only)'],
+        ['era_siblings', 'era_siblings — other sets in this era'],
         ['era_index', 'era_index — every era’s hub set'],
     ],
     single: [
