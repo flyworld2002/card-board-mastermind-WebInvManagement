@@ -596,7 +596,13 @@ async function refreshRowDerivedCells(container, rowId) {
 function isGatedIn(r) {
     const row = state.listingRowsByPLId[r.platform_listing_id];
     if (!row) return false;
-    return !!row.sync_enabled && row.status === 'active';
+    // Matches the backend's real push gating (importer/ebay_pushprices.py
+    // _compute_roster_changes): 'out_of_stock' is gated in the same as
+    // 'active' (8/12) -- only 'delisted' is excluded. Previously only
+    // accepting 'active' here meant a restocked-but-still-out_of_stock
+    // row could never show as pushable in the UI even once the backend
+    // was ready to revive it, since nothing else ever flips status back.
+    return !!row.sync_enabled && (row.status === 'active' || row.status === 'out_of_stock');
 }
 
 function sourceBadge(source) {
