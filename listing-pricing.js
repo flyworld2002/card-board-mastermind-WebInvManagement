@@ -114,6 +114,7 @@ let state = {
     profiles: [],
     unimportedCount: 0,      // platform_listings rows for this listing_id not yet in the roster
     selected: new Set(),     // selected listing_card_assignments.row_id values
+    templateSort: { key: 'name', dir: 'asc' },  // landing-view template list sort
 };
 
 // Shift-click range-select anchor — index into the flat, top-to-bottom
@@ -145,18 +146,53 @@ function shellHTML() {
 // roster/groups view; "+ New template" to create one.
 // ----------------------------------------------------------------
 
+// Sortable landing-view columns. 'picture' isn't included — sorting by
+// image presence isn't useful, it's display-only like imgHtml() is
+// everywhere else on this page.
+const TEMPLATE_SORT_COLUMNS = [
+    ['name', 'Name'],
+    ['listing_id', 'eBay Item #'],
+    ['platform', 'Platform'],
+    ['account', 'Account'],
+    ['listing_kind', 'Kind'],
+];
+
+function sortTemplates() {
+    const { key, dir } = state.templateSort;
+    const mul = dir === 'asc' ? 1 : -1;
+    state.templates.sort((a, b) => {
+        const av = (a[key] ?? '').toString().toLowerCase();
+        const bv = (b[key] ?? '').toString().toLowerCase();
+        if (av < bv) return -1 * mul;
+        if (av > bv) return 1 * mul;
+        return 0;
+    });
+}
+
 async function renderTemplatesList(container) {
     const body = container.querySelector('#lp-body');
     body.innerHTML = '<p>Loading templates...</p>';
     state.template = null;
     state.templateId = null;
 
-    const { data, error } = await supabase.from('listing_templates').select('*').order('platform').order('name');
+    const { data, error } = await supabase.from('listing_templates').select('*');
     if (error) {
         body.innerHTML = `<p style="color:var(--danger)">Failed to load templates: ${escapeHtml(error.message)}</p>`;
         return;
     }
     state.templates = data || [];
+    renderTemplatesTable(container);
+}
+
+// Rebuilds the table from state.templates (already fetched) — used both
+// for the initial load and for re-sorting on a header click, so sorting
+// doesn't need a network round-trip.
+function renderTemplatesTable(container) {
+    const body = container.querySelector('#lp-body');
+    sortTemplates();
+
+    const sortArrow = (key) => state.templateSort.key !== key ? ''
+        : (state.templateSort.dir === 'asc' ? ' &#9650;' : ' &#9660;');
 
     body.innerHTML = `
         <div class="filters-bar" style="justify-content:flex-end;">
@@ -165,11 +201,16 @@ async function renderTemplatesList(container) {
         ${state.templates.length ? `
             <table>
                 <thead><tr>
-                    <th>Name</th><th>eBay Item #</th><th>Platform</th><th>Account</th><th>Kind</th><th style="width:130px;"></th>
+                    <th>Picture</th>
+                    ${TEMPLATE_SORT_COLUMNS.map(([key, label]) => `
+                        <th class="lp-sort-th" data-key="${key}" style="cursor:pointer; user-select:none;">${label}${sortArrow(key)}</th>
+                    `).join('')}
+                    <th style="width:130px;"></th>
                 </tr></thead>
                 <tbody>
                     ${state.templates.map(t => `
                         <tr class="lp-template-row" data-id="${t.id}" style="cursor:pointer;">
+                            <td>${imgHtml(t.nav_image_url)}</td>
                             <td>${escapeHtml(t.name)}</td>
                             <td>${t.listing_id ? escapeHtml(t.listing_id) : '<span style="color:var(--text-secondary);">(draft — no listing yet)</span>'}</td>
                             <td>${escapeHtml(t.platform)}</td>
@@ -188,6 +229,17 @@ async function renderTemplatesList(container) {
     `;
 
     body.querySelector('#lp-new-template-btn').addEventListener('click', () => openTemplateModal(container, null));
+    body.querySelectorAll('.lp-sort-th').forEach(th => {
+        th.addEventListener('click', () => {
+            const key = th.dataset.key;
+            if (state.templateSort.key === key) {
+                state.templateSort.dir = state.templateSort.dir === 'asc' ? 'desc' : 'asc';
+            } else {
+                state.templateSort = { key, dir: 'asc' };
+            }
+            renderTemplatesTable(container);
+        });
+    });
     body.querySelectorAll('.lp-edit-template-btn').forEach(btn => {
         btn.addEventListener('click', (e) => { e.stopPropagation(); openTemplateModal(container, btn.dataset.id); });
     });
