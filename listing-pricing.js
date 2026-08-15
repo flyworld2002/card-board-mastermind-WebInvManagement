@@ -115,6 +115,7 @@ let state = {
     unimportedCount: 0,      // platform_listings rows for this listing_id not yet in the roster
     selected: new Set(),     // selected listing_card_assignments.row_id values
     templateSort: { key: 'name', dir: 'asc' },  // landing-view template list sort
+    templateFilters: { search: '', platform: '', account: '', kind: '' },  // landing-view filters
 };
 
 // Shift-click range-select anchor — index into the flat, top-to-bottom
@@ -184,52 +185,119 @@ async function renderTemplatesList(container) {
     renderTemplatesTable(container);
 }
 
-// Rebuilds the table from state.templates (already fetched) — used both
-// for the initial load and for re-sorting on a header click, so sorting
-// doesn't need a network round-trip.
+const distinctVals = (key, fallback) =>
+    [...new Set(state.templates.map(t => t[key] || fallback))].sort();
+
+function filteredTemplates() {
+    const f = state.templateFilters;
+    const q = f.search.trim().toLowerCase();
+    return state.templates.filter(t => {
+        if (f.platform && t.platform !== f.platform) return false;
+        if (f.account && (t.account || 'All accounts') !== f.account) return false;
+        if (f.kind && (t.listing_kind || 'variation') !== f.kind) return false;
+        if (q && !`${t.name} ${t.listing_id || ''}`.toLowerCase().includes(q)) return false;
+        return true;
+    });
+}
+
+// Builds the filter bar + "+ New template" button ONCE, then delegates the
+// actual table to renderTemplateRows() in its own wrapper div — filter
+// inputs/selects only ever re-render that inner wrapper (via their
+// listeners below), never themselves, so typing in the search box doesn't
+// lose focus on every keystroke the way a full-body rebuild would.
 function renderTemplatesTable(container) {
     const body = container.querySelector('#lp-body');
-    sortTemplates();
+    const f = state.templateFilters;
 
-    const sortArrow = (key) => state.templateSort.key !== key ? ''
-        : (state.templateSort.dir === 'asc' ? ' &#9650;' : ' &#9660;');
+    const filterSelect = (id, label, current, options) => `
+        <label style="font-size:12px; color:var(--text-secondary);">${label}
+            <select id="${id}" style="margin-left:4px;">
+                <option value="">(all)</option>
+                ${options.map(o => `<option value="${escapeHtml(o)}" ${current === o ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('')}
+            </select>
+        </label>
+    `;
 
     body.innerHTML = `
-        <div class="filters-bar" style="justify-content:flex-end;">
-            <button class="btn btn-primary" id="lp-new-template-btn">+ New template</button>
+        <div class="filters-bar" style="gap:14px; flex-wrap:wrap; align-items:center;">
+            <input type="text" id="lp-template-search" placeholder="Search name or eBay Item #..."
+                   value="${escapeHtml(f.search)}" style="min-width:220px;" />
+            ${filterSelect('lp-filter-platform', 'Platform', f.platform, distinctVals('platform'))}
+            ${filterSelect('lp-filter-account', 'Account', f.account, distinctVals('account', 'All accounts'))}
+            ${filterSelect('lp-filter-kind', 'Kind', f.kind, distinctVals('listing_kind', 'variation'))}
+            <button class="btn" id="lp-clear-filters-btn">Clear filters</button>
+            <button class="btn btn-primary" id="lp-new-template-btn" style="margin-left:auto;">+ New template</button>
         </div>
-        ${state.templates.length ? `
-            <table>
-                <thead><tr>
-                    <th>Picture</th>
-                    ${TEMPLATE_SORT_COLUMNS.map(([key, label]) => `
-                        <th class="lp-sort-th" data-key="${key}" style="cursor:pointer; user-select:none;">${label}${sortArrow(key)}</th>
-                    `).join('')}
-                    <th style="width:130px;"></th>
-                </tr></thead>
-                <tbody>
-                    ${state.templates.map(t => `
-                        <tr class="lp-template-row" data-id="${t.id}" style="cursor:pointer;">
-                            <td>${imgHtml(t.nav_image_url)}</td>
-                            <td>${escapeHtml(t.name)}</td>
-                            <td>${t.listing_id ? escapeHtml(t.listing_id) : '<span style="color:var(--text-secondary);">(draft — no listing yet)</span>'}</td>
-                            <td>${escapeHtml(t.platform)}</td>
-                            <td>${t.account ? escapeHtml(t.account) : '<span style="color:var(--text-secondary);">All accounts</span>'}</td>
-                            <td>${escapeHtml(t.listing_kind || 'variation')}</td>
-                            <td>
-                                <button class="btn lp-edit-template-btn" data-id="${t.id}">Edit</button>
-                                <button class="btn lp-duplicate-template-btn" data-id="${t.id}">Duplicate</button>
-                            </td>
-                        </tr>
-                    `).join('')}
-                </tbody>
-            </table>
-        ` : `<p style="color:var(--text-secondary)">No listing templates yet.</p>`}
+        <div id="lp-templates-table-wrap"></div>
         <div id="lp-modal-root"></div>
     `;
 
     body.querySelector('#lp-new-template-btn').addEventListener('click', () => openTemplateModal(container, null));
-    body.querySelectorAll('.lp-sort-th').forEach(th => {
+
+    const searchInput = body.querySelector('#lp-template-search');
+    searchInput.addEventListener('input', () => {
+        state.templateFilters.search = searchInput.value;
+        renderTemplateRows(container);
+    });
+    body.querySelector('#lp-filter-platform').addEventListener('change', (e) => {
+        state.templateFilters.platform = e.target.value;
+        renderTemplateRows(container);
+    });
+    body.querySelector('#lp-filter-account').addEventListener('change', (e) => {
+        state.templateFilters.account = e.target.value;
+        renderTemplateRows(container);
+    });
+    body.querySelector('#lp-filter-kind').addEventListener('change', (e) => {
+        state.templateFilters.kind = e.target.value;
+        renderTemplateRows(container);
+    });
+    body.querySelector('#lp-clear-filters-btn').addEventListener('click', () => {
+        state.templateFilters = { search: '', platform: '', account: '', kind: '' };
+        renderTemplatesTable(container);
+    });
+
+    renderTemplateRows(container);
+}
+
+// Just the <table> — rebuilt on every filter change or sort-header click,
+// independent of the filter bar itself (see renderTemplatesTable above).
+function renderTemplateRows(container) {
+    const wrap = container.querySelector('#lp-templates-table-wrap');
+    sortTemplates();
+    const rows = filteredTemplates();
+
+    const sortArrow = (key) => state.templateSort.key !== key ? ''
+        : (state.templateSort.dir === 'asc' ? ' &#9650;' : ' &#9660;');
+
+    wrap.innerHTML = rows.length ? `
+        <table>
+            <thead><tr>
+                <th>Picture</th>
+                ${TEMPLATE_SORT_COLUMNS.map(([key, label]) => `
+                    <th class="lp-sort-th" data-key="${key}" style="cursor:pointer; user-select:none;">${label}${sortArrow(key)}</th>
+                `).join('')}
+                <th style="width:130px;"></th>
+            </tr></thead>
+            <tbody>
+                ${rows.map(t => `
+                    <tr class="lp-template-row" data-id="${t.id}" style="cursor:pointer;">
+                        <td>${imgHtml(t.nav_image_url)}</td>
+                        <td>${escapeHtml(t.name)}</td>
+                        <td>${t.listing_id ? escapeHtml(t.listing_id) : '<span style="color:var(--text-secondary);">(draft — no listing yet)</span>'}</td>
+                        <td>${escapeHtml(t.platform)}</td>
+                        <td>${t.account ? escapeHtml(t.account) : '<span style="color:var(--text-secondary);">All accounts</span>'}</td>
+                        <td>${escapeHtml(t.listing_kind || 'variation')}</td>
+                        <td>
+                            <button class="btn lp-edit-template-btn" data-id="${t.id}">Edit</button>
+                            <button class="btn lp-duplicate-template-btn" data-id="${t.id}">Duplicate</button>
+                        </td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    ` : `<p style="color:var(--text-secondary)">${state.templates.length ? 'No templates match these filters.' : 'No listing templates yet.'}</p>`;
+
+    wrap.querySelectorAll('.lp-sort-th').forEach(th => {
         th.addEventListener('click', () => {
             const key = th.dataset.key;
             if (state.templateSort.key === key) {
@@ -237,16 +305,16 @@ function renderTemplatesTable(container) {
             } else {
                 state.templateSort = { key, dir: 'asc' };
             }
-            renderTemplatesTable(container);
+            renderTemplateRows(container);
         });
     });
-    body.querySelectorAll('.lp-edit-template-btn').forEach(btn => {
+    wrap.querySelectorAll('.lp-edit-template-btn').forEach(btn => {
         btn.addEventListener('click', (e) => { e.stopPropagation(); openTemplateModal(container, btn.dataset.id); });
     });
-    body.querySelectorAll('.lp-duplicate-template-btn').forEach(btn => {
+    wrap.querySelectorAll('.lp-duplicate-template-btn').forEach(btn => {
         btn.addEventListener('click', (e) => { e.stopPropagation(); openTemplateModal(container, null, btn.dataset.id); });
     });
-    body.querySelectorAll('.lp-template-row').forEach(tr => {
+    wrap.querySelectorAll('.lp-template-row').forEach(tr => {
         tr.addEventListener('click', () => openTemplate(container, tr.dataset.id));
     });
 }
