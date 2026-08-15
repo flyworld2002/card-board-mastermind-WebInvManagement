@@ -1249,6 +1249,9 @@ async function openManualMetadataModal(container, body, isDraft) {
                     Show in nav
                 </label>
                 ${textField('lp-nav-image-url', 'Nav image URL (eBay-hosted gallery photo)', t.nav_image_url)}
+                <div style="margin:-6px 0 10px;">
+                    <button type="button" class="btn" id="lp-nav-image-upload-btn">Upload to eBay hub...</button>
+                </div>
                 <div id="lp-meta-error" style="color:var(--danger); font-size:12px; margin-bottom:8px;"></div>
                 <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
                     <button type="button" class="btn" id="lp-meta-cancel">Cancel</button>
@@ -1322,6 +1325,16 @@ async function openManualMetadataModal(container, body, isDraft) {
         if (select.value === OTHER) return root.querySelector(`#${id}-other`).value.trim() || null;
         return select.value || null;
     };
+
+    root.querySelector('#lp-nav-image-upload-btn').addEventListener('click', () => {
+        // Appended straight to document.body, NOT into #lp-modal-root — this
+        // modal already occupies #lp-modal-root, and overwriting it here
+        // would blow away every unsaved field above. Stacks on top instead
+        // via a higher z-index.
+        openStageNavImageModal(t.id, (url) => {
+            root.querySelector('#lp-nav-image-url').value = url;
+        });
+    });
 
     root.querySelector('#lp-meta-cancel').addEventListener('click', () => { root.innerHTML = ''; });
     root.querySelector('#lp-meta-save').addEventListener('click', async () => {
@@ -2681,6 +2694,100 @@ function openStagePictureModal(container, body, rowId) {
             }
             root.innerHTML = '';
             await refreshRowDerivedCells(container, rowId);
+        } catch (err) {
+            console.error(err);
+            errBox.textContent = `Upload failed: ${err.message} — is picking_api.py running and reachable at ${PICKING_API_URL}?`;
+        } finally {
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = 'Upload';
+        }
+    });
+}
+
+// ----------------------------------------------------------------
+// Upload a nav image (eBay EPS) for a listing template's nav_image_url —
+// same EPS-upload mechanics as openStagePictureModal, but this writes to
+// listing_templates.nav_image_url immediately (no push required, it's
+// read directly by family_nav/era_nav on every description render) and
+// is opened from INSIDE the "Edit listing metadata" modal, so it can't
+// reuse #lp-modal-root (that's already occupied by the parent modal) —
+// appended straight to document.body instead, stacked on top via z-index.
+// ----------------------------------------------------------------
+
+function openStageNavImageModal(templateId, onUploaded) {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:200;';
+    overlay.innerHTML = `
+        <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:420px; max-width:90vw;">
+            <h3 style="margin:0 0 8px;">Upload nav image to eBay hub</h3>
+            <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
+                Uploads to eBay's own image hosting (EPS) right now and sets it as this
+                template's nav image immediately.
+            </p>
+            <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:10px;">Image URL
+                <input type="url" id="lp-nav-img-url" placeholder="https://..." style="width:100%; margin-top:4px;" />
+            </label>
+            <div style="text-align:center; font-size:11px; color:var(--text-secondary); margin:6px 0;">— or —</div>
+            <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:10px;">Upload a file
+                <input type="file" id="lp-nav-img-file" accept="image/*" style="width:100%; margin-top:4px;" />
+            </label>
+            <div id="lp-nav-img-error" style="color:var(--danger); font-size:12px; margin-bottom:10px;"></div>
+            <div style="display:flex; justify-content:flex-end; gap:8px;">
+                <button type="button" class="btn" id="lp-nav-img-cancel">Cancel</button>
+                <button type="button" class="btn btn-primary" id="lp-nav-img-upload">Upload</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    overlay.querySelector('#lp-nav-img-cancel').addEventListener('click', () => { overlay.remove(); });
+
+    const urlInput = overlay.querySelector('#lp-nav-img-url');
+    const fileInput = overlay.querySelector('#lp-nav-img-file');
+    urlInput.addEventListener('input', () => { if (urlInput.value.trim()) fileInput.value = ''; });
+    fileInput.addEventListener('change', () => { if (fileInput.files.length) urlInput.value = ''; });
+
+    overlay.querySelector('#lp-nav-img-upload').addEventListener('click', async () => {
+        const errBox = overlay.querySelector('#lp-nav-img-error');
+        errBox.textContent = '';
+        const url = urlInput.value.trim();
+        const file = fileInput.files[0];
+        if (!url && !file) { errBox.textContent = 'Enter an image URL or choose a file.'; return; }
+
+        const uploadBtn = overlay.querySelector('#lp-nav-img-upload');
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = 'Uploading...';
+
+        try {
+            let resp;
+            if (file) {
+                const form = new FormData();
+                form.append('template_id', templateId);
+                form.append('account_num', String(state.accountNum));
+                form.append('file', file);
+                resp = await fetch(`${PICKING_API_URL}/api/upload-nav-image-file`, {
+                    method: 'POST',
+                    headers: { 'x-picking-token': PICKING_API_TOKEN },
+                    body: form,
+                });
+            } else {
+                resp = await fetch(`${PICKING_API_URL}/api/upload-nav-image`, {
+                    method: 'POST',
+                    headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+                    body: JSON.stringify({ template_id: templateId, image_url: url, account_num: state.accountNum }),
+                });
+            }
+            if (!resp.ok) {
+                const detail = await resp.text().catch(() => '');
+                throw new Error(`${resp.status} ${detail}`);
+            }
+            const result = await resp.json();
+            if (result.error) {
+                errBox.textContent = result.error;
+                return;
+            }
+            overlay.remove();
+            onUploaded(result.nav_image_url);
         } catch (err) {
             console.error(err);
             errBox.textContent = `Upload failed: ${err.message} — is picking_api.py running and reachable at ${PICKING_API_URL}?`;
