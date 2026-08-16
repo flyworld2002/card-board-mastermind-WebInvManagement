@@ -347,6 +347,20 @@ function wireSetsControls(container) {
 
 // ── Create / edit modal ──────────────────────────────────────────────────────
 
+// Hint only, never auto-written — real Pokémon TCG sets pad card numbers
+// inconsistently (2-digit, 3-digit, or not at all), so a numeric guess
+// can't tell "this set genuinely has no padding" from "not configured
+// yet." base_set_number is stored zero-padded already (e.g. '084'), so
+// parseInt() first to get the real digit count (84 -> 2), not the
+// stored string's literal length (which would always read 3).
+function suggestedPadWidth(existing) {
+    if (!existing) return null;
+    const source = existing.base_set_number || existing.total_cards;
+    if (!source) return null;
+    const n = parseInt(source, 10);
+    return Number.isFinite(n) && n > 0 ? String(n).length : null;
+}
+
 function openSetModal(container, setId) {
     const isEdit = !!setId;
     const existing = isEdit ? state.sets.find(s => s.id === setId) : null;
@@ -405,6 +419,16 @@ function openSetModal(container, setId) {
                                     Set prefix
                                     <input type="text" name="set_prefix" value="${existing ? escapeAttr(existing.set_prefix || '') : ''}" style="width:100%; margin-top:4px;" />
                                 </label>
+                                <label style="font-size:12px; color:var(--text-secondary);">
+                                    Number padding (blank = no padding)
+                                    <input type="number" name="number_pad_width" min="0"
+                                           value="${existing?.number_pad_width ?? ''}"
+                                           placeholder="${suggestedPadWidth(existing) ?? 'e.g. 2 or 3'}"
+                                           style="width:100%; margin-top:4px;" />
+                                    ${suggestedPadWidth(existing) ? `<span style="font-size:11px; color:var(--text-secondary); display:block; margin-top:2px;">
+                                        suggested: ${suggestedPadWidth(existing)} (from ${existing.base_set_number ? 'base set number' : 'total cards'})
+                                    </span>` : ''}
+                                </label>
                             </div>
                         </div>
                     </div>
@@ -447,6 +471,7 @@ function openSetModal(container, setId) {
             base_set_number: fd.get('base_set_number').trim() || null,
             on_card_code: fd.get('on_card_code').trim() || null,
             set_prefix: fd.get('set_prefix').trim() || null,
+            number_pad_width: fd.get('number_pad_width') ? parseInt(fd.get('number_pad_width'), 10) : null,
         };
 
         try {
