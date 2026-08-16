@@ -382,9 +382,11 @@ function openTemplateModal(container, templateId, duplicateFromId = null) {
                         <label style="font-size:12px; color:var(--text-secondary);">
                             Display sort (buyer-facing dropdown order)
                             <select name="display_sort" style="width:100%; margin-top:4px;">
-                                <option value="card_number" ${(existing?.display_sort || 'card_number') === 'card_number' ? 'selected' : ''}>card_number</option>
+                                <option value="card_number" ${(existing?.display_sort || 'card_number') === 'card_number' ? 'selected' : ''}>card_number (grouped by set)</option>
+                                <option value="number" ${existing?.display_sort === 'number' ? 'selected' : ''}>number (ignores set)</option>
                                 <option value="alpha" ${existing?.display_sort === 'alpha' ? 'selected' : ''}>alpha</option>
-                                <option value="release_date" ${existing?.display_sort === 'release_date' ? 'selected' : ''}>release_date (reserved — future themed listings)</option>
+                                <option value="release_date" ${existing?.display_sort === 'release_date' ? 'selected' : ''}>release_date (by set release year)</option>
+                                <option value="rarity" ${existing?.display_sort === 'rarity' ? 'selected' : ''}>rarity (common &rarr; rare)</option>
                             </select>
                         </label>
                         ${f('Name format', 'text', 'name_format', existing?.name_format || '{number}/{set_total} {name} {suffix}', '', '', true)}
