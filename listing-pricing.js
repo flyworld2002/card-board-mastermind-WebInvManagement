@@ -827,6 +827,7 @@ function renderBody(container) {
             </select>
             <button class="btn" id="lp-bulk-sync-on-btn" style="font-size:12px;" ${state.selected.size === 0 ? 'disabled' : ''}>Enable sync</button>
             <button class="btn" id="lp-bulk-sync-off-btn" style="font-size:12px;" ${state.selected.size === 0 ? 'disabled' : ''}>Disable sync</button>
+            <button class="btn" id="lp-bulk-delete-btn" title="Remove selected from roster" style="font-size:12px; color:var(--danger);" ${state.selected.size === 0 ? 'disabled' : ''}>&#128465;&#65039; Remove selected</button>
         </div>
 
         ${state.groups.map(g => groupSectionHTML(g, byGroup[g.id] || [])).join('')}
@@ -1821,6 +1822,31 @@ function wireControls(container, body) {
 
     body.querySelector('#lp-bulk-sync-on-btn').addEventListener('click', () => bulkSetSyncEnabled(true));
     body.querySelector('#lp-bulk-sync-off-btn').addEventListener('click', () => bulkSetSyncEnabled(false));
+
+    // Same permanent-delete semantics as the single-row trashcan
+    // (deleteRosterRow) — never offered for 'active' rows there either,
+    // so a mixed selection just skips them (same tolerance
+    // bulkSetSyncEnabled already uses) rather than erroring the whole
+    // batch. Typical use: clear out a batch of queued cards to re-add
+    // via "+ Batch add cards" after changing set/template config.
+    body.querySelector('#lp-bulk-delete-btn').addEventListener('click', async () => {
+        const removable = state.resolvedRows.filter(r =>
+            state.selected.has(r.row_id) && (r.status === 'queued' || r.status === 'sold_out_retained'));
+        const skippedActive = state.selected.size - removable.length;
+        if (!removable.length) {
+            window.alert('None of the selected rows can be removed — Remove selected only applies to queued/sold-out rows, not active (live) ones.');
+            return;
+        }
+        const note = skippedActive > 0 ? ` (${skippedActive} active row(s) in your selection will be skipped)` : '';
+        if (!window.confirm(`Permanently remove ${removable.length} card(s) from the roster?${note} This cannot be undone — `
+            + `you'd need to re-add them via "Add card to listing" or "Batch add cards." Continue?`)) return;
+
+        const { error } = await supabase.from('listing_card_assignments')
+            .delete().in('id', removable.map(r => r.row_id));
+        if (error) { window.alert(`Failed to remove selected: ${error.message}`); return; }
+        state.selected = new Set();
+        await loadListing(container);
+    });
 
     body.querySelector('#lp-new-group-btn').addEventListener('click', () => openNewGroupModal(container, body));
 
