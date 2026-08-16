@@ -663,6 +663,17 @@ function resolvedQty(r) {
     return qty;
 }
 
+// "available/total" — total_inventory_qty (migration 040) is the raw
+// amount owned, available_qty is what's left after every OTHER active
+// listing's claim is subtracted. A gap between them (e.g. "0/11") means
+// real stock is tied up elsewhere and this card is a Balance candidate,
+// visible without having to open the Balance modal first.
+function availableQtyText(r) {
+    if (r.available_qty == null) return '-';
+    if (r.total_inventory_qty == null || r.total_inventory_qty === r.available_qty) return String(r.available_qty);
+    return `${r.available_qty}/${r.total_inventory_qty}`;
+}
+
 // Re-resolves ONE row from the server (still the only place derived
 // values — tier lookups, floors, the shared-inventory subtraction, etc.
 // — ever get computed, so this never duplicates that logic in JS) and
@@ -699,7 +710,7 @@ async function refreshRowDerivedCells(container, rowId) {
     if (sourceCell) sourceCell.innerHTML = sourceBadge(fresh.price_source);
 
     const availableCell = tr.querySelector('.lp-available-cell');
-    if (availableCell) availableCell.textContent = fresh.available_qty ?? '-';
+    if (availableCell) availableCell.textContent = availableQtyText(fresh);
 
     const resolvedQtyCell = tr.querySelector('.lp-resolved-qty-cell');
     if (resolvedQtyCell) resolvedQtyCell.textContent = resolvedQty(fresh);
@@ -1702,7 +1713,7 @@ function rowHTML(r) {
             <td class="lp-synced-cell">${isActive
                 ? (isGatedIn(r) ? '<span style="color:var(--success); font-size:12px;">yes</span>' : '<span style="color:var(--text-secondary); font-size:12px;">no</span>')
                 : '<span style="color:var(--text-secondary); font-size:12px;">n/a</span>'}</td>
-            <td><span class="lp-available-cell">${r.available_qty ?? '-'}</span>
+            <td><span class="lp-available-cell" title="Available for this listing / total owned in inventory">${availableQtyText(r)}</span>
                 <a href="#" class="lp-balance-qty-link" data-variant-id="${r.variant_id}" data-card-label="${escapeHtml(cardLabel(r))}" data-row-id="${r.row_id}"
                    style="font-size:10px; margin-left:4px; color:var(--accent);" title="Balance quantity across every listing that offers this card">Balance</a>
             </td>
