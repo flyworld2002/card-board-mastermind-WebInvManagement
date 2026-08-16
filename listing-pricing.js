@@ -2412,46 +2412,53 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
 // ids are namespaced `acs-` (not `lp-`) for the same reason.
 // ----------------------------------------------------------------
 
-// { key: card_variants column, table: lookup table for display labels
-// (null = show the raw code, no lookup table exists for that axis) }
+// Must match search_roster_candidates()'s p_limit default (migration 034).
+// Passed explicitly rather than relying on the RPC's own default so this
+// constant is the single place that has to change if the cap ever does.
+const ACS_SEARCH_LIMIT = 500;
+
 const VARIANT_AXES = [
-    { key: 'foil_type', table: 'foil_types', label: 'Foil type' },
-    { key: 'foil_pattern', table: 'foil_patterns', label: 'Foil pattern' },
-    { key: 'texture', table: 'textures', label: 'Texture' },
-    { key: 'material', table: 'materials', label: 'Material' },
-    { key: 'size', table: null, label: 'Size' },
-    { key: 'stamp_type', table: null, label: 'Stamp type' },
-    { key: 'source_type', table: null, label: 'Source type' },
+    { key: 'foil_type', label: 'Foil type' },
+    { key: 'foil_pattern', label: 'Foil pattern' },
+    { key: 'texture', label: 'Texture' },
+    { key: 'material', label: 'Material' },
+    { key: 'size', label: 'Size' },
+    { key: 'stamp_type', label: 'Stamp type' },
+    { key: 'source_type', label: 'Source type' },
 ];
 
-// card_master (~5.8k rows) / card_variants (~9.4k rows) are small enough
-// that "fetch the whole column, dedupe client-side" is fine — same
-// pattern openManualMetadataModal's priorValues() already uses for
-// listing_templates. Only offers axis values actually IN USE (not every
-// code the lookup tables define) so a filter option never silently
-// returns zero rows.
+// card_master (~5.8k rows) / card_variants (~9.4k rows) both exceed
+// Supabase's default 1,000-row REST response cap — an earlier version of
+// this function fetched the whole rarity/axis column and deduped
+// client-side, which silently truncated to whatever happened to be in
+// the first 1,000 rows (no ORDER BY), so values only present later in
+// the table — e.g. Double Rare/Ultra Rare, common on the newer
+// Mega Evolution-era cards — never showed up in the filter at all. Fixed
+// by computing DISTINCT server-side via advanced_search_filter_options()
+// (migration 033) instead, correct regardless of table size.
 async function loadAdvancedSearchOptions() {
-    const distinct = (rows, key) => [...new Set((rows || []).map(r => r[key]).filter(Boolean))].sort();
-
-    const [setsRes, raritiesRes, ...axisRes] = await Promise.all([
+    const [setsRes, filterOptsRes] = await Promise.all([
         supabase.from('card_sets').select('id, name, series').order('series').order('name'),
-        supabase.from('card_master').select('rarity').not('rarity', 'is', null),
-        ...VARIANT_AXES.map(a => supabase.from('card_variants').select(a.key).not(a.key, 'is', null)),
+        supabase.rpc('advanced_search_filter_options'),
     ]);
-    const lookupTables = [...new Set(VARIANT_AXES.map(a => a.table).filter(Boolean))];
-    const labelRes = await Promise.all(lookupTables.map(t => supabase.from(t).select('code, display_name')));
-    const labelsByTable = Object.fromEntries(lookupTables.map((t, i) =>
-        [t, Object.fromEntries((labelRes[i].data || []).map(r => [r.code, r.display_name]))]));
+
+    const byAxis = {};
+    (filterOptsRes.data || []).forEach(r => { (byAxis[r.axis] ??= []).push(r); });
 
     const axisValues = {};
-    VARIANT_AXES.forEach((a, i) => { axisValues[a.key] = distinct(axisRes[i].data, a.key); });
+    const axisLabelByKey = {};
+    VARIANT_AXES.forEach(a => {
+        const rows = byAxis[a.key] || [];
+        axisValues[a.key] = rows.map(r => r.code);
+        axisLabelByKey[a.key] = Object.fromEntries(rows.map(r => [r.code, r.display_label]));
+    });
 
     return {
         sets: setsRes.data || [],
         series: [...new Set((setsRes.data || []).map(s => s.series).filter(Boolean))].sort(),
-        rarities: distinct(raritiesRes.data, 'rarity'),
+        rarities: (byAxis.rarity || []).map(r => r.code),
         axisValues,
-        axisLabel: (axis, code) => (axis.table && labelsByTable[axis.table][code]) || code,
+        axisLabel: (axis, code) => axisLabelByKey[axis.key]?.[code] || code,
     };
 }
 
@@ -2608,7 +2615,8 @@ function collectAdvancedSearchFilters(root, evoPicker) {
 }
 
 async function runAdvancedCardSearch(templateId, filters) {
-    const { data, error } = await supabase.rpc('search_roster_candidates', { p_template_id: templateId, ...filters });
+    const { data, error } = await supabase.rpc('search_roster_candidates',
+        { p_template_id: templateId, p_limit: ACS_SEARCH_LIMIT, ...filters });
     if (error) throw error;
     return data || [];
 }
@@ -2675,7 +2683,16 @@ function openBatchAddModal(container, body) {
                 updateAddBtn();
             });
         });
-        root.querySelector('#acs-result-count').textContent = `${candidates.length} match(es)`;
+        // search_roster_candidates() caps itself at ACS_SEARCH_LIMIT server-side
+        // (migration 034 — an unfiltered/broad query can match thousands of
+        // rows, well past Supabase's default 1,000-row REST cap, so the RPC
+        // truncates deterministically instead of relying on that invisible
+        // cutoff). Hitting the cap exactly is the only client-side signal
+        // available that there may be more than what's shown.
+        const countEl = root.querySelector('#acs-result-count');
+        countEl.textContent = candidates.length === ACS_SEARCH_LIMIT
+            ? `${candidates.length}+ matches — narrow your filters to see the rest`
+            : `${candidates.length} match(es)`;
         updateAddBtn();
     };
 
