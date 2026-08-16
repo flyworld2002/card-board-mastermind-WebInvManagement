@@ -575,9 +575,8 @@ async function loadListing(container) {
         // no custom_name yet — via render_variation_name() (migration 037,
         // the same function create_listing()/_do_promotions() use at push
         // time), not a generic label. Batched in one RPC call rather than
-        // one per row. Purely a display/placeholder value — nothing is
-        // written to custom_name here; see rowHTML()'s Fill button for
-        // the only way a card's name actually gets pinned.
+        // one per row. Shown as the input's placeholder + hover title only
+        // (rowHTML()) — purely a preview, never written to custom_name.
         const needsPreview = state.resolvedRows.filter(r => r.status === 'queued' && !r.custom_name);
         if (needsPreview.length) {
             const { data: previews } = await supabase.rpc('render_variation_names', {
@@ -1683,16 +1682,11 @@ function rowHTML(r) {
                   </div>`
                 : imgHtml(r.image_url)}</td>
             <td>${r.status === 'queued'
-                ? `<div style="display:flex; gap:4px; align-items:center;">
-                       <input type="text" class="lp-custom-name-input" data-row-id="${r.row_id}"
-                              value="${escapeHtml(r.custom_name || '')}"
-                              placeholder="${escapeHtml(r.preview_name || cardLabel(r))}"
-                              title="eBay variation name at push time — leave blank to keep auto-generating from name_format"
-                              style="width:100%; font-size:13px; background:transparent; border:1px solid var(--border); border-radius:3px; padding:2px 4px;" />
-                       ${(!r.custom_name && r.preview_name) ? `<button type="button" class="lp-fill-custom-name-btn" data-row-id="${r.row_id}"
-                              title="Fill with the current auto-generated name so you can edit from there"
-                              style="font-size:11px; padding:2px 6px; white-space:nowrap;">Fill</button>` : ''}
-                   </div>`
+                ? `<input type="text" class="lp-custom-name-input" data-row-id="${r.row_id}"
+                          value="${escapeHtml(r.custom_name || '')}"
+                          placeholder="${escapeHtml(r.preview_name || cardLabel(r))}"
+                          title="${escapeHtml(r.preview_name || 'eBay variation name at push time — leave blank to keep auto-generating from name_format')}"
+                          style="width:100%; font-size:13px; background:transparent; border:1px solid var(--border); border-radius:3px; padding:2px 4px;" />`
                 : escapeHtml(listingRow.external_id || cardLabel(r))}
                 <div style="font-size:11px; color:var(--text-secondary);">${escapeHtml(r.derived_label)}</div>
             </td>
@@ -1736,11 +1730,11 @@ function actionsHTML(r) {
         return `
             ${isDraft ? '' : `<button class="btn lp-push-card-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px;">Push live</button>`}
             <button class="btn lp-fix-card-btn" data-row-id="${r.row_id}" data-current-label="${escapeHtml(cardLabel(r))}" style="font-size:11px; padding:2px 8px;">Fix card</button>
-            <button class="btn lp-delete-roster-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px; color:var(--danger);">Remove from roster</button>
+            <button class="btn lp-delete-roster-btn" data-row-id="${r.row_id}" title="Remove from roster" style="font-size:11px; padding:2px 6px; color:var(--danger);">&#128465;&#65039;</button>
         `;
     }
     // sold_out_retained — already off eBay, nothing left to push live again for this row.
-    return `<button class="btn lp-delete-roster-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px; color:var(--danger);">Remove from roster</button>`;
+    return `<button class="btn lp-delete-roster-btn" data-row-id="${r.row_id}" title="Remove from roster" style="font-size:11px; padding:2px 6px; color:var(--danger);">&#128465;&#65039;</button>`;
 }
 
 // ----------------------------------------------------------------
@@ -1881,29 +1875,12 @@ function wireControls(container, body) {
             if (error) { window.alert(`Failed to save custom name: ${error.message}`); return; }
             // refreshRowDerivedCells() re-fetches via resolve_listing_prices(),
             // which doesn't carry preview_name (a separate batched RPC call,
-            // loadListing() only) — preserve it across the merge so the Fill
-            // button's visibility stays correct without a full page reload.
+            // loadListing() only) — preserve it across the merge so the
+            // placeholder/hover text stays accurate without a full page reload.
             const previewName = state.resolvedRows.find(r => r.row_id === rowId)?.preview_name;
             await refreshRowDerivedCells(container, rowId);
             const refreshedRow = state.resolvedRows.find(r => r.row_id === rowId);
             if (refreshedRow) refreshedRow.preview_name = previewName;
-            const fillBtn = body.querySelector(`.lp-fill-custom-name-btn[data-row-id="${rowId}"]`);
-            if (fillBtn) fillBtn.style.display = raw === '' ? '' : 'none';
-        });
-    });
-
-    // Promotes the current auto-generated preview (shown as the empty
-    // input's placeholder) into a real, editable custom_name — reuses
-    // the 'change' handler above instead of a second Supabase call, so
-    // there's exactly one place that writes custom_name.
-    body.querySelectorAll('.lp-fill-custom-name-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const rowId = btn.dataset.rowId;
-            const row = state.resolvedRows.find(r => r.row_id === rowId);
-            const input = body.querySelector(`.lp-custom-name-input[data-row-id="${rowId}"]`);
-            if (!row?.preview_name || !input) return;
-            input.value = row.preview_name;
-            input.dispatchEvent(new Event('change'));
         });
     });
 
