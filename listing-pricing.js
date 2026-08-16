@@ -798,6 +798,7 @@ function renderBody(container) {
         <div style="display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap;">
             <button class="btn" id="lp-new-group-btn">+ New group</button>
             <button class="btn" id="lp-add-card-btn">+ Add card to listing</button>
+            <button class="btn" id="lp-batch-add-btn">+ Batch add cards</button>
             <span style="margin-left:auto; font-size:12px; color:var(--text-secondary); align-self:center;">
                 ${state.selected.size} selected
             </span>
@@ -1931,6 +1932,7 @@ function wireControls(container, body) {
     if (importBtn) importBtn.addEventListener('click', () => importExisting(container));
 
     body.querySelector('#lp-add-card-btn').addEventListener('click', () => openAddCardModal(container, body));
+    body.querySelector('#lp-batch-add-btn').addEventListener('click', () => openBatchAddModal(container, body));
 
     // Not rendered at all for a draft template (no listing_id yet) — see
     // wireDraftControls() for the "Create listing" equivalent.
@@ -2397,6 +2399,342 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
             return;
         }
         await openEditTiersModal(container, body, profileId);
+    });
+}
+
+// ----------------------------------------------------------------
+// Advanced card search — generic multi-axis filter (era/set/name/
+// evolution-line/related-Pokémon/rarity/variant axes), backed by the
+// search_roster_candidates() RPC (Card-Board-MasterMind migration 032).
+// Built as its own self-contained function group rather than logic
+// hard-wired into openBatchAddModal() below — Fei wants this reusable as
+// a general "advanced search" for future callers, not a one-off. Element
+// ids are namespaced `acs-` (not `lp-`) for the same reason.
+// ----------------------------------------------------------------
+
+// { key: card_variants column, table: lookup table for display labels
+// (null = show the raw code, no lookup table exists for that axis) }
+const VARIANT_AXES = [
+    { key: 'foil_type', table: 'foil_types', label: 'Foil type' },
+    { key: 'foil_pattern', table: 'foil_patterns', label: 'Foil pattern' },
+    { key: 'texture', table: 'textures', label: 'Texture' },
+    { key: 'material', table: 'materials', label: 'Material' },
+    { key: 'size', table: null, label: 'Size' },
+    { key: 'stamp_type', table: null, label: 'Stamp type' },
+    { key: 'source_type', table: null, label: 'Source type' },
+];
+
+// card_master (~5.8k rows) / card_variants (~9.4k rows) are small enough
+// that "fetch the whole column, dedupe client-side" is fine — same
+// pattern openManualMetadataModal's priorValues() already uses for
+// listing_templates. Only offers axis values actually IN USE (not every
+// code the lookup tables define) so a filter option never silently
+// returns zero rows.
+async function loadAdvancedSearchOptions() {
+    const distinct = (rows, key) => [...new Set((rows || []).map(r => r[key]).filter(Boolean))].sort();
+
+    const [setsRes, raritiesRes, ...axisRes] = await Promise.all([
+        supabase.from('card_sets').select('id, name, series').order('series').order('name'),
+        supabase.from('card_master').select('rarity').not('rarity', 'is', null),
+        ...VARIANT_AXES.map(a => supabase.from('card_variants').select(a.key).not(a.key, 'is', null)),
+    ]);
+    const lookupTables = [...new Set(VARIANT_AXES.map(a => a.table).filter(Boolean))];
+    const labelRes = await Promise.all(lookupTables.map(t => supabase.from(t).select('code, display_name')));
+    const labelsByTable = Object.fromEntries(lookupTables.map((t, i) =>
+        [t, Object.fromEntries((labelRes[i].data || []).map(r => [r.code, r.display_name]))]));
+
+    const axisValues = {};
+    VARIANT_AXES.forEach((a, i) => { axisValues[a.key] = distinct(axisRes[i].data, a.key); });
+
+    return {
+        sets: setsRes.data || [],
+        series: [...new Set((setsRes.data || []).map(s => s.series).filter(Boolean))].sort(),
+        rarities: distinct(raritiesRes.data, 'rarity'),
+        axisValues,
+        axisLabel: (axis, code) => (axis.table && labelsByTable[axis.table][code]) || code,
+    };
+}
+
+function advancedCardSearchFilterHTML(opts) {
+    const multiSelect = (id, label, values, labelFn = (v) => v) => `
+        <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:8px;">
+            ${label}
+            <select id="${id}" multiple size="${Math.min(5, Math.max(2, values.length))}" style="width:100%; margin-top:4px;">
+                ${values.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(labelFn(v))}</option>`).join('')}
+            </select>
+        </label>
+    `;
+    return `
+        <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:8px;">
+            Era
+            <select id="acs-era" style="width:100%; margin-top:4px;">
+                <option value="">Any</option>
+                ${opts.series.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('')}
+            </select>
+        </label>
+        ${multiSelect('acs-sets', 'Set(s) — narrows within the chosen era, or across all sets if Any',
+            opts.sets.map(s => s.id), (id) => opts.sets.find(s => s.id === id)?.name || id)}
+        <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:8px;">
+            Name / Pokémon (comma-separated, matches any)
+            <input type="text" id="acs-name-terms" placeholder="e.g. Charizard, Pikachu" style="width:100%; margin-top:4px;" />
+        </label>
+        <div style="margin-bottom:8px;">
+            <label style="font-size:12px; color:var(--text-secondary); display:block;">Evolution line</label>
+            <input type="search" id="acs-evo-search" placeholder="Search a Pokémon to pull in its whole line..." style="width:100%; margin-top:4px;" />
+            <div id="acs-evo-results" style="max-height:140px; overflow-y:auto;"></div>
+            <div id="acs-evo-chips" style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;"></div>
+        </div>
+        <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:8px;">
+            Related Pokémon (comma-separated — matches cards tagged with these in their art;
+            empty today until scenes data is backfilled)
+            <input type="text" id="acs-related-pokemon" style="width:100%; margin-top:4px;" />
+        </label>
+        ${multiSelect('acs-rarities', 'Rarity', opts.rarities)}
+        ${VARIANT_AXES.filter(a => opts.axisValues[a.key].length > 0).map(a =>
+            multiSelect(`acs-axis-${a.key}`, a.label, opts.axisValues[a.key], (v) => opts.axisLabel(a, v))).join('')}
+        <label style="font-size:12px; display:flex; align-items:center; gap:6px; margin-bottom:4px;">
+            <input type="checkbox" id="acs-exclude-secret-rare" checked /> Exclude secret rares (numbered above set total)
+        </label>
+    `;
+}
+
+// Evolution-line chip state: name -> included(bool). Rebuilt fresh each
+// time a new species is picked from the search results (picking a second
+// species REPLACES the chips, doesn't merge — one line at a time keeps
+// this predictable; nothing stops running two separate searches and
+// combining via the plain Name field if a real multi-line case comes up).
+function wireEvolutionLinePicker(root) {
+    let evoChips = {}; // name -> checked
+    let debounceTimer = null;
+    const toggleChip = (name) => {
+        evoChips[name] = !evoChips[name];
+        renderEvoChips(root, evoChips, toggleChip);
+    };
+
+    root.querySelector('#acs-evo-search').addEventListener('input', (e) => {
+        clearTimeout(debounceTimer);
+        const q = e.target.value.trim();
+        const resultsEl = root.querySelector('#acs-evo-results');
+        if (!q) { resultsEl.innerHTML = ''; return; }
+        debounceTimer = setTimeout(async () => {
+            const { data: matches, error } = await supabase.from('pokemon').select('id, name').ilike('name', `%${q}%`).limit(10);
+            if (error) { resultsEl.innerHTML = `<p style="color:var(--danger); font-size:12px;">${escapeHtml(error.message)}</p>`; return; }
+            resultsEl.innerHTML = (matches || []).map(m =>
+                `<div class="acs-evo-result" data-pokemon-id="${m.id}" style="padding:6px; border-bottom:1px solid var(--border); cursor:pointer; font-size:12px;">${escapeHtml(m.name)}</div>`
+            ).join('');
+            resultsEl.querySelectorAll('.acs-evo-result').forEach(el => {
+                el.addEventListener('click', async () => {
+                    resultsEl.innerHTML = '<p style="font-size:12px; color:var(--text-secondary);">Resolving line...</p>';
+                    evoChips = await resolveEvolutionLineChips(Number(el.dataset.pokemonId));
+                    resultsEl.innerHTML = '';
+                    root.querySelector('#acs-evo-search').value = '';
+                    renderEvoChips(root, evoChips, toggleChip);
+                });
+            });
+        }, 250);
+    });
+
+    return {
+        getCheckedNames: () => Object.keys(evoChips).filter(n => evoChips[n]),
+    };
+}
+
+function renderEvoChips(root, chips, onToggle) {
+    const el = root.querySelector('#acs-evo-chips');
+    el.innerHTML = Object.entries(chips).map(([name, checked]) => `
+        <span class="acs-evo-chip" data-name="${escapeHtml(name)}" style="cursor:pointer; user-select:none; display:inline-block; padding:4px 10px; border-radius:12px; font-size:12px;
+            background:${checked ? 'var(--accent)' : 'transparent'}; color:${checked ? '#fff' : 'var(--text-secondary)'}; border:1px solid ${checked ? 'var(--accent)' : 'var(--border)'};">
+            ${escapeHtml(name)}
+        </span>
+    `).join('');
+    el.querySelectorAll('.acs-evo-chip').forEach(chip => {
+        chip.addEventListener('click', () => onToggle(chip.dataset.name));
+    });
+}
+
+// Base stages (via pokemon_evolutions, chained off the picked species'
+// evolution_chain_id) UNION alt forms (Mega/regional/Gmax/etc. — separate
+// `pokemon` rows with base_pokemon_id pointing at one of those base
+// stages, evolution_chain_id NULL on the alt-form row itself). Fei wants
+// alt forms surfaced as their own toggleable entries, not silently
+// folded into the base name's substring match.
+async function resolveEvolutionLineChips(pokemonId) {
+    const { data: picked } = await supabase.from('pokemon').select('id, name, evolution_chain_id, base_pokemon_id').eq('id', pokemonId).maybeSingle();
+    if (!picked) return {};
+
+    const chainId = picked.evolution_chain_id;
+    let baseIds = new Set([picked.id]);
+    if (chainId) {
+        const { data: evo } = await supabase.from('pokemon_evolutions').select('from_pokemon_id, to_pokemon_id').eq('chain_id', chainId);
+        (evo || []).forEach(e => { baseIds.add(e.from_pokemon_id); baseIds.add(e.to_pokemon_id); });
+    } else if (picked.base_pokemon_id) {
+        // Picked an alt form directly — resolve its base species too so the whole line still shows up.
+        baseIds.add(picked.base_pokemon_id);
+    }
+
+    const { data: altForms } = await supabase.from('pokemon').select('id, name').in('base_pokemon_id', [...baseIds]);
+    const { data: baseForms } = await supabase.from('pokemon').select('id, name').in('id', [...baseIds]);
+
+    const chips = {};
+    [...(baseForms || []), ...(altForms || [])].forEach(p => { chips[p.name] = true; });
+    return chips;
+}
+
+function collectAdvancedSearchFilters(root, evoPicker) {
+    const era = root.querySelector('#acs-era').value.trim();
+    const selectedValues = (id) => [...root.querySelector(id).selectedOptions].map(o => o.value);
+    const splitTerms = (id) => root.querySelector(id).value.split(',').map(s => s.trim()).filter(Boolean);
+
+    const nameTerms = [...splitTerms('#acs-name-terms'), ...evoPicker.getCheckedNames()];
+    const relatedPokemon = splitTerms('#acs-related-pokemon');
+    const setIds = selectedValues('#acs-sets');
+    const rarities = selectedValues('#acs-rarities');
+
+    const filters = {
+        p_series: era ? [era] : null,
+        p_set_ids: setIds.length ? setIds : null,
+        p_name_terms: nameTerms.length ? nameTerms : null,
+        p_related_pokemon: relatedPokemon.length ? relatedPokemon : null,
+        p_rarities: rarities.length ? rarities : null,
+        p_exclude_secret_rare: root.querySelector('#acs-exclude-secret-rare').checked,
+    };
+    VARIANT_AXES.forEach(a => {
+        const el = root.querySelector(`#acs-axis-${a.key}`);
+        if (!el) return; // axis had zero in-use values, never rendered
+        const vals = [...el.selectedOptions].map(o => o.value);
+        filters[`p_${a.key}s`] = vals.length ? vals : null;
+    });
+    return filters;
+}
+
+async function runAdvancedCardSearch(templateId, filters) {
+    const { data, error } = await supabase.rpc('search_roster_candidates', { p_template_id: templateId, ...filters });
+    if (error) throw error;
+    return data || [];
+}
+
+function candidateLabel(c) {
+    const axisParts = [c.foil_type_display, c.foil_pattern_display, c.texture_display, c.material_display, c.size, c.stamp_type, c.source_type]
+        .filter(Boolean).join(' · ');
+    return `#${c.card_number ?? '?'} ${c.card_name} — ${c.set_name}${c.rarity ? ` · ${c.rarity}` : ''}${axisParts ? ` · ${axisParts}` : ''}${c.is_secret_rare ? ' · secret rare' : ''}`;
+}
+
+// ----------------------------------------------------------------
+// Batch add cards (queued) — the advanced search above, wired to a
+// preview-then-confirm bulk insert into listing_card_assignments. First
+// real caller: populating a themed listing's roster (e.g. every "Mega
+// ___ ex" card) without hand-picking each one via "Add card to listing".
+// ----------------------------------------------------------------
+
+function openBatchAddModal(container, body) {
+    const root = body.querySelector('#lp-modal-root');
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100; overflow-y:auto;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:560px; max-width:92vw; max-height:88vh; overflow-y:auto;">
+                <h3 style="margin:0 0 12px;">Batch add cards</h3>
+                <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
+                    Adds matches as <strong>queued</strong> (planned, not live on eBay yet). Filter, preview, uncheck
+                    anything you don't want, then add the rest in one go.
+                </p>
+                <div id="acs-filter-panel"><p style="font-size:12px; color:var(--text-secondary);">Loading filters...</p></div>
+                <div style="display:flex; gap:8px; margin:12px 0;">
+                    <button type="button" class="btn btn-primary" id="acs-preview-btn">Preview</button>
+                    <span id="acs-result-count" style="font-size:12px; color:var(--text-secondary); align-self:center;"></span>
+                </div>
+                <div id="acs-results" style="max-height:280px; overflow-y:auto; border-top:1px solid var(--border); padding-top:8px;"></div>
+                <div id="acs-error" style="color:var(--danger); font-size:12px; margin-top:8px;"></div>
+                <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:14px;">
+                    <button type="button" class="btn" id="acs-cancel">Close</button>
+                    <button type="button" class="btn btn-primary" id="acs-add-btn" disabled>Add 0 cards</button>
+                </div>
+            </div>
+        </div>
+    `;
+    root.querySelector('#acs-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+
+    let candidates = []; // last preview results
+    let checked = new Set(); // variant_ids still checked
+
+    const updateAddBtn = () => {
+        const btn = root.querySelector('#acs-add-btn');
+        btn.textContent = `Add ${checked.size} card${checked.size === 1 ? '' : 's'}`;
+        btn.disabled = checked.size === 0;
+    };
+
+    const renderResults = () => {
+        const el = root.querySelector('#acs-results');
+        el.innerHTML = candidates.map(c => `
+            <label style="display:flex; align-items:center; gap:8px; padding:5px 2px; font-size:12px; border-bottom:1px solid var(--border);">
+                <input type="checkbox" class="acs-result-checkbox" data-variant-id="${c.variant_id}" ${checked.has(c.variant_id) ? 'checked' : ''} />
+                ${escapeHtml(candidateLabel(c))}
+            </label>
+        `).join('');
+        el.querySelectorAll('.acs-result-checkbox').forEach(cb => {
+            cb.addEventListener('change', () => {
+                if (cb.checked) checked.add(cb.dataset.variantId); else checked.delete(cb.dataset.variantId);
+                updateAddBtn();
+            });
+        });
+        root.querySelector('#acs-result-count').textContent = `${candidates.length} match(es)`;
+        updateAddBtn();
+    };
+
+    loadAdvancedSearchOptions().then(opts => {
+        root.querySelector('#acs-filter-panel').innerHTML = advancedCardSearchFilterHTML(opts);
+        const evoPicker = wireEvolutionLinePicker(root);
+
+        root.querySelector('#acs-era').addEventListener('change', (e) => {
+            const era = e.target.value;
+            const setsSelect = root.querySelector('#acs-sets');
+            [...setsSelect.options].forEach(o => {
+                const set = opts.sets.find(s => s.id === o.value);
+                o.hidden = !!era && set?.series !== era;
+            });
+        });
+
+        root.querySelector('#acs-preview-btn').addEventListener('click', async () => {
+            const errBox = root.querySelector('#acs-error');
+            errBox.textContent = '';
+            root.querySelector('#acs-preview-btn').disabled = true;
+            try {
+                const filters = collectAdvancedSearchFilters(root, evoPicker);
+                candidates = await runAdvancedCardSearch(state.template.id, filters);
+                checked = new Set(candidates.map(c => c.variant_id)); // all pre-checked
+                renderResults();
+            } catch (err) {
+                errBox.textContent = err.message || 'Search failed.';
+            } finally {
+                root.querySelector('#acs-preview-btn').disabled = false;
+            }
+        });
+
+        root.querySelector('#acs-add-btn').addEventListener('click', async () => {
+            const errBox = root.querySelector('#acs-error');
+            errBox.textContent = '';
+            const addBtn = root.querySelector('#acs-add-btn');
+            addBtn.disabled = true;
+            try {
+                const { data: existingRows } = await supabase.from('listing_card_assignments')
+                    .select('priority_rank').eq('template_id', state.template.id)
+                    .order('priority_rank', { ascending: false }).limit(1);
+                let nextRank = (existingRows?.[0]?.priority_rank ?? -1) + 1;
+
+                const rows = candidates.filter(c => checked.has(c.variant_id)).map(c => ({
+                    template_id: state.template.id,
+                    variant_id: c.variant_id,
+                    priority_rank: nextRank++,
+                    status: 'queued',
+                }));
+                if (!rows.length) return;
+                const { error } = await supabase.from('listing_card_assignments').insert(rows);
+                if (error) throw error;
+                root.innerHTML = '';
+                await loadListing(container);
+            } catch (err) {
+                errBox.textContent = err.message || 'Failed to add cards.';
+                addBtn.disabled = false;
+            }
+        });
     });
 }
 
