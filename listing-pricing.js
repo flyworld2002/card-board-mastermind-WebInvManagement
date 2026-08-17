@@ -45,15 +45,16 @@ function imgHtml(url) {
 // Shared between rowHTML() (full render) and refreshRowDerivedCells()
 // (in-place patch after staging a picture) so the two never drift.
 function thumbTitle(r) {
-    return r.eps_picture_url
-        ? 'Picture staged for eBay — click to replace'
-        : 'Click to stage a picture for eBay (uploads to EPS now, attaches when this card is pushed live)';
+    return (r.card_photo_id || r.eps_picture_url)
+        ? 'Picture staged for eBay — click to manage/replace'
+        : 'Click to manage photos for eBay (pick an existing one or upload new — attaches when this card is pushed live)';
 }
 
 function thumbInnerHTML(r) {
+    const staged = r.card_photo_id || r.eps_picture_url;
     return `
-        ${imgHtml(r.eps_picture_url || r.image_url)}
-        ${r.eps_picture_url ? '<span style="position:absolute; top:-4px; right:-4px; background:var(--success); color:#000; font-size:10px; font-weight:700; border-radius:50%; width:14px; height:14px; display:flex; align-items:center; justify-content:center;">&#10003;</span>' : ''}
+        ${imgHtml(r.card_photo_front_url || r.eps_picture_url || r.image_url)}
+        ${staged ? '<span style="position:absolute; top:-4px; right:-4px; background:var(--success); color:#000; font-size:10px; font-weight:700; border-radius:50%; width:14px; height:14px; display:flex; align-items:center; justify-content:center;">&#10003;</span>' : ''}
     `;
 }
 
@@ -587,6 +588,20 @@ async function loadListing(container) {
             state.resolvedRows = state.resolvedRows.map(r => ({ ...r, preview_name: previewByVariantId[r.variant_id] || null }));
         }
 
+        // Thumbnail front photo for any row using the new per-copy photo
+        // library (migration 041) — resolve_listing_prices() only returns
+        // card_photo_id (a reference), not the actual URL, so fetch the
+        // front_eps_url for whichever groups are actually in use here.
+        // Purely a display convenience; the real push-time resolution
+        // (resolve_photo_urls(), Python) doesn't depend on this at all.
+        const photoIds = [...new Set(state.resolvedRows.map(r => r.card_photo_id).filter(Boolean))];
+        if (photoIds.length) {
+            const { data: photos } = await supabase.from('card_photos').select('id, front_eps_url').in('id', photoIds);
+            const frontUrlByPhotoId = Object.fromEntries((photos || []).map(p => [p.id, p.front_eps_url]));
+            state.resolvedRows = state.resolvedRows.map(r =>
+                r.card_photo_id ? { ...r, card_photo_front_url: frontUrlByPhotoId[r.card_photo_id] || null } : r);
+        }
+
         const plIds = (resolved || []).map(r => r.platform_listing_id).filter(Boolean);
         if (plIds.length) {
             const { data: listingRows } = await supabase
@@ -695,7 +710,16 @@ async function refreshRowDerivedCells(container, rowId) {
     if (!fresh) return; // row no longer exists (deleted/status changed elsewhere) — next full reload will catch it
 
     const idx = state.resolvedRows.findIndex(r => r.row_id === rowId);
-    if (idx !== -1) state.resolvedRows[idx] = fresh;
+    // preview_name / card_photo_front_url are JS-only enrichments
+    // (loadListing()'s batched RPC/table lookups) that
+    // resolve_listing_prices() itself doesn't return — preserve them
+    // across this targeted refresh so a single-cell edit elsewhere on
+    // the row doesn't blank the thumbnail or fall back to a generic
+    // placeholder name until the next full reload.
+    if (idx !== -1) {
+        const { preview_name, card_photo_front_url } = state.resolvedRows[idx];
+        state.resolvedRows[idx] = { ...fresh, preview_name, card_photo_front_url };
+    }
 
     const tr = container.querySelector(`tr[data-row-id="${rowId}"]`);
     if (!tr) return;
@@ -1910,14 +1934,7 @@ function wireControls(container, body) {
             const { error } = await supabase.from('listing_card_assignments')
                 .update({ custom_name: raw === '' ? null : raw }).eq('id', rowId);
             if (error) { window.alert(`Failed to save custom name: ${error.message}`); return; }
-            // refreshRowDerivedCells() re-fetches via resolve_listing_prices(),
-            // which doesn't carry preview_name (a separate batched RPC call,
-            // loadListing() only) — preserve it across the merge so the
-            // placeholder/hover text stays accurate without a full page reload.
-            const previewName = state.resolvedRows.find(r => r.row_id === rowId)?.preview_name;
             await refreshRowDerivedCells(container, rowId);
-            const refreshedRow = state.resolvedRows.find(r => r.row_id === rowId);
-            if (refreshedRow) refreshedRow.preview_name = previewName;
         });
     });
 
@@ -2798,11 +2815,23 @@ function openBatchAddModal(container, body) {
                     .order('priority_rank', { ascending: false }).limit(1);
                 let nextRank = (existingRows?.[0]?.priority_rank ?? -1) + 1;
 
-                const rows = candidates.filter(c => checked.has(c.variant_id)).map(c => ({
+                const toAdd = candidates.filter(c => checked.has(c.variant_id));
+                // Batch-resolve default photo groups (migration 043) in one
+                // round trip instead of one RPC call per card — same
+                // auto-default behavior as the single "Add card to listing"
+                // flow, zero new EPS uploads for cards that already have one.
+                const { data: defaultPhotos } = await supabase.rpc('default_card_photo_ids', {
+                    p_variant_ids: toAdd.map(c => c.variant_id),
+                    p_target_finish_kind: state.template.finish_kind || null,
+                });
+                const photoIdByVariantId = Object.fromEntries((defaultPhotos || []).map(p => [p.variant_id, p.card_photo_id]));
+
+                const rows = toAdd.map(c => ({
                     template_id: state.template.id,
                     variant_id: c.variant_id,
                     priority_rank: nextRank++,
                     status: 'queued',
+                    card_photo_id: photoIdByVariantId[c.variant_id] || null,
                 }));
                 if (!rows.length) return;
                 const { error } = await supabase.from('listing_card_assignments').insert(rows);
@@ -2935,11 +2964,20 @@ async function showVariantPicker(container, root, cardId, editRow = null) {
             } else {
                 const { count } = await supabase.from('listing_card_assignments')
                     .select('id', { count: 'exact', head: true }).eq('template_id', state.template.id);
+                // Auto-default to an existing photo group for this variant
+                // (migration 041/043) if one exists — zero new EPS upload
+                // needed, whichever listing it's being added to. Always
+                // changeable afterward via the roster table's thumbnail.
+                const { data: defaultPhotoId } = await supabase.rpc('default_card_photo_id', {
+                    p_variant_id: el.dataset.variantId,
+                    p_target_finish_kind: state.template.finish_kind || null,
+                });
                 const { error: insErr } = await supabase.from('listing_card_assignments').insert({
                     template_id: state.template.id,
                     variant_id: el.dataset.variantId,
                     priority_rank: count || 0,
                     status: 'queued',
+                    card_photo_id: defaultPhotoId || null,
                 });
                 if (insErr) {
                     window.alert(`Failed to add card: ${insErr.message}`);
@@ -3146,78 +3184,168 @@ async function deleteRosterRow(container, btn) {
 }
 
 // ----------------------------------------------------------------
-// Stage a picture for eBay (EPS) — queued rows only. Uploads to eBay's
-// own image hosting right now and stores the resulting URL on the
-// roster row; nothing changes on the live listing yet (there's nothing
-// live to attach a picture to for a queued card). The staged picture
-// rides along automatically the next time this specific row gets pushed
-// live. No R2/card_master catalog upload involved — separate, later plan.
+// Manage photos for a queued row (per-copy photo library, migration
+// 041) — pick an existing card_photos group for this card_variants row
+// (zero new EPS upload, works identically no matter which listing added
+// it — this is the whole point, see docs/plans/listing-pricing-system.md)
+// or upload a new group (front + optional additional photos). Nothing
+// changes on the live listing yet; the assigned/uploaded group rides
+// along automatically the next time this row actually gets pushed live
+// (resolve_photo_urls(), importer/card_photos.py).
 // ----------------------------------------------------------------
 
 function openStagePictureModal(container, body, rowId) {
+    const row = state.resolvedRows.find(r => r.row_id === rowId);
+    if (!row) return;
     const root = body.querySelector('#lp-modal-root');
+
     root.innerHTML = `
-        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
-            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:420px; max-width:90vw;">
-                <h3 style="margin:0 0 8px;">Stage picture for eBay</h3>
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100; overflow-y:auto;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:480px; max-width:92vw; max-height:88vh; overflow-y:auto;">
+                <h3 style="margin:0 0 8px;">Manage photos</h3>
                 <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
-                    Uploads to eBay's own image hosting (EPS) right now. The listing
-                    itself isn't touched until this card is actually pushed live —
-                    at that point the picture is attached automatically.
+                    Pick an existing photo group for this card, or upload a new one.
+                    The listing itself isn't touched until this card is pushed live.
                 </p>
-                <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:10px;">Image URL
-                    <input type="url" id="lp-stage-pic-url" placeholder="https://..." style="width:100%; margin-top:4px;" />
-                </label>
-                <div style="text-align:center; font-size:11px; color:var(--text-secondary); margin:6px 0;">— or —</div>
-                <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:10px;">Upload a file
-                    <input type="file" id="lp-stage-pic-file" accept="image/*" style="width:100%; margin-top:4px;" />
-                </label>
-                <div id="lp-stage-pic-error" style="color:var(--danger); font-size:12px; margin-bottom:10px;"></div>
-                <div style="display:flex; justify-content:flex-end; gap:8px;">
-                    <button type="button" class="btn" id="lp-stage-pic-cancel">Cancel</button>
-                    <button type="button" class="btn btn-primary" id="lp-stage-pic-upload">Upload</button>
+                <div id="lp-photo-existing"><p style="font-size:12px; color:var(--text-secondary);">Loading existing photos...</p></div>
+                <div style="border-top:1px solid var(--border); margin:14px 0 10px; padding-top:12px;">
+                    <strong style="font-size:13px; display:block; margin-bottom:8px;">+ New photo group</strong>
+                    <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:8px;">Label (optional, e.g. "Copy A — NM")
+                        <input type="text" id="lp-photo-label" style="width:100%; margin-top:4px;" />
+                    </label>
+                    <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:6px;">Front photo — Image URL
+                        <input type="url" id="lp-photo-front-url" placeholder="https://..." style="width:100%; margin-top:4px;" />
+                    </label>
+                    <div style="text-align:center; font-size:11px; color:var(--text-secondary); margin:4px 0;">— or —</div>
+                    <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:10px;">Upload a file
+                        <input type="file" id="lp-photo-front-file" accept="image/*" style="width:100%; margin-top:4px;" />
+                    </label>
+                    <div id="lp-photo-additional"></div>
+                    <button type="button" class="btn" id="lp-photo-add-another" style="font-size:11px; margin-bottom:10px;">+ Add another photo (back, close-up, etc.)</button>
+                    <div id="lp-photo-error" style="color:var(--danger); font-size:12px; margin-bottom:10px;"></div>
+                    <div style="display:flex; justify-content:flex-end; gap:8px;">
+                        <button type="button" class="btn" id="lp-photo-cancel">Close</button>
+                        <button type="button" class="btn btn-primary" id="lp-photo-upload">Create group</button>
+                    </div>
                 </div>
             </div>
         </div>
     `;
 
-    root.querySelector('#lp-stage-pic-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+    root.querySelector('#lp-photo-cancel').addEventListener('click', () => { root.innerHTML = ''; });
 
-    // URL and file are mutually exclusive — picking one clears the other,
-    // so it's always unambiguous which the user meant.
-    const urlInput = root.querySelector('#lp-stage-pic-url');
-    const fileInput = root.querySelector('#lp-stage-pic-file');
-    urlInput.addEventListener('input', () => { if (urlInput.value.trim()) fileInput.value = ''; });
-    fileInput.addEventListener('change', () => { if (fileInput.files.length) urlInput.value = ''; });
+    // Front URL and front file are mutually exclusive, same convention
+    // the old single-picture flow used — picking one clears the other.
+    const frontUrlInput = root.querySelector('#lp-photo-front-url');
+    const frontFileInput = root.querySelector('#lp-photo-front-file');
+    frontUrlInput.addEventListener('input', () => { if (frontUrlInput.value.trim()) frontFileInput.value = ''; });
+    frontFileInput.addEventListener('change', () => { if (frontFileInput.files.length) frontUrlInput.value = ''; });
 
-    root.querySelector('#lp-stage-pic-upload').addEventListener('click', async () => {
-        const errBox = root.querySelector('#lp-stage-pic-error');
+    // Additional photos: URL-only (the multipart create endpoint is
+    // front-file-only, to keep its shape simple — see
+    // /api/card-photos-file's docstring). Each row is source + label.
+    const additionalEl = root.querySelector('#lp-photo-additional');
+    const addAdditionalRow = () => {
+        const rowEl = document.createElement('div');
+        rowEl.style.cssText = 'display:flex; gap:6px; margin-bottom:6px;';
+        rowEl.innerHTML = `
+            <input type="url" class="lp-photo-additional-url" placeholder="https://... (e.g. back)" style="flex:2;" />
+            <input type="text" class="lp-photo-additional-label" placeholder="Label" style="flex:1;" />
+            <button type="button" class="btn lp-photo-additional-remove" style="font-size:11px;">&times;</button>
+        `;
+        rowEl.querySelector('.lp-photo-additional-remove').addEventListener('click', () => rowEl.remove());
+        additionalEl.appendChild(rowEl);
+    };
+    root.querySelector('#lp-photo-add-another').addEventListener('click', addAdditionalRow);
+
+    const assignExisting = async (cardPhotoId) => {
+        const resp = await fetch(`${PICKING_API_URL}/api/assign-card-photo`, {
+            method: 'POST',
+            headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+            body: JSON.stringify({ row_id: rowId, card_photo_id: cardPhotoId }),
+        });
+        if (!resp.ok) {
+            window.alert(`Failed to assign photo: ${await resp.text().catch(() => resp.status)}`);
+            return;
+        }
+        root.innerHTML = '';
+        await refreshRowDerivedCells(container, rowId);
+    };
+
+    fetch(`${PICKING_API_URL}/api/card-photos/${row.variant_id}`, {
+        headers: { 'x-picking-token': PICKING_API_TOKEN },
+    })
+        .then(resp => resp.json())
+        .then(data => {
+            const existingEl = root.querySelector('#lp-photo-existing');
+            const photos = data.photos || [];
+            if (!photos.length) {
+                existingEl.innerHTML = `<p style="font-size:12px; color:var(--text-secondary);">No existing photos for this card yet — upload one below.</p>`;
+                return;
+            }
+            existingEl.innerHTML = `
+                <p style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Existing photos for this card:</p>
+                <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:4px;">
+                    ${photos.map(p => `
+                        <div class="lp-photo-existing-option" data-photo-id="${p.id}"
+                             style="cursor:pointer; border:2px solid ${p.id === row.card_photo_id ? 'var(--accent)' : 'var(--border)'}; border-radius:6px; padding:6px; width:100px; text-align:center;">
+                            <img src="${escapeHtml(p.front_eps_url)}" style="width:100%; height:70px; object-fit:cover; border-radius:3px; display:block;" />
+                            <span style="font-size:10px; color:var(--text-secondary); display:block; margin-top:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                                ${escapeHtml(p.label || (p.id === row.card_photo_id ? 'Current' : 'Untitled'))}
+                            </span>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+            existingEl.querySelectorAll('.lp-photo-existing-option').forEach(el => {
+                el.addEventListener('click', () => assignExisting(el.dataset.photoId));
+            });
+        })
+        .catch(err => {
+            root.querySelector('#lp-photo-existing').innerHTML =
+                `<p style="color:var(--danger); font-size:12px;">Failed to load existing photos: ${escapeHtml(err.message)}</p>`;
+        });
+
+    root.querySelector('#lp-photo-upload').addEventListener('click', async () => {
+        const errBox = root.querySelector('#lp-photo-error');
         errBox.textContent = '';
-        const url = urlInput.value.trim();
-        const file = fileInput.files[0];
-        if (!url && !file) { errBox.textContent = 'Enter an image URL or choose a file.'; return; }
+        const frontUrl = frontUrlInput.value.trim();
+        const frontFile = frontFileInput.files[0];
+        if (!frontUrl && !frontFile) { errBox.textContent = 'Enter a front photo URL or choose a file.'; return; }
 
-        const uploadBtn = root.querySelector('#lp-stage-pic-upload');
+        const label = root.querySelector('#lp-photo-label').value.trim() || null;
+        const additional = [...additionalEl.querySelectorAll('div')].map(rowEl => ({
+            source_url: rowEl.querySelector('.lp-photo-additional-url')?.value.trim(),
+            label: rowEl.querySelector('.lp-photo-additional-label')?.value.trim() || null,
+        })).filter(a => a.source_url);
+
+        const uploadBtn = root.querySelector('#lp-photo-upload');
         uploadBtn.disabled = true;
         uploadBtn.textContent = 'Uploading...';
 
         try {
             let resp;
-            if (file) {
+            if (frontFile) {
                 const form = new FormData();
-                form.append('row_id', rowId);
+                form.append('variant_id', row.variant_id);
                 form.append('account_num', String(state.accountNum));
-                form.append('file', file);
-                resp = await fetch(`${PICKING_API_URL}/api/stage-card-picture-file`, {
+                if (label) form.append('label', label);
+                if (state.template.finish_kind) form.append('source_finish_kind', state.template.finish_kind);
+                form.append('file', frontFile);
+                resp = await fetch(`${PICKING_API_URL}/api/card-photos-file`, {
                     method: 'POST',
                     headers: { 'x-picking-token': PICKING_API_TOKEN },
                     body: form,
                 });
             } else {
-                resp = await fetch(`${PICKING_API_URL}/api/stage-card-picture`, {
+                resp = await fetch(`${PICKING_API_URL}/api/card-photos`, {
                     method: 'POST',
                     headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
-                    body: JSON.stringify({ row_id: rowId, image_url: url, account_num: state.accountNum }),
+                    body: JSON.stringify({
+                        variant_id: row.variant_id, front_source_url: frontUrl, label,
+                        additional, source_finish_kind: state.template.finish_kind || null,
+                        account_num: state.accountNum,
+                    }),
                 });
             }
             if (!resp.ok) {
@@ -3229,6 +3357,15 @@ function openStagePictureModal(container, body, rowId) {
                 errBox.textContent = result.error;
                 return;
             }
+            const assignResp = await fetch(`${PICKING_API_URL}/api/assign-card-photo`, {
+                method: 'POST',
+                headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+                body: JSON.stringify({ row_id: rowId, card_photo_id: result.card_photo.id }),
+            });
+            if (!assignResp.ok) {
+                errBox.textContent = `Photo created but failed to assign it to this card: ${await assignResp.text().catch(() => assignResp.status)}`;
+                return;
+            }
             root.innerHTML = '';
             await refreshRowDerivedCells(container, rowId);
         } catch (err) {
@@ -3236,7 +3373,7 @@ function openStagePictureModal(container, body, rowId) {
             errBox.textContent = `Upload failed: ${err.message} — is picking_api.py running and reachable at ${PICKING_API_URL}?`;
         } finally {
             uploadBtn.disabled = false;
-            uploadBtn.textContent = 'Upload';
+            uploadBtn.textContent = 'Create group';
         }
     });
 }
