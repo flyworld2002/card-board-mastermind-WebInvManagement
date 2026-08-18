@@ -390,7 +390,7 @@ function openTemplateModal(container, templateId, duplicateFromId = null) {
                                 <option value="rarity" ${existing?.display_sort === 'rarity' ? 'selected' : ''}>rarity (common &rarr; rare)</option>
                             </select>
                         </label>
-                        ${f('Name format', 'text', 'name_format', existing?.name_format || '{number}/{set_total} {name} {suffix}', '', '', true)}
+                        ${f('Name format', 'text', 'name_format', existing?.name_format || '{number}/{base_set_number} {name} {suffix}', '', '', true)}
                     </div>
                     <div id="lp-template-form-error" style="color:var(--danger); font-size:12px; margin-top:10px;"></div>
                     <div style="display:flex; justify-content:space-between; align-items:center; margin-top:18px;">
@@ -474,7 +474,7 @@ function openTemplateModal(container, templateId, duplicateFromId = null) {
             low_stock_threshold: int('low_stock_threshold') ?? 8,
             low_stock_bump: num('low_stock_bump') ?? 1,
             display_sort: fd.get('display_sort') || 'card_number',
-            name_format: fd.get('name_format').trim() || '{number}/{set_total} {name} {suffix}',
+            name_format: fd.get('name_format').trim() || '{number}/{base_set_number} {name} {suffix}',
             updated_at: new Date().toISOString(),
         };
         try {
