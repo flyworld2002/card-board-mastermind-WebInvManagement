@@ -45,7 +45,13 @@ function imgHtml(url) {
 // Shared between rowHTML() (full render) and refreshRowDerivedCells()
 // (in-place patch after staging a picture) so the two never drift.
 function thumbTitle(r) {
-    return (r.card_photo_id || r.eps_picture_url)
+    const staged = r.card_photo_id || r.eps_picture_url;
+    if (r.status === 'active') {
+        return staged
+            ? 'Click to manage/replace this card\'s photo (reassigning here doesn\'t change eBay until you push the photo live)'
+            : 'Click to pick an existing photo or upload new (doesn\'t change eBay until you push the photo live)';
+    }
+    return staged
         ? 'Picture staged for eBay — click to manage/replace'
         : 'Click to manage photos for eBay (pick an existing one or upload new — attaches when this card is pushed live)';
 }
@@ -1711,7 +1717,7 @@ function rowHTML(r) {
     return `
         <tr data-row-id="${r.row_id}" ${stale ? 'style="background:rgba(245,166,35,0.06);"' : ''}>
             <td><input type="checkbox" class="lp-row-checkbox" data-row-id="${r.row_id}" ${state.selected.has(r.row_id) ? 'checked' : ''} /></td>
-            <td>${r.status === 'queued'
+            <td>${(r.status === 'queued' || r.status === 'active')
                 ? `<div class="lp-thumb-upload" data-row-id="${r.row_id}" style="cursor:pointer; position:relative; width:fit-content;"
                         title="${escapeHtml(thumbTitle(r))}">
                       ${thumbInnerHTML(r)}
@@ -3073,6 +3079,19 @@ async function callPushCard(rowId, dryRun) {
     return resp.json();
 }
 
+async function callPushCardPhoto(rowId, dryRun) {
+    const resp = await fetch(`${PICKING_API_URL}/api/push-card-photo`, {
+        method: 'POST',
+        headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+        body: JSON.stringify({ row_id: rowId, account_num: state.accountNum, dry_run: dryRun }),
+    });
+    if (!resp.ok) {
+        const detail = await resp.text().catch(() => '');
+        throw new Error(`${resp.status} ${detail}`);
+    }
+    return resp.json();
+}
+
 async function pushCardLive(container, btn) {
     const rowId = btn.dataset.rowId;
     const originalLabel = btn.textContent;
@@ -3197,6 +3216,7 @@ async function deleteRosterRow(container, btn) {
 function openStagePictureModal(container, body, rowId) {
     const row = state.resolvedRows.find(r => r.row_id === rowId);
     if (!row) return;
+    const isActive = row.status === 'active';
     const root = body.querySelector('#lp-modal-root');
 
     root.innerHTML = `
@@ -3205,7 +3225,9 @@ function openStagePictureModal(container, body, rowId) {
                 <h3 style="margin:0 0 8px;">Manage photos</h3>
                 <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
                     Pick an existing photo group for this card, or upload a new one.
-                    The listing itself isn't touched until this card is pushed live.
+                    ${isActive
+                        ? 'This card is already live — you\'ll be asked to confirm pushing the picture to eBay right after you pick or upload one.'
+                        : 'The listing itself isn\'t touched until this card is pushed live.'}
                 </p>
                 <div id="lp-photo-existing"><p style="font-size:12px; color:var(--text-secondary);">Loading existing photos...</p></div>
                 <div style="border-top:1px solid var(--border); margin:14px 0 10px; padding-top:12px;">
@@ -3258,53 +3280,76 @@ function openStagePictureModal(container, body, rowId) {
     };
     root.querySelector('#lp-photo-add-another').addEventListener('click', addAdditionalRow);
 
+    // For an already-live row, assigning a new card_photo_id only changes
+    // what the roster THINKS this card's picture is — nothing reaches
+    // eBay until push-card-photo actually revises the live variation.
+    // Offered as an immediate follow-up confirm so this never silently
+    // looks "done" while eBay still shows the old picture.
+    const pushPhotoLiveIfActive = async () => {
+        if (!isActive) return;
+        const confirmed = window.confirm(
+            `Push this photo live to eBay now for "${row.derived_label || rowId}"? `
+            + `Only this card's picture changes — no other variation's price, qty, or picture is touched.`
+        );
+        if (!confirmed) return;
+        try {
+            const result = await callPushCardPhoto(rowId, false);
+            if (result.error) window.alert(`Failed to push photo live: ${result.error}`);
+        } catch (err) {
+            window.alert(`Failed to push photo live: ${err.message}`);
+        }
+    };
+
+    // Browsing/picking an EXISTING photo group is a plain DB read+write —
+    // no eBay call involved — so it goes straight through Supabase rather
+    // than picking_api.py (unlike the "+ New photo group" upload below,
+    // which genuinely needs picking_api.py for the real EPS upload).
+    // Keeps the modal usable even when the desktop's CBMPickingAPI
+    // scheduled task is down (2026-08-18, see build log).
     const assignExisting = async (cardPhotoId) => {
-        const resp = await fetch(`${PICKING_API_URL}/api/assign-card-photo`, {
-            method: 'POST',
-            headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
-            body: JSON.stringify({ row_id: rowId, card_photo_id: cardPhotoId }),
-        });
-        if (!resp.ok) {
-            window.alert(`Failed to assign photo: ${await resp.text().catch(() => resp.status)}`);
+        const { error } = await supabase.rpc('assign_card_photo', { p_row_id: rowId, p_card_photo_id: cardPhotoId });
+        if (error) {
+            window.alert(`Failed to assign photo: ${error.message}`);
             return;
         }
         root.innerHTML = '';
+        await pushPhotoLiveIfActive();
         await refreshRowDerivedCells(container, rowId);
     };
 
-    fetch(`${PICKING_API_URL}/api/card-photos/${row.variant_id}`, {
-        headers: { 'x-picking-token': PICKING_API_TOKEN },
-    })
-        .then(resp => resp.json())
-        .then(data => {
-            const existingEl = root.querySelector('#lp-photo-existing');
-            const photos = data.photos || [];
-            if (!photos.length) {
-                existingEl.innerHTML = `<p style="font-size:12px; color:var(--text-secondary);">No existing photos for this card yet — upload one below.</p>`;
-                return;
-            }
-            existingEl.innerHTML = `
-                <p style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Existing photos for this card:</p>
-                <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:4px;">
-                    ${photos.map(p => `
-                        <div class="lp-photo-existing-option" data-photo-id="${p.id}"
-                             style="cursor:pointer; border:2px solid ${p.id === row.card_photo_id ? 'var(--accent)' : 'var(--border)'}; border-radius:6px; padding:6px; width:100px; text-align:center;">
-                            <img src="${escapeHtml(p.front_eps_url)}" style="width:100%; height:70px; object-fit:cover; border-radius:3px; display:block;" />
-                            <span style="font-size:10px; color:var(--text-secondary); display:block; margin-top:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
-                                ${escapeHtml(p.label || (p.id === row.card_photo_id ? 'Current' : 'Untitled'))}
-                            </span>
-                        </div>
-                    `).join('')}
-                </div>
-            `;
-            existingEl.querySelectorAll('.lp-photo-existing-option').forEach(el => {
-                el.addEventListener('click', () => assignExisting(el.dataset.photoId));
-            });
-        })
-        .catch(err => {
-            root.querySelector('#lp-photo-existing').innerHTML =
-                `<p style="color:var(--danger); font-size:12px;">Failed to load existing photos: ${escapeHtml(err.message)}</p>`;
+    (async () => {
+        const existingEl = root.querySelector('#lp-photo-existing');
+        const { data: photos, error } = await supabase
+            .from('card_photos')
+            .select('id, front_eps_url, label')
+            .eq('variant_id', row.variant_id)
+            .order('created_at', { ascending: false });
+        if (error) {
+            existingEl.innerHTML = `<p style="color:var(--danger); font-size:12px;">Failed to load existing photos: ${escapeHtml(error.message)}</p>`;
+            return;
+        }
+        if (!photos.length) {
+            existingEl.innerHTML = `<p style="font-size:12px; color:var(--text-secondary);">No existing photos for this card yet — upload one below.</p>`;
+            return;
+        }
+        existingEl.innerHTML = `
+            <p style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;">Existing photos for this card:</p>
+            <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:4px;">
+                ${photos.map(p => `
+                    <div class="lp-photo-existing-option" data-photo-id="${p.id}"
+                         style="cursor:pointer; border:2px solid ${p.id === row.card_photo_id ? 'var(--accent)' : 'var(--border)'}; border-radius:6px; padding:6px; width:100px; text-align:center;">
+                        <img src="${escapeHtml(p.front_eps_url)}" style="width:100%; height:70px; object-fit:cover; border-radius:3px; display:block;" />
+                        <span style="font-size:10px; color:var(--text-secondary); display:block; margin-top:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                            ${escapeHtml(p.label || (p.id === row.card_photo_id ? 'Current' : 'Untitled'))}
+                        </span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+        existingEl.querySelectorAll('.lp-photo-existing-option').forEach(el => {
+            el.addEventListener('click', () => assignExisting(el.dataset.photoId));
         });
+    })();
 
     root.querySelector('#lp-photo-upload').addEventListener('click', async () => {
         const errBox = root.querySelector('#lp-photo-error');
@@ -3367,6 +3412,7 @@ function openStagePictureModal(container, body, rowId) {
                 return;
             }
             root.innerHTML = '';
+            await pushPhotoLiveIfActive();
             await refreshRowDerivedCells(container, rowId);
         } catch (err) {
             console.error(err);
