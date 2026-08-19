@@ -348,6 +348,21 @@ async function openTemplate(container, templateId) {
 // listing" — recreating every group + profile link by hand for each new
 // listing would defeat that. Groups copy empty (no roster rows point at
 // them yet) — cards get assigned into them normally once added.
+//
+// Listing metadata (category/policies/location/item_specifics/etc. —
+// ALL_METADATA_FIELD_KEYS, same columns clone_listing_metadata()/
+// set_manual_listing_metadata() write in importer/ebay_create_listing.py)
+// is copied too, same rationale as the groups: a duplicated template is
+// almost always "same set/category/policies, different physical eBay
+// listing," and re-cloning-from-eBay or re-typing every field by hand
+// for each new listing would defeat the point of duplicating at all.
+// title is copied verbatim along with everything else — Fei reviews/
+// edits the form before saving either way, same as a real clone from an
+// existing listing already assumes (see clone_listing_metadata's
+// docstring). description_live_html/source/cloned_from_listing_id
+// aren't part of ALL_METADATA_FIELD_KEYS (that constant is scoped to
+// the manual Edit-fields form) but are still real listing_templates
+// columns worth carrying over for context.
 function openTemplateModal(container, templateId, duplicateFromId = null) {
     const isEdit = !!templateId;
     const duplicateSource = duplicateFromId ? state.templates.find(t => t.id === duplicateFromId) : null;
@@ -365,7 +380,7 @@ function openTemplateModal(container, templateId, duplicateFromId = null) {
         <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
             <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:460px; max-width:90vw; max-height:85vh; overflow-y:auto;">
                 <h3 style="margin:0 0 16px;">${isEdit ? 'Edit listing template' : duplicateSource ? 'Duplicate listing template' : 'New listing template'}</h3>
-                ${duplicateSource ? `<p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">Copied from "${escapeHtml(duplicateSource.name)}" — groups and their pricing profile links are copied (empty, no cards yet); the roster itself is NOT copied.</p>` : ''}
+                ${duplicateSource ? `<p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">Copied from "${escapeHtml(duplicateSource.name)}" — groups and their pricing profile links are copied (empty, no cards yet), and so is the listing metadata (title/category/policies/item specifics/etc. — review before creating the listing). The roster itself is NOT copied.</p>` : ''}
                 <form id="lp-template-form">
                     <div style="display:flex; flex-direction:column; gap:10px;">
                         ${f('Platform', 'text', 'platform', existing?.platform || 'ebay')}
@@ -503,6 +518,19 @@ function openTemplateModal(container, templateId, duplicateFromId = null) {
                             sourceGroups.map(g => ({ template_id: newTemplate.id, name: g.name, profile_id: g.profile_id }))
                         );
                         if (copyErr) throw copyErr;
+                    }
+
+                    const metadataCols = [
+                        ...ALL_METADATA_FIELD_KEYS, 'description_live_html', 'source', 'cloned_from_listing_id',
+                    ];
+                    const metadataPayload = {};
+                    for (const col of metadataCols) {
+                        if (duplicateSource[col] != null) metadataPayload[col] = duplicateSource[col];
+                    }
+                    if (Object.keys(metadataPayload).length) {
+                        const { error: metaErr } = await supabase.from('listing_templates')
+                            .update(metadataPayload).eq('id', newTemplate.id);
+                        if (metaErr) throw metaErr;
                     }
                 }
             }
