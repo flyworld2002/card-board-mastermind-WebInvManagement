@@ -1134,6 +1134,7 @@ function openProfileModal(container, profileId) {
             ${field('Name', 'text', 'name', existing?.name || '', 'e.g. double_rare_rh_ur')}
             ${field('Notes', 'text', 'notes', existing?.notes || '', '', '', true)}
             ${field('Default low-stock qty', 'number', 'default_low_stock_qty', existing?.default_low_stock_qty ?? '', 'holds back this many units from being pushed', '', true)}
+            ${field('Default quantity limit', 'number', 'default_quantity_limit', existing?.default_quantity_limit ?? '', "falls back to the listing's default, then 24, if blank", '', true)}
         </div>
         ${!isEdit ? '<p style="color:var(--text-secondary); font-size:12px; margin-top:10px;">Add tiers after creating the profile, via the "Tiers" button.</p>' : ''}
     `, isEdit, 'profile');
@@ -1154,6 +1155,7 @@ function openProfileModal(container, profileId) {
             name: fd.get('name').trim(),
             notes: fd.get('notes').trim() || null,
             default_low_stock_qty: fd.get('default_low_stock_qty') ? parseInt(fd.get('default_low_stock_qty'), 10) : null,
+            default_quantity_limit: fd.get('default_quantity_limit') ? parseInt(fd.get('default_quantity_limit'), 10) : null,
         };
         try {
             const { error } = isEdit
@@ -1192,18 +1194,16 @@ function renderTiersModalBody(root, container, profileId, editingTierId = null) 
                 <h3 style="margin:0 0 4px;">Tiers — ${escapeHTML(profile.name)}</h3>
                 <p style="color:var(--text-secondary); font-size:12px; margin:0 0 14px;">
                     Market price brackets: min is inclusive, max is exclusive (blank max = open-ended top tier).
-                    Blank quantity limit falls back to the listing's default, then 24.
                 </p>
                 ${tiers.length ? `
                     <table style="margin-bottom:12px;">
-                        <thead><tr><th>Min market</th><th>Max market</th><th>List price</th><th>Qty limit</th><th style="width:110px;"></th></tr></thead>
+                        <thead><tr><th>Min market</th><th>Max market</th><th>List price</th><th style="width:110px;"></th></tr></thead>
                         <tbody>
                             ${tiers.map(t => `
                                 <tr>
                                     <td>${formatPrice(t.min_market)}</td>
                                     <td>${t.max_market == null ? '(open-ended)' : formatPrice(t.max_market)}</td>
                                     <td>${tierPriceLabel(t)}</td>
-                                    <td>${t.quantity_limit ?? '—'}</td>
                                     <td>
                                         <button type="button" class="btn edit-tier-row-btn" data-id="${t.id}" style="padding:2px 8px; font-size:12px;">Edit</button>
                                         <button type="button" class="btn delete-tier-row-btn" data-id="${t.id}" style="padding:2px 8px; font-size:12px; color:var(--danger);">×</button>
@@ -1220,7 +1220,6 @@ function renderTiersModalBody(root, container, profileId, editingTierId = null) 
                             ${field('Min market ($, inclusive)', 'number', 'min_market', editingTier?.min_market ?? '0.00', '', '0.01')}
                             ${field('Max market ($, exclusive; blank = open-ended)', 'number', 'max_market', editingTier?.max_market ?? '', '', '0.01', true)}
                         </div>
-                        ${field('Quantity limit (blank = listing default)', 'number', 'quantity_limit', editingTier?.quantity_limit ?? '', 'default', '', true)}
                         <label style="font-size:12px; color:var(--text-secondary);">Pricing
                             <select id="tier-pricing-mode" name="pricing_mode" style="width:100%; margin-top:4px;">
                                 <option value="flat" ${tierMode === 'flat' ? 'selected' : ''}>Flat price</option>
@@ -1296,7 +1295,6 @@ function renderTiersModalBody(root, container, profileId, editingTierId = null) 
             list_price: mode === 'flat' ? parseFloat(fd.get('list_price')) : null,
             multiplier: mode === 'formula' ? parseFloat(fd.get('multiplier')) : null,
             plus: mode === 'formula' && fd.get('plus') ? parseFloat(fd.get('plus')) : null,
-            quantity_limit: fd.get('quantity_limit') ? parseInt(fd.get('quantity_limit'), 10) : null,
         };
         try {
             const { error } = editingTierId === 'new'

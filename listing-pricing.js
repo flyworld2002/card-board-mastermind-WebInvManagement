@@ -2240,9 +2240,6 @@ function openNewProfileModal(container, body, groupId) {
                         <option value="formula">Formula</option>
                     </select>
                 </label>
-                <label style="font-size:11px; color:var(--text-secondary); flex:1;">Qty limit (blank=default)
-                    <input type="number" class="lp-tier-qty-limit" placeholder="default" style="width:100%; margin-top:2px;" />
-                </label>
             </div>
             <div class="lp-tier-flat-fields" style="display:flex; gap:8px; align-items:flex-end; margin-top:6px;">
                 <label style="font-size:11px; color:var(--text-secondary); flex:1;">List price ($)
@@ -2269,6 +2266,9 @@ function openNewProfileModal(container, body, groupId) {
                 </label>
                 <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:10px;">Default low-stock qty (optional)
                     <input type="number" id="lp-new-profile-lowstock" style="width:100%; margin-top:4px;" />
+                </label>
+                <label style="font-size:12px; color:var(--text-secondary); display:block; margin-bottom:10px;">Default quantity limit (optional)
+                    <input type="number" id="lp-new-profile-qty-limit" placeholder="falls back to the listing's default, then 24" style="width:100%; margin-top:4px;" />
                 </label>
                 <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.03em; color:var(--text-secondary); margin:12px 0 6px;">
                     Tiers (min inclusive, max exclusive)
@@ -2313,14 +2313,12 @@ function openNewProfileModal(container, body, groupId) {
             const isFormula = rowEl.querySelector('.lp-tier-mode').value === 'formula';
             const multiplierRaw = rowEl.querySelector('.lp-tier-multiplier').value;
             const plusRaw = rowEl.querySelector('.lp-tier-plus').value;
-            const qtyLimitRaw = rowEl.querySelector('.lp-tier-qty-limit').value;
             return {
                 min_market: parseFloat(rowEl.querySelector('.lp-tier-min').value),
                 max_market: rowEl.querySelector('.lp-tier-max').value ? parseFloat(rowEl.querySelector('.lp-tier-max').value) : null,
                 list_price: isFormula ? null : parseFloat(rowEl.querySelector('.lp-tier-price').value),
                 multiplier: isFormula && multiplierRaw ? parseFloat(multiplierRaw) : null,
                 plus: isFormula && plusRaw ? parseFloat(plusRaw) : null,
-                quantity_limit: qtyLimitRaw ? parseInt(qtyLimitRaw, 10) : null,
             };
         }).filter(t => !isNaN(t.min_market) && (t.list_price != null ? !isNaN(t.list_price) : t.multiplier != null));
 
@@ -2332,10 +2330,12 @@ function openNewProfileModal(container, body, groupId) {
         // this codebase instead of an unproven .select().single() chain.
         const profileId = crypto.randomUUID();
         const lowStockRaw = root.querySelector('#lp-new-profile-lowstock').value;
+        const qtyLimitRaw = root.querySelector('#lp-new-profile-qty-limit').value;
         const { error: profileErr } = await supabase.from('pricing_profiles').insert({
             id: profileId,
             name,
             default_low_stock_qty: lowStockRaw ? parseInt(lowStockRaw, 10) : null,
+            default_quantity_limit: qtyLimitRaw ? parseInt(qtyLimitRaw, 10) : null,
         });
         if (profileErr) {
             errBox.textContent = profileErr.code === '23505' ? `A profile named "${name}" already exists.` : profileErr.message;
@@ -2394,18 +2394,16 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
                 <h3 style="margin:0 0 4px;">Tiers — ${escapeHtml(profile.name)}</h3>
                 <p style="color:var(--text-secondary); font-size:12px; margin:0 0 14px;">
                     Market price brackets: min is inclusive, max is exclusive (blank max = open-ended top tier).
-                    Blank quantity limit falls back to the listing's default, then 24.
                 </p>
                 ${(tiers || []).length ? `
                     <table style="margin-bottom:12px;">
-                        <thead><tr><th>Min market</th><th>Max market</th><th>Price</th><th>Qty limit</th><th style="width:110px;"></th></tr></thead>
+                        <thead><tr><th>Min market</th><th>Max market</th><th>Price</th><th style="width:110px;"></th></tr></thead>
                         <tbody>
                             ${tiers.map(t => `
                                 <tr>
                                     <td>${formatPrice(t.min_market)}</td>
                                     <td>${t.max_market == null ? '(open-ended)' : formatPrice(t.max_market)}</td>
                                     <td>${tierPriceLabel(t)}</td>
-                                    <td>${t.quantity_limit ?? '—'}</td>
                                     <td>
                                         <button type="button" class="btn lp-edit-tier-row-btn" data-id="${t.id}" style="padding:2px 8px; font-size:12px;">Edit</button>
                                         <button type="button" class="btn lp-delete-tier-row-btn" data-id="${t.id}" style="padding:2px 8px; font-size:12px; color:var(--danger);">×</button>
@@ -2426,9 +2424,6 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
                                 <input type="number" step="0.01" name="max_market" value="${editingTier?.max_market ?? ''}" style="width:100%; margin-top:4px;" />
                             </label>
                         </div>
-                        <label style="font-size:12px; color:var(--text-secondary);">Quantity limit (blank = listing default)
-                            <input type="number" name="quantity_limit" value="${editingTier?.quantity_limit ?? ''}" placeholder="default" style="width:100%; margin-top:4px;" />
-                        </label>
                         <label style="font-size:12px; color:var(--text-secondary);">Pricing
                             <select id="lp-tier-pricing-mode" name="pricing_mode" style="width:100%; margin-top:4px;">
                                 <option value="flat" ${tierMode === 'flat' ? 'selected' : ''}>Flat price</option>
@@ -2512,7 +2507,6 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
             list_price: mode === 'flat' ? parseFloat(fd.get('list_price')) : null,
             multiplier: mode === 'formula' ? parseFloat(fd.get('multiplier')) : null,
             plus: mode === 'formula' && fd.get('plus') ? parseFloat(fd.get('plus')) : null,
-            quantity_limit: fd.get('quantity_limit') ? parseInt(fd.get('quantity_limit'), 10) : null,
         };
         const { error } = editingTierId === 'new'
             ? await supabase.from('pricing_profile_tiers').insert(payload)
