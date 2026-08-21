@@ -3129,8 +3129,26 @@ async function doPush(container, dryRun) {
         if (!dryRun) await loadListing(container);
     } catch (err) {
         console.error(err);
+
+        // A failed push (e.g. eBay itself rejecting the Revise call) means
+        // nothing was written to eBay OR the DB — push_prices() only writes
+        // after a successful Revise, so the failure is atomic. But a bare
+        // error string doesn't reassure anyone of that, so follow up with a
+        // real (read-only) dry-run to show the actual current state instead
+        // of asking the user to just trust that nothing broke.
+        let confirmNote;
+        try {
+            const followUp = await callPushPrices(true);
+            confirmNote = `Nothing was changed — a follow-up check confirms ${followUp.pushed || 0} row(s) `
+                + `still pending, same as before this attempt.`;
+        } catch (followUpErr) {
+            console.error(followUpErr);
+            confirmNote = `Could not confirm current state — ${PICKING_API_URL} may be unreachable.`;
+        }
+
         msg.innerHTML = `<span style="color:var(--danger)">Push failed: ${escapeHtml(err.message)}
-            — is picking_api.py running and reachable at ${PICKING_API_URL}?</span>`;
+            — is picking_api.py running and reachable at ${PICKING_API_URL}?</span>
+            <br/><span style="color:var(--text-secondary);">${escapeHtml(confirmNote)}</span>`;
     } finally {
         pushBtn.disabled = false;
         dryBtn.disabled = false;
