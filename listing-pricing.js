@@ -1798,6 +1798,7 @@ function actionsHTML(r) {
         // the "Create listing" flow instead (see draftMetadataHTML()).
         const isDraft = !state.template?.listing_id;
         return `
+            <button class="btn lp-fill-name-btn" data-row-id="${r.row_id}" title="Fill the auto-generated eBay name into the name box above so you can correct it" style="font-size:11px; padding:2px 6px;">&#10024;</button>
             ${isDraft ? '' : `<button class="btn lp-push-card-btn" data-row-id="${r.row_id}" style="font-size:11px; padding:2px 8px;">Push live</button>`}
             <button class="btn lp-fix-card-btn" data-row-id="${r.row_id}" data-current-label="${escapeHtml(cardLabel(r))}" style="font-size:11px; padding:2px 8px;">Fix card</button>
             <button class="btn lp-delete-roster-btn" data-row-id="${r.row_id}" title="Remove from roster" style="font-size:11px; padding:2px 6px; color:var(--danger);">&#128465;&#65039;</button>
@@ -1805,6 +1806,44 @@ function actionsHTML(r) {
     }
     // sold_out_retained — already off eBay, nothing left to push live again for this row.
     return `<button class="btn lp-delete-roster-btn" data-row-id="${r.row_id}" title="Remove from roster" style="font-size:11px; padding:2px 6px; color:var(--danger);">&#128465;&#65039;</button>`;
+}
+
+// Fills the auto-generated eBay variation name into a row's name input (and
+// saves it as custom_name) so it's a starting point the user can correct in
+// place instead of a preview-only placeholder they'd have to retype.
+// Reuses preview_name if loadListing()'s batched render_variation_names()
+// call already rendered one for this row; rows that already had a
+// custom_name were skipped by that batch (see loadListing()), so those
+// render one fresh here via the same RPC.
+async function fillGeneratedName(container, rowId) {
+    const row = state.resolvedRows.find(r => r.row_id === rowId);
+    if (!row) return;
+
+    let name = row.preview_name;
+    if (!name) {
+        const { data, error } = await supabase.rpc('render_variation_names', {
+            p_template_id: state.template.id,
+            p_variant_ids: [row.variant_id],
+        });
+        if (error) { window.alert(`Failed to generate name: ${error.message}`); return; }
+        name = data?.[0]?.rendered_name || cardLabel(row);
+    }
+
+    const input = container.querySelector(`.lp-custom-name-input[data-row-id="${rowId}"]`);
+    if (input) { input.value = name; input.focus(); input.select(); }
+    await saveCustomName(container, rowId, name);
+}
+
+// Custom eBay variation name (migration 012) — only ever editable for
+// queued rows (see rowHTML). When set, push_single_card_live() /
+// _do_promotions()'s promotion path use it verbatim instead of computing
+// one via _render_variation_name(). Clearing it reverts to auto-generation
+// at push time.
+async function saveCustomName(container, rowId, raw) {
+    const { error } = await supabase.from('listing_card_assignments')
+        .update({ custom_name: raw === '' ? null : raw }).eq('id', rowId);
+    if (error) { window.alert(`Failed to save custom name: ${error.message}`); return; }
+    await refreshRowDerivedCells(container, rowId);
 }
 
 // ----------------------------------------------------------------
@@ -1956,20 +1995,19 @@ function wireControls(container, body) {
         });
     });
 
-    // Custom eBay variation name (migration 012) — only ever editable for
-    // queued rows (see rowHTML). When set, push_single_card_live() /
-    // _do_promotions()'s promotion path use it verbatim instead of
-    // computing one via _render_variation_name(). Clearing it reverts to
-    // auto-generation at push time.
+    // Custom eBay variation name — see saveCustomName().
     body.querySelectorAll('.lp-custom-name-input').forEach(input => {
         input.addEventListener('change', async () => {
-            const rowId = input.dataset.rowId;
-            const raw = input.value.trim();
-            const { error } = await supabase.from('listing_card_assignments')
-                .update({ custom_name: raw === '' ? null : raw }).eq('id', rowId);
-            if (error) { window.alert(`Failed to save custom name: ${error.message}`); return; }
-            await refreshRowDerivedCells(container, rowId);
+            await saveCustomName(container, input.dataset.rowId, input.value.trim());
         });
+    });
+
+    // "Fill" icon (actionsHTML) — pulls the same auto-generated eBay name
+    // shown as the input's placeholder/title into the input itself (and
+    // saves it as custom_name) so it's a starting point the user can then
+    // hand-correct, instead of a preview they'd have to retype from scratch.
+    body.querySelectorAll('.lp-fill-name-btn').forEach(btn => {
+        btn.addEventListener('click', () => fillGeneratedName(container, btn.dataset.rowId));
     });
 
     // Market price edit — writes the REAL market price (migration 011),
