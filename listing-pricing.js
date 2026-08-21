@@ -3120,12 +3120,31 @@ async function doPush(container, dryRun) {
 
         msg.innerHTML = `<span style="color:var(--text-secondary);">${dryRun ? 'Checking' : 'Pushing'}...</span>`;
         const result = await callPushPrices(dryRun);
-        const warningsNote = result.warnings && result.warnings.length
-            ? ` — ${result.warnings.length} warning(s): ${escapeHtml(result.warnings.join('; '))}` : '';
+        const hasWarnings = result.warnings && result.warnings.length > 0;
         const promotedNote = result.promoted ? ` (${result.promoted} newly live)` : '';
-        msg.innerHTML = `<span style="color:var(--success);">
-            ${dryRun ? 'Would push' : 'Pushed'} ${result.pushed} of ${result.resolved} row(s)${promotedNote}${warningsNote}
-        </span>`;
+
+        if (dryRun) {
+            msg.innerHTML = `<span style="color:var(--success);">
+                Would push ${result.pushed} of ${result.resolved} row(s)${promotedNote}
+            </span>`;
+        } else if (hasWarnings) {
+            // Includes push_prices()'s own post-push verification warnings
+            // (eBay's Ack=Warning can silently drop a subset of a large
+            // batch's changes — see importer/ebay_pushprices.py) — these
+            // are real, need-a-look issues, not routine, so this is
+            // deliberately NOT styled as a plain success.
+            msg.innerHTML = `<span style="color:var(--warning);">
+                ⚠ Pushed ${result.pushed} of ${result.resolved} row(s)${promotedNote}, but ${result.warnings.length}
+                warning(s) — some changes may not have applied as intended:
+            </span>
+            <ul style="margin:4px 0 0; padding-left:20px; color:var(--warning); font-size:13px;">
+                ${result.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}
+            </ul>`;
+        } else {
+            msg.innerHTML = `<span style="color:var(--success);">
+                ✓ Pushed and verified — ${result.pushed} of ${result.resolved} row(s)${promotedNote} confirmed live on eBay.
+            </span>`;
+        }
         if (!dryRun) await loadListing(container);
     } catch (err) {
         console.error(err);
