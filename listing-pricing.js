@@ -3123,22 +3123,39 @@ async function doPush(container, dryRun) {
         const hasWarnings = result.warnings && result.warnings.length > 0;
         const promotedNote = result.promoted ? ` (${result.promoted} newly live)` : '';
 
+        const stillBroken = result.still_broken || 0;
+        const autoFixed = result.auto_fixed || 0;
+
         let resultHtml;
         if (dryRun) {
             resultHtml = `<span style="color:var(--success);">
                 Would push ${result.pushed} of ${result.resolved} row(s)${promotedNote}
             </span>`;
-        } else if (hasWarnings) {
-            // Includes push_prices()'s own post-push verification warnings
-            // (eBay's Ack=Warning can silently drop a subset of a large
-            // batch's changes — see importer/ebay_pushprices.py) — these
-            // are real, need-a-look issues, not routine, so this is
-            // deliberately NOT styled as a plain success.
+        } else if (stillBroken > 0) {
+            // At least one row eBay dropped couldn't be fixed even by the
+            // automatic small-batch retry (see push_prices()'s
+            // _retry_dropped_variations()) — this genuinely needs a human
+            // to look, so it's deliberately the most alarming styling.
             resultHtml = `<span style="color:var(--warning);">
-                ⚠ Pushed ${result.pushed} of ${result.resolved} row(s)${promotedNote}, but ${result.warnings.length}
-                warning(s) — some changes may not have applied as intended:
+                ⚠ Pushed ${result.pushed} of ${result.resolved} row(s)${promotedNote}, but ${stillBroken}
+                still need manual reconcile (auto-retry couldn't fix ${stillBroken === 1 ? 'it' : 'them'}):
             </span>
             <ul style="margin:4px 0 0; padding-left:20px; color:var(--warning); font-size:13px;">
+                ${result.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}
+            </ul>`;
+        } else if (hasWarnings) {
+            // Everything either auto-fixed cleanly or is a routine,
+            // already-known note (e.g. a not-synced row) — nothing needs
+            // action, so this stays informational rather than alarming,
+            // while still listing what happened for transparency.
+            const fixedNote = autoFixed > 0
+                ? `${autoFixed} row(s) eBay dropped on the first try were automatically retried and confirmed fixed. `
+                : '';
+            resultHtml = `<span style="color:var(--accent);">
+                ℹ Pushed ${result.pushed} of ${result.resolved} row(s)${promotedNote}. ${fixedNote}${result.warnings.length}
+                note(s):
+            </span>
+            <ul style="margin:4px 0 0; padding-left:20px; color:var(--text-secondary); font-size:13px;">
                 ${result.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}
             </ul>`;
         } else {
