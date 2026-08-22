@@ -3123,8 +3123,9 @@ async function doPush(container, dryRun) {
         const hasWarnings = result.warnings && result.warnings.length > 0;
         const promotedNote = result.promoted ? ` (${result.promoted} newly live)` : '';
 
+        let resultHtml;
         if (dryRun) {
-            msg.innerHTML = `<span style="color:var(--success);">
+            resultHtml = `<span style="color:var(--success);">
                 Would push ${result.pushed} of ${result.resolved} row(s)${promotedNote}
             </span>`;
         } else if (hasWarnings) {
@@ -3133,7 +3134,7 @@ async function doPush(container, dryRun) {
             // batch's changes — see importer/ebay_pushprices.py) — these
             // are real, need-a-look issues, not routine, so this is
             // deliberately NOT styled as a plain success.
-            msg.innerHTML = `<span style="color:var(--warning);">
+            resultHtml = `<span style="color:var(--warning);">
                 ⚠ Pushed ${result.pushed} of ${result.resolved} row(s)${promotedNote}, but ${result.warnings.length}
                 warning(s) — some changes may not have applied as intended:
             </span>
@@ -3141,11 +3142,24 @@ async function doPush(container, dryRun) {
                 ${result.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}
             </ul>`;
         } else {
-            msg.innerHTML = `<span style="color:var(--success);">
+            resultHtml = `<span style="color:var(--success);">
                 ✓ Pushed and verified — ${result.pushed} of ${result.resolved} row(s)${promotedNote} confirmed live on eBay.
             </span>`;
         }
-        if (!dryRun) await loadListing(container);
+
+        if (!dryRun) {
+            // loadListing() rebuilds #lp-body from scratch (its first line
+            // is body.innerHTML = 'Loading...') — including a fresh, empty
+            // #lp-push-msg. Writing the result onto the OLD msg element
+            // before reloading just gets thrown away the instant the
+            // reload starts, which is why the result never appeared to
+            // show up. Reload first, then write onto the new element.
+            await loadListing(container);
+            const freshMsg = container.querySelector('#lp-push-msg');
+            if (freshMsg) freshMsg.innerHTML = resultHtml;
+        } else {
+            msg.innerHTML = resultHtml;
+        }
     } catch (err) {
         console.error(err);
 
