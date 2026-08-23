@@ -2708,7 +2708,7 @@ function openNewLocalPurchaseModal(container) {
                 nameInput.value = c.card_name;
                 if (c._type === 'card') {
                     setInput.value = c.set_name || '';
-                    numInput.value = c.display_number || '';
+                    numInput.value = c.card_number || '';
                     vRow.card_id = c.card_id || null;
                     vRow._matchedItem = { card_id: c.card_id, source: 'db' };
 
