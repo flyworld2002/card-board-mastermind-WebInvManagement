@@ -640,10 +640,15 @@ async function renderDetail(container, cell, po) {
         });
     }
 
-    // Link/merge panel toggle
+    // Link/merge panel toggle — the panel sits below the lots table AND the
+    // full "Add card to this PO" form, so opening it can land well below
+    // the fold with nothing visibly changing near the button; scroll it
+    // into view so the toggle is never mistaken for "not working".
     cell.querySelector('#pod-link-btn').addEventListener('click', () => {
         const panel = cell.querySelector('#pod-link-panel');
-        panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+        const opening = panel.style.display === 'none';
+        panel.style.display = opening ? 'block' : 'none';
+        if (opening) panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     });
     cell.querySelector('#pod-link-cancel-btn').addEventListener('click', () => {
         cell.querySelector('#pod-link-panel').style.display = 'none';
