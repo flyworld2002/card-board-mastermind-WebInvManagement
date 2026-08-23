@@ -3410,18 +3410,28 @@ function openStagePictureModal(container, body, rowId) {
     frontUrlInput.addEventListener('input', () => { if (frontUrlInput.value.trim()) frontFileInput.value = ''; });
     frontFileInput.addEventListener('change', () => { if (frontFileInput.files.length) frontUrlInput.value = ''; });
 
-    // Additional photos: URL-only (the multipart create endpoint is
-    // front-file-only, to keep its shape simple — see
-    // /api/card-photos-file's docstring). Each row is source + label.
+    // Additional photos: URL or file, same mutually-exclusive convention
+    // as the front photo — each row can independently be either. Routed
+    // through /api/card-photos-file (multipart) whenever any file is
+    // involved anywhere in the group, /api/card-photos (JSON) otherwise.
     const additionalEl = root.querySelector('#lp-photo-additional');
     const addAdditionalRow = () => {
         const rowEl = document.createElement('div');
-        rowEl.style.cssText = 'display:flex; gap:6px; margin-bottom:6px;';
+        rowEl.className = 'lp-photo-additional-row';
+        rowEl.style.cssText = 'border:1px solid var(--border); border-radius:6px; padding:8px; margin-bottom:8px;';
         rowEl.innerHTML = `
-            <input type="url" class="lp-photo-additional-url" placeholder="https://... (e.g. back)" style="flex:2;" />
-            <input type="text" class="lp-photo-additional-label" placeholder="Label" style="flex:1;" />
-            <button type="button" class="btn lp-photo-additional-remove" style="font-size:11px;">&times;</button>
+            <div style="display:flex; gap:6px; margin-bottom:6px;">
+                <input type="url" class="lp-photo-additional-url" placeholder="https://... (e.g. back)" style="flex:1;" />
+                <input type="text" class="lp-photo-additional-label" placeholder="Label" style="width:90px;" />
+                <button type="button" class="btn lp-photo-additional-remove" style="font-size:11px;">&times;</button>
+            </div>
+            <div style="text-align:center; font-size:10px; color:var(--text-secondary); margin:2px 0;">— or —</div>
+            <input type="file" class="lp-photo-additional-file" accept="image/*" style="width:100%;" />
         `;
+        const urlInput = rowEl.querySelector('.lp-photo-additional-url');
+        const fileInput = rowEl.querySelector('.lp-photo-additional-file');
+        urlInput.addEventListener('input', () => { if (urlInput.value.trim()) fileInput.value = ''; });
+        fileInput.addEventListener('change', () => { if (fileInput.files.length) urlInput.value = ''; });
         rowEl.querySelector('.lp-photo-additional-remove').addEventListener('click', () => rowEl.remove());
         additionalEl.appendChild(rowEl);
     };
@@ -3506,10 +3516,15 @@ function openStagePictureModal(container, body, rowId) {
         if (!frontUrl && !frontFile) { errBox.textContent = 'Enter a front photo URL or choose a file.'; return; }
 
         const label = root.querySelector('#lp-photo-label').value.trim() || null;
-        const additional = [...additionalEl.querySelectorAll('div')].map(rowEl => ({
-            source_url: rowEl.querySelector('.lp-photo-additional-url')?.value.trim(),
-            label: rowEl.querySelector('.lp-photo-additional-label')?.value.trim() || null,
-        })).filter(a => a.source_url);
+        const additionalUrlItems = [];
+        const additionalFileItems = [];
+        for (const rowEl of additionalEl.querySelectorAll('.lp-photo-additional-row')) {
+            const url = rowEl.querySelector('.lp-photo-additional-url')?.value.trim();
+            const file = rowEl.querySelector('.lp-photo-additional-file')?.files[0];
+            const rowLabel = rowEl.querySelector('.lp-photo-additional-label')?.value.trim() || '';
+            if (file) additionalFileItems.push({ file, label: rowLabel });
+            else if (url) additionalUrlItems.push({ source_url: url, label: rowLabel });
+        }
 
         const uploadBtn = root.querySelector('#lp-photo-upload');
         uploadBtn.disabled = true;
@@ -3517,13 +3532,22 @@ function openStagePictureModal(container, body, rowId) {
 
         try {
             let resp;
-            if (frontFile) {
+            if (frontFile || additionalFileItems.length) {
                 const form = new FormData();
                 form.append('variant_id', row.variant_id);
                 form.append('account_num', String(state.accountNum));
                 if (label) form.append('label', label);
                 if (state.template.finish_kind) form.append('source_finish_kind', state.template.finish_kind);
-                form.append('file', frontFile);
+                if (frontFile) form.append('front_file', frontFile);
+                else form.append('front_url', frontUrl);
+                for (const { source_url, label: l } of additionalUrlItems) {
+                    form.append('additional_urls', source_url);
+                    form.append('additional_url_labels', l);
+                }
+                for (const { file, label: l } of additionalFileItems) {
+                    form.append('additional_files', file);
+                    form.append('additional_file_labels', l);
+                }
                 resp = await fetch(`${PICKING_API_URL}/api/card-photos-file`, {
                     method: 'POST',
                     headers: { 'x-picking-token': PICKING_API_TOKEN },
@@ -3535,7 +3559,8 @@ function openStagePictureModal(container, body, rowId) {
                     headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
                     body: JSON.stringify({
                         variant_id: row.variant_id, front_source_url: frontUrl, label,
-                        additional, source_finish_kind: state.template.finish_kind || null,
+                        additional: additionalUrlItems.map(a => ({ source_url: a.source_url, label: a.label || null })),
+                        source_finish_kind: state.template.finish_kind || null,
                         account_num: state.accountNum,
                     }),
                 });
