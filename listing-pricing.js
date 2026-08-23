@@ -3706,6 +3706,41 @@ async function pushQtyChange(row, newQty) {
     }
 }
 
+// Push MULTIPLE variations' new quantities for ONE listing in a single
+// live eBay call (one ReviseFixedPriceItem instead of one per variation).
+// Used by the group-level Balance flow, where several cards in a group
+// can share the same listing — batching by listing_id here is what keeps
+// that flow at one push per listing instead of one push per (card,
+// listing) pair. `changes` is [{row, newQty}, ...] all sharing listingId;
+// returns one {listingId, plId, ok, detail} per input change.
+async function pushQtyChangeBatch(listingId, changes) {
+    try {
+        const resp = await fetch(`${PICKING_API_URL}/api/revise-variation-qty-batch`, {
+            method: 'POST',
+            headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+            body: JSON.stringify({
+                listing_id: listingId,
+                changes: changes.map(({ row, newQty }) => ({ platform_listing_id: row.id, new_qty: newQty })),
+                account_num: state.accountNum,
+                dry_run: false,
+            }),
+        });
+        if (!resp.ok) {
+            const detail = await resp.text().catch(() => '');
+            throw new Error(`${resp.status} ${detail}`);
+        }
+        const result = await resp.json();
+        const byPlId = Object.fromEntries((result.results || []).map(r => [r.platform_listing_id, r]));
+        return changes.map(({ row, newQty }) => {
+            const r = byPlId[row.id];
+            if (!r) return { listingId, plId: row.id, ok: false, detail: 'no result returned for this listing' };
+            return { listingId, plId: row.id, ok: !!r.revised, detail: r.error || `${r.old_qty ?? row.quantity_listed ?? 0} → ${r.new_qty ?? newQty}` };
+        });
+    } catch (err) {
+        return changes.map(({ row }) => ({ listingId, plId: row.id, ok: false, detail: err.message }));
+    }
+}
+
 // Table markup for one variant's live listings + editable qty inputs.
 // Shared by the single-card and group-level Balance flows.
 function balanceRowsTableHTML(rows, templateNameByListingId) {
@@ -4012,52 +4047,71 @@ function renderGroupBalanceQtyBody(root, container, groupRows, sections, templat
             return;
         }
 
-        const changesBySection = sections.map(s => {
+        // Flat list of every changed (variant, listing) row, tagged with
+        // which card/section it belongs to (for display + row-refresh).
+        const allChanges = sections.flatMap(s => {
             const el = sectionEl(s);
-            const changes = s.rows
+            return s.rows
                 .map(r => {
                     const input = el.querySelector(`.lp-balance-qty-input[data-pl-id="${r.id}"]`);
-                    return { row: r, newQty: parseInt(input.value, 10) || 0 };
+                    return { section: s, row: r, newQty: parseInt(input.value, 10) || 0 };
                 })
                 .filter(({ row, newQty }) => newQty !== (row.quantity_listed ?? 0));
-            return { section: s, changes };
-        }).filter(({ changes }) => changes.length);
+        });
 
-        if (!changesBySection.length) {
+        if (!allChanges.length) {
             errBox.textContent = 'Nothing changed.';
             return;
         }
 
-        const summary = changesBySection
-            .map(({ section, changes }) => `${section.cardLabel}: ${changes.length} listing(s) changing`)
+        // Group by listing_id — one live eBay call per LISTING covering
+        // every card's change on it, not one call per (card, listing) pair.
+        const changesByListing = new Map();
+        for (const change of allChanges) {
+            const key = change.row.listing_id;
+            if (!changesByListing.has(key)) changesByListing.set(key, []);
+            changesByListing.get(key).push(change);
+        }
+
+        const cardCount = new Set(allChanges.map(c => c.section.variantId)).size;
+        const summary = [...changesByListing.entries()]
+            .map(([listingId, changes]) => `${templateNameByListingId[listingId] || listingId}: ${changes.length} card(s) changing`)
             .join('\n');
-        const totalChanges = changesBySection.reduce((sum, { changes }) => sum + changes.length, 0);
-        if (!window.confirm(`This will send live quantity changes to ${totalChanges} eBay listing(s) across ${changesBySection.length} card(s):\n\n${summary}\n\nContinue?`)) return;
+        if (!window.confirm(`This will send live quantity changes to ${changesByListing.size} eBay listing(s), covering ${allChanges.length} card change(s) across ${cardCount} card(s):\n\n${summary}\n\nContinue?`)) return;
 
         const confirmBtn = bodyEl.querySelector('#lp-group-balance-confirm');
         confirmBtn.disabled = true;
         confirmBtn.textContent = 'Applying...';
 
+        const allResults = []; // {listingId, plId, ok, detail}
+        for (const [listingId, changes] of changesByListing) {
+            allResults.push(...await pushQtyChangeBatch(listingId, changes));
+        }
+
+        const resultByPlId = Object.fromEntries(allResults.map(r => [r.plId, r]));
         const succeededRowIds = new Set();
-        const resultsBySection = [];
-        for (const { section, changes } of changesBySection) {
-            const results = [];
-            for (const { row, newQty } of changes) {
-                results.push(await pushQtyChange(row, newQty));
-            }
-            resultsBySection.push({ section, results });
-            if (results.every(r => r.ok)) {
-                groupRows.filter(r => r.variant_id === section.variantId).forEach(r => succeededRowIds.add(r.row_id));
+        for (const { section, row } of allChanges) {
+            const r = resultByPlId[row.id];
+            if (r && r.ok) {
+                groupRows.filter(gr => gr.variant_id === section.variantId).forEach(gr => succeededRowIds.add(gr.row_id));
             }
         }
 
-        const okCount = resultsBySection.reduce((sum, { results }) => sum + results.filter(r => r.ok).length, 0);
-        const totalCount = resultsBySection.reduce((sum, { results }) => sum + results.length, 0);
+        const okCount = allResults.filter(r => r.ok).length;
+        const totalCount = allResults.length;
         const allOk = okCount === totalCount;
+
+        // Group results back by card for display, same layout as before.
+        const resultsBySection = sections
+            .map(s => ({
+                section: s,
+                results: allChanges.filter(c => c.section === s).map(c => resultByPlId[c.row.id]).filter(Boolean),
+            }))
+            .filter(({ results }) => results.length);
 
         resultsBox.innerHTML = `
             <div style="color:${allOk ? 'var(--success)' : 'var(--danger)'}; margin-bottom:6px;">
-                <strong>${okCount}/${totalCount} succeeded</strong>
+                <strong>${okCount}/${totalCount} succeeded</strong> across ${changesByListing.size} listing push(es)
             </div>
             ${resultsBySection.map(({ section, results }) => `
                 <div style="margin-bottom:6px;">
