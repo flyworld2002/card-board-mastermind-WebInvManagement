@@ -2832,21 +2832,42 @@ function openNewLocalPurchaseModal(container) {
                     setRow = newSet;
                 }
 
-                const { data: cardRow, error: cardErr } = await supabase
+                // A card can already exist locally at this set+number without
+                // matching by external_id (e.g. hand-entered earlier because
+                // the API didn't index this printing yet — common for
+                // secret rares) — check the natural key idx_card_master_unique
+                // itself enforces before upserting, otherwise a real
+                // external_id mismatch still collides on (set_id, card_number).
+                const { data: existingByNumber, error: existingErr } = await supabase
                     .from('card_master')
-                    .upsert({
-                        set_id: setRow.id, name: api.name, card_number: api.number,
-                        rarity: api.rarity || null,
-                        image_url: api.images?.large || api.images?.small || null,
-                        external_id: api.id,
-                    }, { onConflict: 'external_id' })
-                    .select('id').single();
-
-                if (cardErr) {
-                    msg.innerHTML = `<span style="color:var(--danger)">${escapeHtml(cardErr.message)}</span>`;
+                    .select('id')
+                    .eq('set_id', setRow.id)
+                    .eq('card_number', api.number)
+                    .maybeSingle();
+                if (existingErr) {
+                    msg.innerHTML = `<span style="color:var(--danger)">${escapeHtml(existingErr.message)}</span>`;
                     return;
                 }
-                cardId = cardRow.id;
+
+                if (existingByNumber) {
+                    cardId = existingByNumber.id;
+                } else {
+                    const { data: cardRow, error: cardErr } = await supabase
+                        .from('card_master')
+                        .upsert({
+                            set_id: setRow.id, name: api.name, card_number: api.number,
+                            rarity: api.rarity || null,
+                            image_url: api.images?.large || api.images?.small || null,
+                            external_id: api.id,
+                        }, { onConflict: 'external_id' })
+                        .select('id').single();
+
+                    if (cardErr) {
+                        msg.innerHTML = `<span style="color:var(--danger)">${escapeHtml(cardErr.message)}</span>`;
+                        return;
+                    }
+                    cardId = cardRow.id;
+                }
             }
 
             // Still nothing matched — create fresh from typed fields
@@ -2865,16 +2886,34 @@ function openNewLocalPurchaseModal(container) {
                     return;
                 }
 
-                const { data: newCard, error: createErr } = await supabase
+                // Same fallback as above — a plain insert here has no
+                // conflict handling at all, so an existing card at this
+                // set+number (any external_id state) must be caught first.
+                const { data: existingByNumber, error: existingErr } = await supabase
                     .from('card_master')
-                    .insert({ set_id: setRow.id, name: cardName, card_number: cardNumber })
-                    .select('id').single();
-
-                if (createErr) {
-                    msg.innerHTML = `<span style="color:var(--danger)">${escapeHtml(createErr.message)}</span>`;
+                    .select('id')
+                    .eq('set_id', setRow.id)
+                    .eq('card_number', cardNumber)
+                    .maybeSingle();
+                if (existingErr) {
+                    msg.innerHTML = `<span style="color:var(--danger)">${escapeHtml(existingErr.message)}</span>`;
                     return;
                 }
-                cardId = newCard.id;
+
+                if (existingByNumber) {
+                    cardId = existingByNumber.id;
+                } else {
+                    const { data: newCard, error: createErr } = await supabase
+                        .from('card_master')
+                        .insert({ set_id: setRow.id, name: cardName, card_number: cardNumber })
+                        .select('id').single();
+
+                    if (createErr) {
+                        msg.innerHTML = `<span style="color:var(--danger)">${escapeHtml(createErr.message)}</span>`;
+                        return;
+                    }
+                    cardId = newCard.id;
+                }
             }
 
             const condition    = formDiv.querySelector('.nlp-edit-condition').value;
