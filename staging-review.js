@@ -2840,7 +2840,7 @@ function openNewLocalPurchaseModal(container) {
                 // external_id mismatch still collides on (set_id, card_number).
                 const { data: existingByNumber, error: existingErr } = await supabase
                     .from('card_master')
-                    .select('id')
+                    .select('id, name, rarity, image_url, external_id')
                     .eq('set_id', setRow.id)
                     .eq('card_number', api.number)
                     .maybeSingle();
@@ -2851,6 +2851,24 @@ function openNewLocalPurchaseModal(container) {
 
                 if (existingByNumber) {
                     cardId = existingByNumber.id;
+                    // Backfill whatever this row was missing (image,
+                    // external_id, rarity) from this fresh API match —
+                    // reusing the id alone never applies the API's data.
+                    // Only fills currently-null fields, so a manually
+                    // curated value is never clobbered.
+                    const backfill = {};
+                    if (!existingByNumber.name && api.name) backfill.name = api.name;
+                    if (!existingByNumber.rarity && api.rarity) backfill.rarity = api.rarity;
+                    if (!existingByNumber.image_url) {
+                        const img = api.images?.large || api.images?.small || null;
+                        if (img) backfill.image_url = img;
+                    }
+                    if (!existingByNumber.external_id) backfill.external_id = api.id;
+                    if (Object.keys(backfill).length) {
+                        const { error: backfillErr } = await supabase
+                            .from('card_master').update(backfill).eq('id', cardId);
+                        if (backfillErr) console.error('Failed to backfill card_master fields:', backfillErr);
+                    }
                 } else {
                     const { data: cardRow, error: cardErr } = await supabase
                         .from('card_master')
