@@ -9,6 +9,19 @@ import { supabase, debounce, formatPrice, loadAxisOptions, axisDisplay, AXIS_OPT
 
 const AXES = ['foil_type', 'foil_pattern', 'texture', 'material', 'size', 'stamp_type', 'source_type'];
 
+// purchased_at is a calendar date, not a precise moment — the <input
+// type="date"> that sets it produces a date-only string (e.g.
+// "2026-08-23"), which JS parses as UTC midnight, so it's stored as
+// 2026-08-23T00:00:00Z. Formatting that with the default
+// .toLocaleDateString() converts to the VIEWER's local timezone, which
+// rolls it back to the previous day for anyone west of UTC (e.g. UTC-4
+// shows "8/22" for a purchase dated "8/23"). Format in UTC instead, so
+// the displayed date always matches what was actually picked/stored.
+function formatDate(isoString) {
+    if (!isoString) return '—';
+    return new Date(isoString).toLocaleDateString('en-US', { timeZone: 'UTC' });
+}
+
 const state = {
     rows: [],            // purchases with computed lot totals merged in
     filters: {
@@ -327,7 +340,15 @@ function renderTable(container) {
 }
 
 function poRowHtml(r) {
-    const dateStr = r.purchased_at ? new Date(r.purchased_at).toLocaleDateString() : '—';
+    const dateStr = formatDate(r.purchased_at);
+    // purchased_at is date-only (always midnight) so it can't distinguish
+    // same-day entries -- created_at is a real instant, shown here in the
+    // viewer's own local time (unlike purchased_at, this one legitimately
+    // has a time-of-day, so no UTC-forcing needed) so multiple POs made
+    // the same day can be told apart at a glance.
+    const createdStr = r.created_at
+        ? new Date(r.created_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+        : '';
 
     const qtyMismatch  = (r.card_count ?? 0) !== r.computed_qty;
     const costMismatch = Math.abs((r.total_cost ?? 0) - r.computed_cost) > 0.005;
@@ -344,7 +365,7 @@ function poRowHtml(r) {
 
     let html = `
         <tr data-po-id="${r.id}" style="cursor:pointer;">
-            <td>${dateStr}</td>
+            <td>${dateStr}${createdStr ? `<div style="font-size:11px; color:var(--text-secondary);">${createdStr}</div>` : ''}</td>
             <td style="font-family:monospace; font-size:12px;">${escapeHtml(r.reference_id || '—')}</td>
             <td>${sourceBadge(r.source)}</td>
             <td style="font-size:12px; color:var(--text-secondary);">${escapeHtml(r.purchase_type || '—')}</td>
@@ -559,7 +580,7 @@ async function renderDetail(container, cell, po) {
                 <select id="pod-link-target" style="min-width:280px;">
                     <option value="">— select target PO —</option>
                     ${state.rows.filter(r => r.id !== po.id).map(r => {
-                        const d = r.purchased_at ? new Date(r.purchased_at).toLocaleDateString() : '—';
+                        const d = formatDate(r.purchased_at);
                         return `<option value="${r.id}">${escapeHtml(r.reference_id || '(no ref)')} · ${d} · ${escapeHtml(r.source)} · ${formatPrice(r.total_cost)}</option>`;
                     }).join('')}
                 </select>
