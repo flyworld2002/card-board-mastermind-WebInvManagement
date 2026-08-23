@@ -696,13 +696,22 @@ async function createTemplate(container) {
 // Render
 // ----------------------------------------------------------------
 
-function needsPush(r) {
+// Single source of truth for "does the next push actually change anything
+// on eBay for this row" — both the combined boolean (needsPush(), used for
+// the whole-row stale tint and the pending-push count) and the individual
+// price/qty diffs (used for per-cell highlighting + deciding whether
+// there's a live value worth showing under Resolved/Resolved Qty).
+function pushDiff(r) {
     const row = state.listingRowsByPLId[r.platform_listing_id];
-    if (!row) return false;
-    if (row.pushed_at == null) return true;
+    if (!row) return { row: null, live: false, priceDiff: false, qtyDiff: false, needsPush: false };
+    if (row.pushed_at == null) return { row, live: false, priceDiff: false, qtyDiff: false, needsPush: true };
     const priceDiff = row.pushed_price == null || Math.abs(Number(row.pushed_price) - Number(r.resolved_price)) >= 0.005;
     const qtyDiff = row.pushed_qty == null || row.pushed_qty !== resolvedQty(r);
-    return priceDiff || qtyDiff;
+    return { row, live: true, priceDiff, qtyDiff, needsPush: priceDiff || qtyDiff };
+}
+
+function needsPush(r) {
+    return pushDiff(r).needsPush;
 }
 
 function resolvedQty(r) {
@@ -710,6 +719,34 @@ function resolvedQty(r) {
     let qty = r.low_stock_qty != null ? Math.max(available - r.low_stock_qty, 0) : available;
     if (r.quantity_limit != null) qty = Math.min(qty, r.quantity_limit);
     return qty;
+}
+
+// Resolved-price cell: the value that WOULD be pushed next, plus (when
+// there's something live to compare against, and only for active rows —
+// a delisted row can retain a stale pushed_price from when it WAS active)
+// a muted sub-line showing what's currently live on eBay, and a
+// warning-colored highlight on the value itself when this specific field
+// is what would change on the next push.
+function resolvedPriceCellHTML(r, diff) {
+    const isActive = r.status === 'active';
+    const showLive = diff.live && isActive;
+    const highlight = diff.priceDiff && isActive;
+    const liveLine = showLive
+        ? `<div style="font-size:11px; font-weight:400; color:var(--text-secondary);">eBay: ${formatPrice(diff.row.pushed_price)}</div>`
+        : '';
+    return `<span style="font-weight:600; ${highlight ? 'color:var(--warning);' : ''}">${formatPrice(r.resolved_price)}</span>${liveLine}`;
+}
+
+// Same pattern for Resolved Qty — diff.row.pushed_qty can itself be null
+// (pushed for price but never had qty set), hence the `?? '-'` fallback.
+function resolvedQtyCellHTML(r, diff) {
+    const isActive = r.status === 'active';
+    const showLive = diff.live && isActive;
+    const highlight = diff.qtyDiff && isActive;
+    const liveLine = showLive
+        ? `<div style="font-size:11px; font-weight:400; color:var(--text-secondary);">eBay: ${diff.row.pushed_qty ?? '-'}</div>`
+        : '';
+    return `<span style="${highlight ? 'color:var(--warning); font-weight:600;' : ''}">${resolvedQty(r)}</span>${liveLine}`;
 }
 
 // "available/total" — total_inventory_qty (migration 040) is the raw
@@ -758,11 +795,26 @@ async function refreshRowDerivedCells(container, rowId) {
     const tr = container.querySelector(`tr[data-row-id="${rowId}"]`);
     if (!tr) return;
 
-    const stale = fresh.status === 'active' && needsPush(fresh);
+    // resolve_listing_prices() (fresh, above) never touches
+    // platform_listings, so pushed_price/pushed_qty/pushed_at here would
+    // go stale after this targeted refresh otherwise — e.g. editing a
+    // price pin wouldn't update the "what's currently live on eBay"
+    // sub-line. Single-row query, not a full state.listingRowsByPLId reload.
+    if (fresh.platform_listing_id) {
+        const { data: freshListingRow } = await supabase
+            .from('platform_listings')
+            .select('id, external_id, pushed_price, pushed_qty, pushed_at, sync_enabled, status')
+            .eq('id', fresh.platform_listing_id)
+            .maybeSingle();
+        if (freshListingRow) state.listingRowsByPLId[fresh.platform_listing_id] = freshListingRow;
+    }
+
+    const diff = pushDiff(fresh);
+    const stale = fresh.status === 'active' && diff.needsPush;
     tr.style.background = stale ? 'rgba(245,166,35,0.06)' : '';
 
     const resolvedCell = tr.querySelector('.lp-resolved-price-cell');
-    if (resolvedCell) resolvedCell.textContent = formatPrice(fresh.resolved_price);
+    if (resolvedCell) resolvedCell.innerHTML = resolvedPriceCellHTML(fresh, diff);
 
     const sourceCell = tr.querySelector('.lp-source-cell');
     if (sourceCell) sourceCell.innerHTML = sourceBadge(fresh.price_source);
@@ -771,7 +823,7 @@ async function refreshRowDerivedCells(container, rowId) {
     if (availableCell) availableCell.textContent = availableQtyText(fresh);
 
     const resolvedQtyCell = tr.querySelector('.lp-resolved-qty-cell');
-    if (resolvedQtyCell) resolvedQtyCell.textContent = resolvedQty(fresh);
+    if (resolvedQtyCell) resolvedQtyCell.innerHTML = resolvedQtyCellHTML(fresh, diff);
 
     const syncedCell = tr.querySelector('.lp-synced-cell');
     if (syncedCell) {
@@ -1741,7 +1793,8 @@ function groupSectionHTML(group, rows) {
 
 function rowHTML(r) {
     const listingRow = state.listingRowsByPLId[r.platform_listing_id] || {};
-    const stale = r.status === 'active' && needsPush(r);
+    const diff = pushDiff(r);
+    const stale = r.status === 'active' && diff.needsPush;
     const isActive = r.status === 'active';
     return `
         <tr data-row-id="${r.row_id}" ${stale ? 'style="background:rgba(245,166,35,0.06);"' : ''}>
@@ -1767,7 +1820,7 @@ function rowHTML(r) {
                        value="${r.market_price ?? ''}" placeholder="none"
                        title="${r.market_price_source === 'manual' ? 'Manually set' : ''}"
                        style="width:70px; ${r.market_price_source === 'manual' ? 'background:rgba(167,139,250,0.12); border-color:#a78bfa;' : ''}" /></td>
-            <td class="lp-resolved-price-cell" style="font-weight:600;">${formatPrice(r.resolved_price)}</td>
+            <td class="lp-resolved-price-cell">${resolvedPriceCellHTML(r, diff)}</td>
             <td class="lp-source-cell">${sourceBadge(r.price_source)}</td>
             <td class="lp-synced-cell">${isActive
                 ? (isGatedIn(r) ? '<span style="color:var(--success); font-size:12px;">yes</span>' : '<span style="color:var(--text-secondary); font-size:12px;">no</span>')
@@ -1776,7 +1829,7 @@ function rowHTML(r) {
                 <a href="#" class="lp-balance-qty-link" data-variant-id="${r.variant_id}" data-card-label="${escapeHtml(cardLabel(r))}" data-row-id="${r.row_id}"
                    style="font-size:10px; margin-left:4px; color:var(--accent);" title="Balance quantity across every listing that offers this card">Balance</a>
             </td>
-            <td class="lp-resolved-qty-cell">${resolvedQty(r)}</td>
+            <td class="lp-resolved-qty-cell">${resolvedQtyCellHTML(r, diff)}</td>
             <td><input type="number" class="lp-low-stock-input" data-row-id="${r.row_id}"
                        value="${r.row_low_stock_qty ?? ''}" placeholder="-" style="width:60px;" /></td>
             <td><input type="number" step="0.01" class="lp-pin-input" data-row-id="${r.row_id}"
