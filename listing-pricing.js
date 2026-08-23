@@ -1724,6 +1724,7 @@ function groupSectionHTML(group, rows) {
                     ${profile ? `<button class="btn lp-edit-tiers-btn" data-profile-id="${profile.id}" style="font-size:12px; padding:3px 8px;">Edit tiers</button>` : ''}
                     <button class="btn lp-rename-group-btn" data-group-id="${group.id}" style="font-size:12px; padding:3px 8px;">Rename</button>
                     <button class="btn lp-delete-group-btn" data-group-id="${group.id}" style="font-size:12px; padding:3px 8px; color:var(--danger);">Delete</button>
+                    ${rows.length ? `<button class="btn lp-balance-group-btn" data-group-id="${group.id}" title="Balance quantity across every listing for every card in this group" style="font-size:12px; padding:3px 8px;">Balance group</button>` : ''}
                 ` : ''}
             </div>
             ${rows.length ? `
@@ -2119,6 +2120,13 @@ function wireControls(container, body) {
         el.addEventListener('click', (e) => {
             e.preventDefault();
             openBalanceQtyModal(container, body, el.dataset.variantId, el.dataset.cardLabel, el.dataset.rowId);
+        });
+    });
+
+    body.querySelectorAll('.lp-balance-group-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const group = state.groups.find(g => g.id === btn.dataset.groupId);
+            openGroupBalanceQtyModal(container, body, btn.dataset.groupId, group?.name || '(group)');
         });
     });
 }
@@ -3667,6 +3675,58 @@ function openStageNavImageModal(templateId, onUploaded) {
 // needs to work for listings that were never onboarded into a template.
 // ----------------------------------------------------------------
 
+// Evenly split totalInventory across rows (by platform_listings.id), giving
+// any remainder to the leading rows. Shared by the single-card and
+// group-level Balance flows so both compute a split identically.
+function evenSplitQty(rows, totalInventory) {
+    const n = rows.length;
+    const base = Math.floor(totalInventory / n);
+    const remainder = totalInventory - base * n;
+    return new Map(rows.map((r, i) => [r.id, base + (i < remainder ? 1 : 0)]));
+}
+
+// Push one listing's new quantity to eBay via the Picking API and normalize
+// the outcome to {listingId, ok, detail}. Shared by the single-card and
+// group-level Balance flows so both apply/report changes identically.
+async function pushQtyChange(row, newQty) {
+    try {
+        const resp = await fetch(`${PICKING_API_URL}/api/revise-variation-qty`, {
+            method: 'POST',
+            headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
+            body: JSON.stringify({ platform_listing_id: row.id, new_qty: newQty, account_num: state.accountNum, dry_run: false }),
+        });
+        if (!resp.ok) {
+            const detail = await resp.text().catch(() => '');
+            throw new Error(`${resp.status} ${detail}`);
+        }
+        const result = await resp.json();
+        return { listingId: row.listing_id, ok: !result.error, detail: result.error || `${row.quantity_listed ?? 0} → ${newQty}` };
+    } catch (err) {
+        return { listingId: row.listing_id, ok: false, detail: err.message };
+    }
+}
+
+// Table markup for one variant's live listings + editable qty inputs.
+// Shared by the single-card and group-level Balance flows.
+function balanceRowsTableHTML(rows, templateNameByListingId) {
+    return `
+        <table style="margin-bottom:10px;">
+            <thead><tr><th>Listing</th><th style="width:90px;">Qty</th></tr></thead>
+            <tbody>
+                ${rows.map(r => `
+                    <tr>
+                        <td>
+                            <div>${escapeHtml(templateNameByListingId[r.listing_id] || '(no template)')}${r.status === 'out_of_stock' ? ' <span style="color:var(--warning, var(--text-secondary)); font-size:11px;">(out of stock)</span>' : ''}</div>
+                            <div style="font-size:11px; color:var(--text-secondary);">${escapeHtml(r.listing_id)}${r.account ? ` · ${escapeHtml(r.account)}` : ''}</div>
+                        </td>
+                        <td><input type="number" min="0" class="lp-balance-qty-input" data-pl-id="${r.id}" value="${r.quantity_listed ?? 0}" style="width:70px;" /></td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    `;
+}
+
 async function openBalanceQtyModal(container, body, variantId, cardLabelText, rowId) {
     const root = body.querySelector('#lp-modal-root');
     root.innerHTML = `
@@ -3718,20 +3778,7 @@ function renderBalanceQtyBody(root, container, rows, totalInventory, templateNam
         <p style="font-size:12px; color:var(--text-secondary); margin:8px 0;">
             Total inventory: <strong>${totalInventory}</strong> — currently split across ${rows.length} live listing(s).
         </p>
-        <table style="margin-bottom:10px;">
-            <thead><tr><th>Listing</th><th style="width:90px;">Qty</th></tr></thead>
-            <tbody>
-                ${rows.map(r => `
-                    <tr>
-                        <td>
-                            <div>${escapeHtml(templateNameByListingId[r.listing_id] || '(no template)')}${r.status === 'out_of_stock' ? ' <span style="color:var(--warning, var(--text-secondary)); font-size:11px;">(out of stock)</span>' : ''}</div>
-                            <div style="font-size:11px; color:var(--text-secondary);">${escapeHtml(r.listing_id)}${r.account ? ` · ${escapeHtml(r.account)}` : ''}</div>
-                        </td>
-                        <td><input type="number" min="0" class="lp-balance-qty-input" data-pl-id="${r.id}" value="${r.quantity_listed ?? 0}" style="width:70px;" /></td>
-                    </tr>
-                `).join('')}
-            </tbody>
-        </table>
+        ${balanceRowsTableHTML(rows, templateNameByListingId)}
         <div id="lp-balance-total-note" style="font-size:12px; margin-bottom:10px;"></div>
         <div id="lp-balance-error" style="color:var(--danger); font-size:12px; margin-bottom:10px;"></div>
         <div id="lp-balance-results" style="font-size:12px; margin-bottom:10px;"></div>
@@ -3755,13 +3802,10 @@ function renderBalanceQtyBody(root, container, rows, totalInventory, templateNam
     updateTotalNote();
 
     bodyEl.querySelector('#lp-balance-even-btn').addEventListener('click', () => {
-        const n = rows.length;
-        const base = Math.floor(totalInventory / n);
-        const remainder = totalInventory - base * n;
-        rows.forEach((r, i) => {
-            const share = base + (i < remainder ? 1 : 0);
+        const shares = evenSplitQty(rows, totalInventory);
+        rows.forEach(r => {
             const input = bodyEl.querySelector(`.lp-balance-qty-input[data-pl-id="${r.id}"]`);
-            if (input) input.value = share;
+            if (input) input.value = shares.get(r.id);
         });
         updateTotalNote();
     });
@@ -3805,21 +3849,7 @@ function renderBalanceQtyBody(root, container, rows, totalInventory, templateNam
 
         const results = [];
         for (const { row, newQty } of changes) {
-            try {
-                const resp = await fetch(`${PICKING_API_URL}/api/revise-variation-qty`, {
-                    method: 'POST',
-                    headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
-                    body: JSON.stringify({ platform_listing_id: row.id, new_qty: newQty, account_num: state.accountNum, dry_run: false }),
-                });
-                if (!resp.ok) {
-                    const detail = await resp.text().catch(() => '');
-                    throw new Error(`${resp.status} ${detail}`);
-                }
-                const result = await resp.json();
-                results.push({ listingId: row.listing_id, ok: !result.error, detail: result.error || `${row.quantity_listed ?? 0} → ${newQty}` });
-            } catch (err) {
-                results.push({ listingId: row.listing_id, ok: false, detail: err.message });
-            }
+            results.push(await pushQtyChange(row, newQty));
         }
 
         resultsBox.innerHTML = results.map(r => `
@@ -3836,6 +3866,229 @@ function renderBalanceQtyBody(root, container, rows, totalInventory, templateNam
                 root.innerHTML = '';
                 await refreshRowDerivedCells(container, rowId);
             }, 1200);
+        }
+    });
+}
+
+// ----------------------------------------------------------------
+// Group-level Balance Qty — runs the same per-variant balance as
+// openBalanceQtyModal/renderBalanceQtyBody above, independently for every
+// card in a listing_card_groups group, in one combined modal. Inventory is
+// never pooled across different variants (that isn't meaningful — different
+// cards aren't interchangeable); each variant's own stock is still only
+// split across that variant's own live listings, same math and same push
+// path (evenSplitQty/pushQtyChange), just batched into one review/apply
+// step instead of one modal per card row.
+// ----------------------------------------------------------------
+
+async function openGroupBalanceQtyModal(container, body, groupId, groupName) {
+    const root = body.querySelector('#lp-modal-root');
+    root.innerHTML = `
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
+            <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:640px; max-width:90vw; max-height:85vh; overflow-y:auto;">
+                <h3 style="margin:0 0 4px;">Balance Group — ${escapeHtml(groupName)}</h3>
+                <p id="lp-group-balance-loading" style="color:var(--text-secondary); font-size:12px;">Loading listings...</p>
+                <div id="lp-group-balance-body"></div>
+            </div>
+        </div>
+    `;
+
+    const groupRows = state.resolvedRows.filter(r => r.group_id === groupId);
+    const variantIds = [...new Set(groupRows.map(r => r.variant_id))];
+    const cardLabelByVariantId = Object.fromEntries(groupRows.map(r => [r.variant_id, cardLabel(r)]));
+
+    if (!variantIds.length) {
+        root.querySelector('#lp-group-balance-loading').textContent = 'No cards in this group — nothing to balance.';
+        return;
+    }
+
+    const [{ data: invRows, error: invErr }, { data: plRows, error: plErr }] = await Promise.all([
+        supabase.from('inventory').select('variant_id, quantity, quantity_sold').in('variant_id', variantIds).eq('is_graded', false),
+        supabase.from('platform_listings').select('id, variant_id, platform, listing_id, account, quantity_listed, external_id, status')
+            .in('variant_id', variantIds).in('status', ['active', 'out_of_stock']).order('listing_id'),
+    ]);
+    if (invErr || plErr) {
+        root.querySelector('#lp-group-balance-loading').textContent = `Failed to load: ${(invErr || plErr).message}`;
+        return;
+    }
+
+    const invByVariant = {};
+    for (const r of invRows || []) (invByVariant[r.variant_id] ??= []).push(r);
+    const plByVariant = {};
+    for (const r of plRows || []) (plByVariant[r.variant_id] ??= []).push(r);
+
+    const sections = variantIds
+        .map(vid => ({
+            variantId: vid,
+            cardLabel: cardLabelByVariantId[vid],
+            totalInventory: (invByVariant[vid] || []).reduce((sum, r) => sum + (r.quantity - (r.quantity_sold || 0)), 0),
+            rows: plByVariant[vid] || [],
+        }))
+        .filter(s => s.rows.length); // no live listings for this variant — nothing to balance, omit it
+
+    if (!sections.length) {
+        root.querySelector('#lp-group-balance-loading').textContent = 'No live listings currently offer any card in this group — nothing to balance yet.';
+        return;
+    }
+
+    const listingIds = [...new Set(sections.flatMap(s => s.rows.map(r => r.listing_id)))];
+    const { data: templates } = await supabase.from('listing_templates').select('listing_id, name').in('listing_id', listingIds);
+    const templateNameByListingId = Object.fromEntries((templates || []).map(t => [t.listing_id, t.name]));
+
+    root.querySelector('#lp-group-balance-loading').remove();
+    renderGroupBalanceQtyBody(root, container, groupRows, sections, templateNameByListingId);
+}
+
+function renderGroupBalanceQtyBody(root, container, groupRows, sections, templateNameByListingId) {
+    const bodyEl = root.querySelector('#lp-group-balance-body');
+
+    const sectionHTML = (s) => `
+        <div class="lp-group-balance-section" data-variant-id="${s.variantId}" style="margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid var(--border);">
+            <p style="font-size:13px; margin:0 0 6px;"><strong>${escapeHtml(s.cardLabel)}</strong>
+                <span style="color:var(--text-secondary); font-size:12px;"> — Owned ${s.totalInventory}, Listed ${s.rows.reduce((sum, r) => sum + (r.quantity_listed ?? 0), 0)}</span>
+            </p>
+            ${balanceRowsTableHTML(s.rows, templateNameByListingId)}
+            <div class="lp-group-balance-total-note" style="font-size:12px;"></div>
+        </div>
+    `;
+
+    bodyEl.innerHTML = `
+        <div style="display:flex; justify-content:flex-end; margin-bottom:10px;">
+            <button type="button" class="btn" id="lp-group-balance-even-btn">Balance</button>
+        </div>
+        ${sections.map(sectionHTML).join('')}
+        <div id="lp-group-balance-error" style="color:var(--danger); font-size:12px; margin-bottom:10px;"></div>
+        <div id="lp-group-balance-results" style="font-size:12px; margin-bottom:10px;"></div>
+        <div style="display:flex; justify-content:flex-end; gap:8px;">
+            <button type="button" class="btn" id="lp-group-balance-cancel">Close</button>
+            <button type="button" class="btn btn-primary" id="lp-group-balance-confirm">Confirm</button>
+        </div>
+    `;
+
+    const sectionEl = (s) => bodyEl.querySelector(`.lp-group-balance-section[data-variant-id="${s.variantId}"]`);
+
+    const updateSectionNote = (s) => {
+        const el = sectionEl(s);
+        const inputs = [...el.querySelectorAll('.lp-balance-qty-input')];
+        const sum = inputs.reduce((acc, input) => acc + (parseInt(input.value, 10) || 0), 0);
+        const note = el.querySelector('.lp-group-balance-total-note');
+        note.textContent = `Entered total: ${sum} / ${s.totalInventory} in stock`;
+        note.style.color = sum > s.totalInventory ? 'var(--danger)' : 'var(--text-secondary)';
+    };
+    sections.forEach(s => {
+        sectionEl(s).querySelectorAll('.lp-balance-qty-input').forEach(el => el.addEventListener('input', () => updateSectionNote(s)));
+        updateSectionNote(s);
+    });
+
+    bodyEl.querySelector('#lp-group-balance-even-btn').addEventListener('click', () => {
+        sections.forEach(s => {
+            const shares = evenSplitQty(s.rows, s.totalInventory);
+            const el = sectionEl(s);
+            s.rows.forEach(r => {
+                const input = el.querySelector(`.lp-balance-qty-input[data-pl-id="${r.id}"]`);
+                if (input) input.value = shares.get(r.id);
+            });
+            updateSectionNote(s);
+        });
+    });
+
+    root.querySelector('#lp-group-balance-cancel').addEventListener('click', () => {
+        root.innerHTML = '';
+    });
+
+    bodyEl.querySelector('#lp-group-balance-confirm').addEventListener('click', async () => {
+        const errBox = bodyEl.querySelector('#lp-group-balance-error');
+        const resultsBox = bodyEl.querySelector('#lp-group-balance-results');
+        errBox.textContent = '';
+        resultsBox.innerHTML = '';
+
+        const overStock = sections.filter(s => {
+            const el = sectionEl(s);
+            const sum = [...el.querySelectorAll('.lp-balance-qty-input')].reduce((acc, input) => acc + (parseInt(input.value, 10) || 0), 0);
+            return sum > s.totalInventory;
+        });
+        if (overStock.length) {
+            errBox.textContent = `Entered total exceeds actual stock for: ${overStock.map(s => s.cardLabel).join(', ')} — reduce before confirming.`;
+            return;
+        }
+
+        const changesBySection = sections.map(s => {
+            const el = sectionEl(s);
+            const changes = s.rows
+                .map(r => {
+                    const input = el.querySelector(`.lp-balance-qty-input[data-pl-id="${r.id}"]`);
+                    return { row: r, newQty: parseInt(input.value, 10) || 0 };
+                })
+                .filter(({ row, newQty }) => newQty !== (row.quantity_listed ?? 0));
+            return { section: s, changes };
+        }).filter(({ changes }) => changes.length);
+
+        if (!changesBySection.length) {
+            errBox.textContent = 'Nothing changed.';
+            return;
+        }
+
+        const summary = changesBySection
+            .map(({ section, changes }) => `${section.cardLabel}: ${changes.length} listing(s) changing`)
+            .join('\n');
+        const totalChanges = changesBySection.reduce((sum, { changes }) => sum + changes.length, 0);
+        if (!window.confirm(`This will send live quantity changes to ${totalChanges} eBay listing(s) across ${changesBySection.length} card(s):\n\n${summary}\n\nContinue?`)) return;
+
+        const confirmBtn = bodyEl.querySelector('#lp-group-balance-confirm');
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Applying...';
+
+        const succeededRowIds = new Set();
+        const resultsBySection = [];
+        for (const { section, changes } of changesBySection) {
+            const results = [];
+            for (const { row, newQty } of changes) {
+                results.push(await pushQtyChange(row, newQty));
+            }
+            resultsBySection.push({ section, results });
+            if (results.every(r => r.ok)) {
+                groupRows.filter(r => r.variant_id === section.variantId).forEach(r => succeededRowIds.add(r.row_id));
+            }
+        }
+
+        const okCount = resultsBySection.reduce((sum, { results }) => sum + results.filter(r => r.ok).length, 0);
+        const totalCount = resultsBySection.reduce((sum, { results }) => sum + results.length, 0);
+        const allOk = okCount === totalCount;
+
+        resultsBox.innerHTML = `
+            <div style="color:${allOk ? 'var(--success)' : 'var(--danger)'}; margin-bottom:6px;">
+                <strong>${okCount}/${totalCount} succeeded</strong>
+            </div>
+            ${resultsBySection.map(({ section, results }) => `
+                <div style="margin-bottom:6px;">
+                    <div style="color:var(--text-secondary);">${escapeHtml(section.cardLabel)}</div>
+                    ${results.map(r => `
+                        <div style="color:${r.ok ? 'var(--success)' : 'var(--danger)'}; padding-left:10px;">
+                            ${r.ok ? '✓' : '✗'} ${escapeHtml(templateNameByListingId[r.listingId] || r.listingId)}: ${escapeHtml(r.detail)}
+                        </div>
+                    `).join('')}
+                </div>
+            `).join('')}
+        `;
+
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Confirm';
+
+        if (allOk) {
+            setTimeout(async () => {
+                root.innerHTML = '';
+                for (const rowId of succeededRowIds) {
+                    await refreshRowDerivedCells(container, rowId);
+                }
+            }, 1200);
+        } else {
+            // Leave the modal open on partial failure so the user can see
+            // which listings still need a retry, same as a fully-failed
+            // single-card Apply would (root.innerHTML is only cleared on
+            // full success there too).
+            for (const rowId of succeededRowIds) {
+                await refreshRowDerivedCells(container, rowId);
+            }
         }
     });
 }
