@@ -2515,6 +2515,18 @@ function openNewLocalPurchaseModal(container) {
 
     function renderForm() {
         formDiv.innerHTML = `
+            <!-- Row 0: Quick Search — searches name, card number, AND variant
+                 type (foil/pattern/texture/etc.) at once; picking a result
+                 fills in every field below exactly like Card name's own
+                 autocomplete does. Separate from Card name/Set/# on purpose
+                 (kept as an additional field, not a replacement). -->
+            <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px; align-items:flex-end;">
+                <label>Quick Search
+                    <input type="text" class="nlp-edit-quick-search" style="width:320px;"
+                           placeholder='Name, number, or variant — e.g. "clefable 103 holo"' autocomplete="off" />
+                </label>
+            </div>
+
             <!-- Row 1: Set (own row) -->
             <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px; align-items:flex-end;">
                 <label>Set
@@ -2629,6 +2641,7 @@ function openNewLocalPurchaseModal(container) {
         const nameInput  = formDiv.querySelector('.nlp-edit-card-name');
         const setInput   = formDiv.querySelector('.nlp-edit-set-name');
         const numInput   = formDiv.querySelector('.nlp-edit-card-number');
+        const quickInput = formDiv.querySelector('.nlp-edit-quick-search');
         const resultsEl  = formDiv.querySelector('.nlp-rematch-results');
 
         formDiv.querySelector('.nlp-edit-ebay-link').addEventListener('change', (e) => {
@@ -2638,6 +2651,32 @@ function openNewLocalPurchaseModal(container) {
 
         // Reset match state for this fresh card
         vRow = { card_id: null, _matchedItem: null };
+
+        // Shared select handler — fills name/set/number/variant-axis fields
+        // from a picked search result. Used by both the Card name
+        // autocomplete and the Quick Search autocomplete below, so picking
+        // a card behaves identically no matter which box found it.
+        const selectCard = (c) => {
+            nameInput.value = c.card_name;
+            if (c._type === 'card') {
+                setInput.value = c.set_name || '';
+                numInput.value = c.card_number || '';
+                vRow.card_id = c.card_id || null;
+                vRow._matchedItem = { card_id: c.card_id, source: 'db' };
+
+                const setSel = (cls, val) => {
+                    const el = formDiv.querySelector(cls);
+                    if (el) el.value = val || '';
+                };
+                setSel('.nlp-edit-foil-type', c.foil_type || 'non_holo');
+                setSel('.nlp-edit-foil-pattern', c.foil_pattern || '');
+                setSel('.nlp-edit-texture', c.texture || '');
+                setSel('.nlp-edit-material', c.material || '');
+                setSel('.nlp-edit-size', c.size || '');
+                setSel('.nlp-edit-stamp-type', c.stamp_type || '');
+                setSel('.nlp-edit-source-type', c.source_type || '');
+            }
+        };
 
         // ── Card name autocomplete — identical to staging row ──────────────────
         wireAutocomplete({
@@ -2704,27 +2743,75 @@ function openNewLocalPurchaseModal(container) {
             renderItem: (c) => c._type === 'card'
                 ? `${c.card_name} — ${c.set_name} #${c.display_number || ''} · ${c.variant_label}`
                 : `✦ ${c.card_name}`,
-            onSelect: (c) => {
-                nameInput.value = c.card_name;
-                if (c._type === 'card') {
-                    setInput.value = c.set_name || '';
-                    numInput.value = c.card_number || '';
-                    vRow.card_id = c.card_id || null;
-                    vRow._matchedItem = { card_id: c.card_id, source: 'db' };
+            onSelect: selectCard,
+        });
 
-                    // Populate variant axis dropdowns from the selected variant
-                    const setSel = (cls, val) => {
-                        const el = formDiv.querySelector(cls);
-                        if (el) el.value = val || '';
-                    };
-                    setSel('.nlp-edit-foil-type', c.foil_type || 'non_holo');
-                    setSel('.nlp-edit-foil-pattern', c.foil_pattern || '');
-                    setSel('.nlp-edit-texture', c.texture || '');
-                    setSel('.nlp-edit-material', c.material || '');
-                    setSel('.nlp-edit-size', c.size || '');
-                    setSel('.nlp-edit-stamp-type', c.stamp_type || '');
-                    setSel('.nlp-edit-source-type', c.source_type || '');
-                }
+        // ── Quick Search — one box searching name, card number, AND variant
+        // type together. Server-side query narrows on the first typed word
+        // (OR'd across card_name/card_number/every variant-label column);
+        // any additional words then AND-filter client-side against those
+        // same fields, so "clefable 103 holo" only keeps results matching
+        // all three, without depending on chaining multiple .or() calls
+        // server-side (not a pattern used anywhere else in this codebase).
+        wireAutocomplete({
+            input: quickInput,
+            container: formDiv,
+            search: async (term) => {
+                const words = term.trim().toLowerCase().split(/\s+/).filter(Boolean);
+                if (!words.length) return [];
+
+                const VARIANT_LABEL_COLS = ['foil_label', 'pattern_label', 'texture_label', 'material_label', 'size_label', 'stamp_label', 'source_label'];
+                const orExpr = (w) => ['card_name', 'card_number', ...VARIANT_LABEL_COLS]
+                    .map(col => `${col}.ilike.%${w}%`).join(',');
+
+                const [cardRes, cmRes] = await Promise.all([
+                    supabase
+                        .from('v_card_variants')
+                        .select('card_id, variant_id, card_name, set_name, display_number, card_number, rarity, foil_type, foil_pattern, texture, material, size, stamp_type, source_type, foil_label, pattern_label, texture_label, material_label, size_label, stamp_label, source_label')
+                        .or(orExpr(words[0]))
+                        .order('card_name')
+                        .order('foil_type')
+                        .limit(40),
+                    supabase
+                        .from('card_master')
+                        .select('id, name, card_number, rarity, card_sets(name)')
+                        .or(`name.ilike.%${words[0]}%,card_number.ilike.%${words[0]}%`)
+                        .limit(25),
+                ]);
+
+                const matchesAllWords = (text) => words.every(w => text.includes(w));
+
+                const cards = (cardRes.data || [])
+                    .map(c => ({
+                        _type: 'card', ...c,
+                        variant_label: [c.foil_label, c.pattern_label, c.texture_label, c.material_label, c.size_label, c.stamp_label, c.source_label]
+                            .filter(Boolean).join(' · ') || 'Non-Holo',
+                    }))
+                    .filter(c => matchesAllWords([c.card_name, c.card_number, c.variant_label].join(' ').toLowerCase()))
+                    .slice(0, 15);
+
+                const seenCardIds = new Set(cards.map(c => c.card_id));
+                const noVariantCards = (cmRes.data || [])
+                    .filter(c => !seenCardIds.has(c.id))
+                    .map(c => ({
+                        _type: 'card',
+                        card_id: c.id, variant_id: null,
+                        card_name: c.name, set_name: c.card_sets?.name || '',
+                        display_number: c.card_number, card_number: c.card_number,
+                        rarity: c.rarity,
+                        foil_type: null, foil_pattern: null, texture: null,
+                        material: null, size: null, stamp_type: null, source_type: null,
+                        variant_label: 'No variant yet',
+                    }))
+                    .filter(c => matchesAllWords([c.card_name, c.card_number].join(' ').toLowerCase()))
+                    .slice(0, 8);
+
+                return [...cards, ...noVariantCards];
+            },
+            renderItem: (c) => `${c.card_name} — ${c.set_name} #${c.display_number || ''} · ${c.variant_label}`,
+            onSelect: (c) => {
+                selectCard(c);
+                quickInput.value = '';
             },
         });
 
