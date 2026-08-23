@@ -3056,6 +3056,10 @@ function openNewLocalPurchaseModal(container) {
 
             renderAddedList();
             renderForm();
+            // renderForm() rebuilds the whole form fresh, so the old quickInput
+            // reference is now detached — re-query for the new one so the next
+            // card can be typed immediately without an extra click.
+            formDiv.querySelector('.nlp-edit-quick-search')?.focus();
         });
     }
 
