@@ -3154,7 +3154,7 @@ function openNewLocalPurchaseModal(container) {
                 <div style="flex:1;">
                     <strong>${escapeHtml(c.card_name)}</strong>
                     <span style="color:var(--text-secondary); font-size:11px;">
-                        ${escapeHtml(c.set_name)} #${escapeHtml(c.card_number)} · ${escapeHtml(c.foil_type)}
+                        ${escapeHtml(c.set_name)} #${escapeHtml(c.card_number)} · ${escapeHtml(variantLabel(c))}
                     </span>
                     ${c.ebay_item_id ? `<span style="color:var(--accent); font-size:11px; display:block;">🔗 linked to eBay item ${escapeHtml(c.ebay_item_id)}</span>` : ''}
                 </div>
