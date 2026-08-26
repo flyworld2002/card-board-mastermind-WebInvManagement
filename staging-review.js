@@ -2481,7 +2481,7 @@ function renderPagination(container) {
 // the Jobs page since staging is where the user actually wants to land.
 // ----------------------------------------------------------------
 
-async function pollTcgplayerImportJob(jobId) {
+async function pollTcgplayerImportJob(jobId, onProgress) {
     while (true) {
         const resp = await fetch(`${PICKING_API_URL}/api/jobs/${jobId}`, {
             headers: { 'x-picking-token': PICKING_API_TOKEN },
@@ -2492,6 +2492,7 @@ async function pollTcgplayerImportJob(jobId) {
         }
         const job = await resp.json();
         if (job.status !== 'running') return job;
+        if (onProgress) onProgress(job.progress || {});
         await new Promise(r => setTimeout(r, JOB_POLL_INTERVAL_MS));
     }
 }
@@ -2580,7 +2581,14 @@ function openTcgplayerImportModal(container) {
             }
             const { job_id } = await resp.json();
             resultDiv.textContent = 'Processing...';
-            const job = await pollTcgplayerImportJob(job_id);
+            const job = await pollTcgplayerImportJob(job_id, (progress) => {
+                if (progress.total != null) {
+                    const parts = [`${progress.done ?? 0}/${progress.total} cards`];
+                    if (progress.matched) parts.push(`${progress.matched} matched`);
+                    if (progress.not_found) parts.push(`${progress.not_found} not found`);
+                    resultDiv.textContent = parts.join(' · ');
+                }
+            });
 
             if (job.status === 'failed') {
                 resultDiv.style.color = 'var(--danger)';

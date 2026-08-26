@@ -262,7 +262,15 @@ function jobProgressText(job) {
         }
     }
     if (job.job_type === 'tcgplayer_html_import') {
-        if (job.status === 'running') return 'Parsing & matching...';
+        if (job.status === 'running') {
+            if (p.total != null) {
+                const parts = [`${p.done ?? 0}/${p.total} cards`];
+                if (p.matched) parts.push(`${p.matched} matched`);
+                if (p.not_found) parts.push(`${p.not_found} not found`);
+                return parts.join(' · ');
+            }
+            return 'Parsing...';
+        }
         const r = job.result || {};
         if (r.error) return r.error;
         return `${r.staged ?? 0} staged · ${r.matched ?? 0} matched · `
