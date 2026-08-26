@@ -266,6 +266,7 @@ function jobProgressText(job) {
             if (p.total != null) {
                 const parts = [`${p.done ?? 0}/${p.total} cards`];
                 if (p.matched) parts.push(`${p.matched} matched`);
+                if (p.ambiguous) parts.push(`${p.ambiguous} ambiguous`);
                 if (p.not_found) parts.push(`${p.not_found} not found`);
                 return parts.join(' · ');
             }

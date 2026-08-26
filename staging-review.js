@@ -2585,6 +2585,7 @@ function openTcgplayerImportModal(container) {
                 if (progress.total != null) {
                     const parts = [`${progress.done ?? 0}/${progress.total} cards`];
                     if (progress.matched) parts.push(`${progress.matched} matched`);
+                    if (progress.ambiguous) parts.push(`${progress.ambiguous} ambiguous`);
                     if (progress.not_found) parts.push(`${progress.not_found} not found`);
                     resultDiv.textContent = parts.join(' · ');
                 }
