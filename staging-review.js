@@ -82,8 +82,42 @@ async function loadImportBatches() {
         return;
     }
 
-    const batches = data?.import_batch || {};
-    state.importBatches = Object.keys(batches).filter(Boolean).sort();
+    const batchNames = Object.keys(data?.import_batch || {}).filter(Boolean);
+    if (!batchNames.length) {
+        state.importBatches = [];
+        return;
+    }
+
+    // Order by actual creation time (latest first), not a string sort on
+    // the batch ID -- ID formats vary by source (batch_/TCGP_/ebay_ embed
+    // HHMMSS, local_ embeds a random suffix instead, and a few older ones
+    // are free-form) so lexicographic order doesn't reliably reflect
+    // recency. The staging table is small (tens of batches), so pulling
+    // just (import_batch, created_at) and taking each batch's most recent
+    // row client-side is cheap and needs no new RPC/view.
+    const { data: rows, error: timeErr } = await supabase
+        .from('staging')
+        .select('import_batch, created_at')
+        .in('import_batch', batchNames)
+        .order('created_at', { ascending: false });
+
+    if (timeErr) {
+        console.error('Failed to load batch timestamps, falling back to alphabetical:', timeErr);
+        state.importBatches = batchNames.sort();
+        return;
+    }
+
+    const seen = new Set();
+    const ordered = [];
+    for (const row of rows || []) {
+        if (!seen.has(row.import_batch)) {
+            seen.add(row.import_batch);
+            ordered.push(row.import_batch);
+        }
+    }
+    for (const b of batchNames) if (!seen.has(b)) ordered.push(b);
+
+    state.importBatches = ordered;
 }
 
 async function loadSets() {
