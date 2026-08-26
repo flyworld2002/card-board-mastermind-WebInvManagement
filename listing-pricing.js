@@ -133,43 +133,9 @@ let lastClickedCheckboxIndex = null;
 export async function renderListingPricing(container) {
     container.innerHTML = shellHTML();
     setupImagePreview(container);
-    setupPullLiveDelegation(container);
     const { data } = await supabase.from('pricing_profiles').select('*').order('name');
     state.profiles = data || [];
     await renderTemplatesList(container);
-}
-
-// Delegated (not per-element) on purpose: refreshRowDerivedCells() rebuilds
-// the resolved-price cell's innerHTML on every targeted row refresh —
-// including this link — so a listener attached directly to the <a> itself
-// would be destroyed and silently stop working after the first refresh.
-// Binding once on `container` (same one-time-per-page-mount convention as
-// setupImagePreview above) survives any number of cell rebuilds.
-function setupPullLiveDelegation(container) {
-    container.addEventListener('click', async (e) => {
-        const link = e.target.closest('.lp-pull-live-link');
-        if (!link) return;
-        e.preventDefault();
-        const plId = link.dataset.plId;
-        const rowId = link.dataset.rowId;
-        const originalText = link.textContent;
-        link.textContent = '…';
-        try {
-            const resp = await fetch(`${PICKING_API_URL}/api/pull-live-variation`, {
-                method: 'POST',
-                headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
-                body: JSON.stringify({ platform_listing_id: plId, account_num: state.accountNum }),
-            });
-            if (!resp.ok) {
-                const detail = await resp.text().catch(() => '');
-                throw new Error(`${resp.status} ${detail}`);
-            }
-            await refreshRowDerivedCells(container, rowId);
-        } catch (err) {
-            window.alert(`Failed to pull live eBay state: ${err.message}`);
-            link.textContent = originalText;
-        }
-    });
 }
 
 function shellHTML() {
@@ -765,13 +731,8 @@ function resolvedPriceCellHTML(r, diff) {
     const isActive = r.status === 'active';
     const showLive = diff.live && isActive;
     const highlight = diff.priceDiff && isActive;
-    // Refresh link only lives here (not duplicated on the qty cell) since
-    // one pull covers both price and qty for this variation — clicking it
-    // re-renders both cells via refreshRowDerivedCells.
     const liveLine = showLive
-        ? `<div style="font-size:11px; font-weight:400; color:var(--text-secondary);">eBay: ${formatPrice(diff.row.pushed_price)}
-            <a href="#" class="lp-pull-live-link" data-pl-id="${diff.row.id}" data-row-id="${r.row_id}"
-               title="Pull live price/qty from eBay (no push — read-only)">↻</a></div>`
+        ? `<div style="font-size:11px; font-weight:400; color:var(--text-secondary);">eBay: ${formatPrice(diff.row.pushed_price)}</div>`
         : '';
     return `<span style="font-weight:600; ${highlight ? 'color:var(--warning);' : ''}">${formatPrice(r.resolved_price)}</span>${liveLine}`;
 }
