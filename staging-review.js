@@ -5,6 +5,13 @@ import { supabase, debounce, formatPrice, loadAxisOptions, AXIS_TABLES, AXIS_OPT
 
 const PAGE_SIZES = [50, 100, 250];
 
+// Same LAN service the Picking and Listing Pricing pages call — see
+// CLAUDE.md's cross-repo contract note. Used here only to kick off the
+// TCGPlayer HTML import job (importer/tcgplayer_html.py on the CBMM side).
+const PICKING_API_URL = 'https://desktop-tu1m2fc.tail2c58d7.ts.net:8765';
+const PICKING_API_TOKEN = 'I1knbOJAve_UZJQHAFZANds9-HalgCxcRJw1GXDg404';
+const JOB_POLL_INTERVAL_MS = 2000;
+
 const state = {
     page: 0,
     pageSize: 50,
@@ -287,6 +294,7 @@ function renderFilters(container) {
         <button id="refresh-staging" class="btn" style="white-space:nowrap;" title="Reload data without changing filters">&#8635; Refresh</button>
         <button id="reset-filters" class="btn" style="white-space:nowrap;">Reset filters</button>
         <button id="new-local-purchase-btn" class="btn btn-primary" style="white-space:nowrap;">+ New Local Purchase</button>
+        <button id="tcgplayer-import-btn" class="btn" style="white-space:nowrap;">Import from TCGPlayer</button>
 
         <select id="filter-page-size">
             ${PAGE_SIZES.map(s => `<option value="${s}" ${s === state.pageSize ? 'selected' : ''}>${s} per page</option>`).join('')}
@@ -357,6 +365,10 @@ function renderFilters(container) {
 
     bar.querySelector('#new-local-purchase-btn').addEventListener('click', () => {
         openNewLocalPurchaseModal(container);
+    });
+
+    bar.querySelector('#tcgplayer-import-btn').addEventListener('click', () => {
+        openTcgplayerImportModal(container);
     });
 
     bar.querySelector('#refresh-staging').addEventListener('click', async (e) => {
@@ -2425,6 +2437,138 @@ function renderPagination(container) {
 }
 
 // ----------------------------------------------------------------
+// Import from TCGPlayer modal — uploads a saved TCGPlayer order page
+// (File > Save Page As > Webpage, HTML only) to picking_api.py, which
+// runs it through importer/tcgplayer_html.py (the same code the CLI's
+// --tcgplayer-html flag calls) on a background thread and lands results
+// straight in staging. Same job-polling convention as jobs.js's Excel
+// import (POST /api/jobs/tcgplayer-html-import, then GET /api/jobs/{id}
+// until status leaves 'running'), just scoped to this page instead of
+// the Jobs page since staging is where the user actually wants to land.
+// ----------------------------------------------------------------
+
+async function pollTcgplayerImportJob(jobId) {
+    while (true) {
+        const resp = await fetch(`${PICKING_API_URL}/api/jobs/${jobId}`, {
+            headers: { 'x-picking-token': PICKING_API_TOKEN },
+        });
+        if (!resp.ok) {
+            const detail = await resp.text().catch(() => '');
+            throw new Error(`${resp.status} ${detail}`);
+        }
+        const job = await resp.json();
+        if (job.status !== 'running') return job;
+        await new Promise(r => setTimeout(r, JOB_POLL_INTERVAL_MS));
+    }
+}
+
+function openTcgplayerImportModal(container) {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+        position:fixed; inset:0; background:rgba(0,0,0,0.7);
+        display:flex; align-items:center; justify-content:center;
+        z-index:1000; padding:16px;
+    `;
+
+    overlay.innerHTML = `
+        <div style="background:var(--bg-secondary); border:1px solid var(--border);
+                    border-radius:8px; padding:24px; width:560px; max-width:95vw;
+                    max-height:90vh; overflow-y:auto;">
+            <h3 style="margin-top:0;">Import from TCGPlayer</h3>
+            <p style="font-size:12px; color:var(--text-secondary); margin-top:0;">
+                Save the order confirmation page from TCGPlayer (File &gt; Save Page As
+                &gt; Webpage, HTML only), then upload it here. Cards land in Staging
+                Review just like <code>--tcgplayer-html</code> from the CLI — matched
+                rows are auto-approved, ambiguous/not-found ones need review here.
+            </p>
+
+            <div style="display:flex; flex-direction:column; gap:10px; margin:16px 0;">
+                <input type="file" id="tcgi-file" accept=".html" />
+                <label style="font-size:12px; color:var(--text-secondary); display:flex; align-items:center; gap:6px;">
+                    <input type="checkbox" id="tcgi-dryrun" checked /> Dry run (preview only, writes nothing)
+                </label>
+            </div>
+
+            <div id="tcgi-result" style="font-size:12px; margin-bottom:12px;"></div>
+
+            <div style="display:flex; gap:8px; align-items:center; border-top:1px solid var(--border); padding-top:16px;">
+                <button class="btn btn-primary" id="tcgi-start-btn">Start import</button>
+                <button class="btn" id="tcgi-close-btn">Close</button>
+                <span id="tcgi-msg" style="font-size:12px; margin-left:8px; color:var(--danger);"></span>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    const fileInput  = overlay.querySelector('#tcgi-file');
+    const dryRunBox  = overlay.querySelector('#tcgi-dryrun');
+    const resultDiv  = overlay.querySelector('#tcgi-result');
+    const startBtn   = overlay.querySelector('#tcgi-start-btn');
+    const msgSpan    = overlay.querySelector('#tcgi-msg');
+    let anyWrote = false;
+
+    overlay.querySelector('#tcgi-close-btn').addEventListener('click', async () => {
+        overlay.remove();
+        if (anyWrote) {
+            await loadImportBatches();
+            await loadSets();
+            await loadFilterCounts();
+            renderFilters(container);
+            await loadAndRenderRows(container);
+        }
+    });
+
+    startBtn.addEventListener('click', async () => {
+        msgSpan.textContent = '';
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) { msgSpan.textContent = 'Choose a saved order page first.'; return; }
+        const dryRun = dryRunBox.checked;
+
+        startBtn.disabled = true;
+        fileInput.disabled = true;
+        dryRunBox.disabled = true;
+        resultDiv.style.color = 'var(--text-secondary)';
+        resultDiv.textContent = 'Uploading...';
+
+        try {
+            const form = new FormData();
+            form.append('file', file);
+            form.append('dry_run', String(dryRun));
+            const resp = await fetch(`${PICKING_API_URL}/api/jobs/tcgplayer-html-import`, {
+                method: 'POST',
+                headers: { 'x-picking-token': PICKING_API_TOKEN },
+                body: form,
+            });
+            if (!resp.ok) {
+                const detail = await resp.text().catch(() => '');
+                throw new Error(`${resp.status} ${detail}`);
+            }
+            const { job_id } = await resp.json();
+            resultDiv.textContent = 'Processing...';
+            const job = await pollTcgplayerImportJob(job_id);
+
+            if (job.status === 'failed') {
+                resultDiv.style.color = 'var(--danger)';
+                resultDiv.textContent = job.error || 'Import failed.';
+            } else {
+                const r = job.result || {};
+                resultDiv.style.color = '';
+                resultDiv.textContent = `${dryRun ? '[Dry run] ' : ''}Staged: ${r.staged ?? 0} · `
+                    + `Matched: ${r.matched ?? 0} · Ambiguous: ${r.ambiguous ?? 0} · Not found: ${r.not_found ?? 0}`;
+                if (!dryRun && (r.staged ?? 0) > 0) anyWrote = true;
+            }
+        } catch (err) {
+            resultDiv.style.color = 'var(--danger)';
+            resultDiv.textContent = `Failed: ${err.message} — is picking_api.py running and reachable at ${PICKING_API_URL}?`;
+        }
+
+        startBtn.disabled = false;
+        fileInput.disabled = false;
+        dryRunBox.disabled = false;
+    });
+}
+
 // New Local Purchase modal — reuses the exact same searchDB,
 // searchPokemonTcgApi, and getGameId functions as the staging
 // rematch flow, so behavior is identical: DB search first, API
