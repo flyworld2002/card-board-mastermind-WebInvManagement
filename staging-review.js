@@ -2582,13 +2582,18 @@ function openTcgplayerImportModal(container) {
             const { job_id } = await resp.json();
             resultDiv.textContent = 'Processing...';
             const job = await pollTcgplayerImportJob(job_id, (progress) => {
-                if (progress.total != null) {
-                    const parts = [`${progress.done ?? 0}/${progress.total} cards`];
-                    if (progress.matched) parts.push(`${progress.matched} matched`);
-                    if (progress.ambiguous) parts.push(`${progress.ambiguous} ambiguous`);
-                    if (progress.not_found) parts.push(`${progress.not_found} not found`);
-                    resultDiv.textContent = parts.join(' · ');
+                const parts = [];
+                if (progress.total != null) parts.push(`${progress.done ?? 0}/${progress.total} cards`);
+                if (progress.matched) parts.push(`${progress.matched} matched`);
+                if (progress.ambiguous) parts.push(`${progress.ambiguous} ambiguous`);
+                if (progress.not_found) parts.push(`${progress.not_found} not found`);
+                // API lookups run in parallel BEFORE anything is written,
+                // so done/total alone looks frozen for however long that
+                // phase takes -- show its own progress while in flight.
+                if (progress.api_total != null && (progress.api_done ?? 0) < progress.api_total) {
+                    parts.push(`checking API: ${progress.api_done ?? 0}/${progress.api_total}`);
                 }
+                if (parts.length) resultDiv.textContent = parts.join(' · ');
             });
 
             if (job.status === 'failed') {

@@ -263,14 +263,18 @@ function jobProgressText(job) {
     }
     if (job.job_type === 'tcgplayer_html_import') {
         if (job.status === 'running') {
-            if (p.total != null) {
-                const parts = [`${p.done ?? 0}/${p.total} cards`];
-                if (p.matched) parts.push(`${p.matched} matched`);
-                if (p.ambiguous) parts.push(`${p.ambiguous} ambiguous`);
-                if (p.not_found) parts.push(`${p.not_found} not found`);
-                return parts.join(' · ');
+            const parts = [];
+            if (p.total != null) parts.push(`${p.done ?? 0}/${p.total} cards`);
+            if (p.matched) parts.push(`${p.matched} matched`);
+            if (p.ambiguous) parts.push(`${p.ambiguous} ambiguous`);
+            if (p.not_found) parts.push(`${p.not_found} not found`);
+            // API lookups run in parallel BEFORE anything is written, so
+            // done/total alone looks frozen for however long that phase
+            // takes -- show its own progress while it's in flight.
+            if (p.api_total != null && (p.api_done ?? 0) < p.api_total) {
+                parts.push(`checking API: ${p.api_done ?? 0}/${p.api_total}`);
             }
-            return 'Parsing...';
+            return parts.length ? parts.join(' · ') : 'Parsing...';
         }
         const r = job.result || {};
         if (r.error) return r.error;
