@@ -1,12 +1,17 @@
 // jobs.js
 // Jobs page: control room for long-running background work that runs on
 // picking_api.py's generic job registry (importer/job_runner.py on the
-// CBMM side). Two job types so far: market price refresh, and Excel-to-
-// staging import. Adding another one later means adding one more POST
-// endpoint in picking_api.py plus one more "start" box below; the job
-// list itself is generic (keyed by job_type/label/status/progress) and
-// needs no changes beyond a jobProgressText() case for the new type's
-// shape. See docs/plans/listing-pricing-system.md.
+// CBMM side). Three job types so far: market price refresh, Excel-to-
+// staging import, and TCGPlayer HTML import. Adding another one later
+// means adding one more POST endpoint in picking_api.py; the job list
+// itself is generic (keyed by job_type/label/status/progress) and needs
+// no changes beyond a jobProgressText() case for the new type's shape.
+// A "start" box below is optional -- TCGPlayer HTML import deliberately
+// has none here, since its natural entry point is the Staging Review
+// page's "Import from TCGPlayer" button (same /api/jobs/tcgplayer-html-
+// import endpoint, same job_id polling) -- it still shows up in the list
+// below like any other job, just started from elsewhere. See
+// docs/plans/listing-pricing-system.md.
 //
 // Job state lives in picking_api.py's process memory only (lost on
 // restart) — this page just polls it. Polling only runs while at least
@@ -255,6 +260,13 @@ function jobProgressText(job) {
             return `${r.staged ?? 0} staged · ${r.matched ?? 0} matched (${created} new) · `
                 + `${r.ambiguous ?? 0} ambiguous · ${r.skipped ?? 0} skipped`;
         }
+    }
+    if (job.job_type === 'tcgplayer_html_import') {
+        if (job.status === 'running') return 'Parsing & matching...';
+        const r = job.result || {};
+        if (r.error) return r.error;
+        return `${r.staged ?? 0} staged · ${r.matched ?? 0} matched · `
+            + `${r.ambiguous ?? 0} ambiguous · ${r.not_found ?? 0} not found`;
     }
     if (job.status === 'failed' && job.error) return job.error;
     return '-';
