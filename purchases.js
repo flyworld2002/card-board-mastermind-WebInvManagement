@@ -28,7 +28,7 @@ const state = {
         search: '',
         source: 'all',
     },
-    sort: { field: 'purchased_at', asc: false },
+    sort: { field: 'created_at', asc: false },
     expandedPoId: null,
 };
 
@@ -114,7 +114,7 @@ async function loadAndRender(container) {
     const { data: purchases, error: poErr } = await supabase
         .from('purchases')
         .select('*')
-        .order('purchased_at', { ascending: false });
+        .order('created_at', { ascending: false });
 
     if (poErr) {
         wrap.innerHTML = `<p style="color:var(--danger)">Failed to load purchases: ${escapeHtml(poErr.message)}</p>`;
@@ -280,6 +280,7 @@ function wireNewPoPanel(container) {
 
 const SORTABLE_COLUMNS = [
     { field: 'purchased_at', label: 'Date' },
+    { field: 'created_at',   label: 'Imported' },
     { field: 'reference_id', label: 'Reference #' },
     { field: 'source',       label: 'Source' },
     { field: 'purchase_type', label: 'Type' },
@@ -341,14 +342,15 @@ function renderTable(container) {
 
 function poRowHtml(r) {
     const dateStr = formatDate(r.purchased_at);
-    // purchased_at is date-only (always midnight) so it can't distinguish
-    // same-day entries -- created_at is a real instant, shown here in the
-    // viewer's own local time (unlike purchased_at, this one legitimately
-    // has a time-of-day, so no UTC-forcing needed) so multiple POs made
-    // the same day can be told apart at a glance.
-    const createdStr = r.created_at
-        ? new Date(r.created_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
-        : '';
+    // created_at is a real instant (unlike purchased_at, a date-only
+    // field always at midnight), shown in the viewer's own local time --
+    // no UTC-forcing needed here, and it lets same-day imports be told
+    // apart at a glance. Its own column (not just a Date sub-line) since
+    // it's the default sort field.
+    const importedStr = r.created_at
+        ? new Date(r.created_at).toLocaleString('en-US',
+            { month: 'numeric', day: 'numeric', year: '2-digit', hour: 'numeric', minute: '2-digit' })
+        : '—';
 
     const qtyMismatch  = (r.card_count ?? 0) !== r.computed_qty;
     const costMismatch = Math.abs((r.total_cost ?? 0) - r.computed_cost) > 0.005;
@@ -365,7 +367,8 @@ function poRowHtml(r) {
 
     let html = `
         <tr data-po-id="${r.id}" style="cursor:pointer;">
-            <td>${dateStr}${createdStr ? `<div style="font-size:11px; color:var(--text-secondary);">${createdStr}</div>` : ''}</td>
+            <td>${dateStr}</td>
+            <td style="font-size:12px; color:var(--text-secondary);">${escapeHtml(importedStr)}</td>
             <td style="font-family:monospace; font-size:12px;">${escapeHtml(r.reference_id || '—')}</td>
             <td>${sourceBadge(r.source)}</td>
             <td style="font-size:12px; color:var(--text-secondary);">${escapeHtml(r.purchase_type || '—')}</td>
