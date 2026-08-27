@@ -653,6 +653,35 @@ function hasNumberMismatch(row) {
         && String(row.card_number).trim() !== String(row.matched_number).trim();
 }
 
+// Which of the 7 variant axis values on this row don't match a real
+// dropdown option -- same "isCustom" check renderAxesInputs()'s sel()
+// helper uses for the edit form, applied here so a custom/unmatched
+// value is visible in the main table too, not just once a row is
+// expanded.
+const VARIANT_AXES = [
+    ['foil_type',    'Foil type'],
+    ['foil_pattern', 'Pattern'],
+    ['texture',      'Texture'],
+    ['material',     'Material'],
+    ['size',         'Size'],
+    ['stamp_type',   'Stamp'],
+    ['source_type',  'Source'],
+];
+
+function customVariantAxes(row) {
+    return VARIANT_AXES.filter(([axis]) => {
+        const val = row[axis];
+        return val && !(AXIS_DISPLAY[axis] && Object.prototype.hasOwnProperty.call(AXIS_DISPLAY[axis], val));
+    });
+}
+
+function customVariantWarningHTML(row) {
+    const custom = customVariantAxes(row);
+    if (!custom.length) return '';
+    const detail = custom.map(([axis, label]) => `${label}: "${row[axis]}"`).join(', ');
+    return `<span title="Custom value, not a real dropdown option -- ${escapeHtml(detail)}" style="margin-left:4px; cursor:help;">⚠️</span>`;
+}
+
 function renderRow(container, row) {
     const tr = document.createElement('tr');
     tr.dataset.stagingId = row.staging_id;
@@ -672,7 +701,7 @@ function renderRow(container, row) {
         <td style="cursor:pointer;">${escapeHtml(row.card_name || '')}</td>
         <td style="cursor:pointer;">${escapeHtml(row.set_name || row.matched_set_name || '-')}</td>
         <td style="cursor:pointer;">${escapeHtml(row.condition || '-')}</td>
-        <td style="cursor:pointer; font-size:12px;">${escapeHtml(variantLabel(row))}</td>
+        <td style="cursor:pointer; font-size:12px;">${escapeHtml(variantLabel(row))}${customVariantWarningHTML(row)}</td>
         <td style="cursor:pointer;">${row.quantity ?? '-'}</td>
         <td style="cursor:pointer;">${formatPrice(row.cost_per_card)}</td>
         <td style="cursor:pointer;">${formatPrice(row.listing_price)}</td>
