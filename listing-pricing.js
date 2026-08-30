@@ -3811,34 +3811,50 @@ function evenSplitQty(rows, totalInventory) {
     return new Map(rows.map((r, i) => [r.id, base + (i < remainder ? 1 : 0)]));
 }
 
-// Push one listing's new quantity to eBay via the Picking API and normalize
-// the outcome to {listingId, ok, detail}. Shared by the single-card and
-// group-level Balance flows so both apply/report changes identically.
-async function pushQtyChange(row, newQty) {
+// Formats a {old_qty,new_qty,old_price,new_price} result (or the local
+// newQty/newPrice we sent, as a fallback when the backend didn't echo
+// them back) into one detail string covering whichever of qty/price
+// actually changed. Shared by both push helpers below.
+function qtyPriceDetail(oldQty, newQty, oldPrice, newPrice) {
+    const parts = [`qty ${oldQty ?? 0} → ${newQty}`];
+    if (newPrice != null) parts.push(`price ${formatPrice(oldPrice)} → ${formatPrice(newPrice)}`);
+    return parts.join(', ');
+}
+
+// Push one listing's new quantity/price to eBay via the Picking API and
+// normalize the outcome to {listingId, ok, detail}. Shared by the
+// single-card and group-level Balance flows so both apply/report changes
+// identically. newPrice is optional — omit/null leaves the live price
+// untouched, same as before this parameter existed.
+async function pushQtyChange(row, newQty, newPrice) {
     try {
         const resp = await fetch(`${PICKING_API_URL}/api/revise-variation-qty`, {
             method: 'POST',
             headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
-            body: JSON.stringify({ platform_listing_id: row.id, new_qty: newQty, account_num: state.accountNum, dry_run: false }),
+            body: JSON.stringify({ platform_listing_id: row.id, new_qty: newQty, new_price: newPrice ?? null, account_num: state.accountNum, dry_run: false }),
         });
         if (!resp.ok) {
             const detail = await resp.text().catch(() => '');
             throw new Error(`${resp.status} ${detail}`);
         }
         const result = await resp.json();
-        return { listingId: row.listing_id, ok: !result.error, detail: result.error || `${row.quantity_listed ?? 0} → ${newQty}` };
+        return {
+            listingId: row.listing_id, ok: !result.error,
+            detail: result.error || qtyPriceDetail(result.old_qty ?? row.quantity_listed, newQty, result.old_price ?? row.pushed_price, result.new_price ?? newPrice),
+        };
     } catch (err) {
         return { listingId: row.listing_id, ok: false, detail: err.message };
     }
 }
 
-// Push MULTIPLE variations' new quantities for ONE listing in a single
-// live eBay call (one ReviseFixedPriceItem instead of one per variation).
-// Used by the group-level Balance flow, where several cards in a group
-// can share the same listing — batching by listing_id here is what keeps
-// that flow at one push per listing instead of one push per (card,
-// listing) pair. `changes` is [{row, newQty}, ...] all sharing listingId;
-// returns one {listingId, plId, ok, detail} per input change.
+// Push MULTIPLE variations' new quantities/prices for ONE listing in a
+// single live eBay call (one ReviseFixedPriceItem instead of one per
+// variation). Used by the group-level Balance flow, where several cards
+// in a group can share the same listing — batching by listing_id here is
+// what keeps that flow at one push per listing instead of one push per
+// (card, listing) pair. `changes` is [{row, newQty, newPrice}, ...] all
+// sharing listingId; returns one {listingId, plId, ok, detail} per input
+// change.
 async function pushQtyChangeBatch(listingId, changes) {
     try {
         const resp = await fetch(`${PICKING_API_URL}/api/revise-variation-qty-batch`, {
@@ -3846,7 +3862,7 @@ async function pushQtyChangeBatch(listingId, changes) {
             headers: { 'x-picking-token': PICKING_API_TOKEN, 'content-type': 'application/json' },
             body: JSON.stringify({
                 listing_id: listingId,
-                changes: changes.map(({ row, newQty }) => ({ platform_listing_id: row.id, new_qty: newQty })),
+                changes: changes.map(({ row, newQty, newPrice }) => ({ platform_listing_id: row.id, new_qty: newQty, new_price: newPrice ?? null })),
                 account_num: state.accountNum,
                 dry_run: false,
             }),
@@ -3857,22 +3873,30 @@ async function pushQtyChangeBatch(listingId, changes) {
         }
         const result = await resp.json();
         const byPlId = Object.fromEntries((result.results || []).map(r => [r.platform_listing_id, r]));
-        return changes.map(({ row, newQty }) => {
+        return changes.map(({ row, newQty, newPrice }) => {
             const r = byPlId[row.id];
             if (!r) return { listingId, plId: row.id, ok: false, detail: 'no result returned for this listing' };
-            return { listingId, plId: row.id, ok: !!r.revised, detail: r.error || `${r.old_qty ?? row.quantity_listed ?? 0} → ${r.new_qty ?? newQty}` };
+            return {
+                listingId, plId: row.id, ok: !!r.revised,
+                detail: r.error || qtyPriceDetail(r.old_qty ?? row.quantity_listed, r.new_qty ?? newQty, r.old_price ?? row.pushed_price, r.new_price ?? newPrice),
+            };
         });
     } catch (err) {
         return changes.map(({ row }) => ({ listingId, plId: row.id, ok: false, detail: err.message }));
     }
 }
 
-// Table markup for one variant's live listings + editable qty inputs.
-// Shared by the single-card and group-level Balance flows.
-function balanceRowsTableHTML(rows, templateNameByListingId) {
+// Table markup for one variant's live listings + editable qty/price
+// inputs. Shared by the single-card and group-level Balance flows.
+// rosterRowIdByPlId (platform_listing_id -> listing_card_assignments.id)
+// is only used to decide whether a price edit here can also be saved as
+// a manual_price pin (see Apply handlers below) — a live variation
+// adopted outside this app's roster has no row to pin to, so its price
+// input is flagged instead of silently pretending it'll stick.
+function balanceRowsTableHTML(rows, templateNameByListingId, rosterRowIdByPlId) {
     return `
         <table style="margin-bottom:10px;">
-            <thead><tr><th>Listing</th><th style="width:90px;">Qty</th></tr></thead>
+            <thead><tr><th>Listing</th><th style="width:90px;">Qty</th><th style="width:90px;">List price</th></tr></thead>
             <tbody>
                 ${rows.map(r => `
                     <tr>
@@ -3881,6 +3905,10 @@ function balanceRowsTableHTML(rows, templateNameByListingId) {
                             <div style="font-size:11px; color:var(--text-secondary);">${escapeHtml(r.listing_id)}${r.account ? ` · ${escapeHtml(r.account)}` : ''}</div>
                         </td>
                         <td><input type="number" min="0" class="lp-balance-qty-input" data-pl-id="${r.id}" value="${r.quantity_listed ?? 0}" style="width:70px;" /></td>
+                        <td><input type="number" step="0.01" min="0.01" class="lp-balance-price-input" data-pl-id="${r.id}"
+                                   value="${r.pushed_price ?? ''}" placeholder="none"
+                                   title="${rosterRowIdByPlId[r.id] ? '' : 'Not on any roster — price pushes live but won’t be pinned'}"
+                                   style="width:80px; ${rosterRowIdByPlId[r.id] ? '' : 'border-color:var(--warning);'}" /></td>
                     </tr>
                 `).join('')}
             </tbody>
@@ -3909,7 +3937,7 @@ async function openBalanceQtyModal(container, body, variantId, cardLabelText, ro
         // and could never receive a fair share back on a later "Evenly
         // split" — 'delisted' is the only status genuinely excluded, since
         // that variation isn't live on eBay at all anymore to revise.
-        supabase.from('platform_listings').select('id, platform, listing_id, account, quantity_listed, external_id, status')
+        supabase.from('platform_listings').select('id, platform, listing_id, account, quantity_listed, pushed_price, external_id, status')
             .eq('variant_id', variantId).in('status', ['active', 'out_of_stock']).order('listing_id'),
     ]);
     if (invErr || plErr) {
@@ -3926,20 +3954,29 @@ async function openBalanceQtyModal(container, body, variantId, cardLabelText, ro
     }
 
     const listingIds = [...new Set(rows.map(r => r.listing_id))];
-    const { data: templates } = await supabase.from('listing_templates').select('listing_id, name').in('listing_id', listingIds);
+    const [{ data: templates }, { data: rosterRows }] = await Promise.all([
+        supabase.from('listing_templates').select('listing_id, name').in('listing_id', listingIds),
+        // Resolves each platform_listings row back to its owning roster row
+        // (if any) so a price edit here can also be saved as that row's
+        // manual_price pin — see the Apply handler below. A live variation
+        // adopted outside this app's roster (importer.ebay_pushprices
+        // .adopt_untracked_live_variations) may have no roster row at all.
+        supabase.from('listing_card_assignments').select('id, platform_listing_id').in('platform_listing_id', rows.map(r => r.id)),
+    ]);
     const templateNameByListingId = Object.fromEntries((templates || []).map(t => [t.listing_id, t.name]));
+    const rosterRowIdByPlId = Object.fromEntries((rosterRows || []).map(r => [r.platform_listing_id, r.id]));
 
     root.querySelector('#lp-balance-loading').remove();
-    renderBalanceQtyBody(root, container, rows, totalInventory, templateNameByListingId, rowId);
+    renderBalanceQtyBody(root, container, rows, totalInventory, templateNameByListingId, rosterRowIdByPlId, rowId);
 }
 
-function renderBalanceQtyBody(root, container, rows, totalInventory, templateNameByListingId, rowId) {
+function renderBalanceQtyBody(root, container, rows, totalInventory, templateNameByListingId, rosterRowIdByPlId, rowId) {
     const bodyEl = root.querySelector('#lp-balance-body');
     bodyEl.innerHTML = `
         <p style="font-size:12px; color:var(--text-secondary); margin:8px 0;">
             Total inventory: <strong>${totalInventory}</strong> — currently split across ${rows.length} live listing(s).
         </p>
-        ${balanceRowsTableHTML(rows, templateNameByListingId)}
+        ${balanceRowsTableHTML(rows, templateNameByListingId, rosterRowIdByPlId)}
         <div id="lp-balance-total-note" style="font-size:12px; margin-bottom:10px;"></div>
         <div id="lp-balance-error" style="color:var(--danger); font-size:12px; margin-bottom:10px;"></div>
         <div id="lp-balance-results" style="font-size:12px; margin-bottom:10px;"></div>
@@ -3990,27 +4027,52 @@ function renderBalanceQtyBody(root, container, rows, totalInventory, templateNam
 
         const changes = rows
             .map(r => {
-                const input = bodyEl.querySelector(`.lp-balance-qty-input[data-pl-id="${r.id}"]`);
-                return { row: r, newQty: parseInt(input.value, 10) || 0 };
+                const qtyInput = bodyEl.querySelector(`.lp-balance-qty-input[data-pl-id="${r.id}"]`);
+                const priceInput = bodyEl.querySelector(`.lp-balance-price-input[data-pl-id="${r.id}"]`);
+                const newQty = parseInt(qtyInput.value, 10) || 0;
+                const priceRaw = priceInput.value.trim();
+                const priceEntered = priceRaw === '' ? null : parseFloat(priceRaw);
+                const qtyChanged = newQty !== (r.quantity_listed ?? 0);
+                const priceChanged = priceEntered !== (r.pushed_price ?? null);
+                return { row: r, newQty, newPrice: priceChanged ? priceEntered : null, qtyChanged, priceChanged };
             })
-            .filter(({ row, newQty }) => newQty !== (row.quantity_listed ?? 0));
+            .filter(({ qtyChanged, priceChanged }) => qtyChanged || priceChanged);
 
         if (!changes.length) {
             errBox.textContent = 'Nothing changed.';
             return;
         }
 
-        const summary = changes.map(({ row, newQty }) =>
-            `${templateNameByListingId[row.listing_id] || row.listing_id}: ${row.quantity_listed ?? 0} → ${newQty}`).join('\n');
-        if (!window.confirm(`This will send live quantity changes to ${changes.length} eBay listing(s):\n\n${summary}\n\nContinue?`)) return;
+        const summary = changes.map(({ row, newQty, newPrice, qtyChanged, priceChanged }) => {
+            const parts = [];
+            if (qtyChanged) parts.push(`qty ${row.quantity_listed ?? 0} → ${newQty}`);
+            if (priceChanged) parts.push(`price ${formatPrice(row.pushed_price)} → ${formatPrice(newPrice)}`);
+            return `${templateNameByListingId[row.listing_id] || row.listing_id}: ${parts.join(', ')}`;
+        }).join('\n');
+        const hasPriceChange = changes.some(c => c.priceChanged);
+        if (!window.confirm(`This will send live ${hasPriceChange ? 'quantity/price' : 'quantity'} changes to ${changes.length} eBay listing(s):\n\n${summary}\n\nContinue?`)) return;
 
         const applyBtn = bodyEl.querySelector('#lp-balance-apply');
         applyBtn.disabled = true;
         applyBtn.textContent = 'Applying...';
 
         const results = [];
-        for (const { row, newQty } of changes) {
-            results.push(await pushQtyChange(row, newQty));
+        for (const { row, newQty, newPrice, priceChanged } of changes) {
+            // Save the pin FIRST so it never disagrees with what actually
+            // goes live — if this fails, skip pushing so the pin and the
+            // live price can't drift apart.
+            if (priceChanged) {
+                const rosterRowId = rosterRowIdByPlId[row.id];
+                if (rosterRowId) {
+                    const { error } = await supabase.from('listing_card_assignments')
+                        .update({ manual_price: newPrice }).eq('id', rosterRowId);
+                    if (error) {
+                        results.push({ listingId: row.listing_id, ok: false, detail: `failed to save price pin: ${error.message}` });
+                        continue;
+                    }
+                }
+            }
+            results.push(await pushQtyChange(row, newQty, priceChanged ? newPrice : null));
         }
 
         resultsBox.innerHTML = results.map(r => `
@@ -4065,7 +4127,7 @@ async function openGroupBalanceQtyModal(container, body, groupId, groupName) {
 
     const [{ data: invRows, error: invErr }, { data: plRows, error: plErr }] = await Promise.all([
         supabase.from('inventory').select('variant_id, quantity, quantity_sold').in('variant_id', variantIds).eq('is_graded', false),
-        supabase.from('platform_listings').select('id, variant_id, platform, listing_id, account, quantity_listed, external_id, status')
+        supabase.from('platform_listings').select('id, variant_id, platform, listing_id, account, quantity_listed, pushed_price, external_id, status')
             .in('variant_id', variantIds).in('status', ['active', 'out_of_stock']).order('listing_id'),
     ]);
     if (invErr || plErr) {
@@ -4093,14 +4155,21 @@ async function openGroupBalanceQtyModal(container, body, groupId, groupName) {
     }
 
     const listingIds = [...new Set(sections.flatMap(s => s.rows.map(r => r.listing_id)))];
-    const { data: templates } = await supabase.from('listing_templates').select('listing_id, name').in('listing_id', listingIds);
+    const allPlIds = sections.flatMap(s => s.rows.map(r => r.id));
+    const [{ data: templates }, { data: rosterRows }] = await Promise.all([
+        supabase.from('listing_templates').select('listing_id, name').in('listing_id', listingIds),
+        // Same purpose as the single-card modal's rosterRowIdByPlId — lets a
+        // price edit here also be saved as that row's manual_price pin.
+        supabase.from('listing_card_assignments').select('id, platform_listing_id').in('platform_listing_id', allPlIds),
+    ]);
     const templateNameByListingId = Object.fromEntries((templates || []).map(t => [t.listing_id, t.name]));
+    const rosterRowIdByPlId = Object.fromEntries((rosterRows || []).map(r => [r.platform_listing_id, r.id]));
 
     root.querySelector('#lp-group-balance-loading').remove();
-    renderGroupBalanceQtyBody(root, container, groupRows, sections, templateNameByListingId);
+    renderGroupBalanceQtyBody(root, container, groupRows, sections, templateNameByListingId, rosterRowIdByPlId);
 }
 
-function renderGroupBalanceQtyBody(root, container, groupRows, sections, templateNameByListingId) {
+function renderGroupBalanceQtyBody(root, container, groupRows, sections, templateNameByListingId, rosterRowIdByPlId) {
     const bodyEl = root.querySelector('#lp-group-balance-body');
 
     const sectionHTML = (s) => `
@@ -4108,7 +4177,7 @@ function renderGroupBalanceQtyBody(root, container, groupRows, sections, templat
             <p style="font-size:13px; margin:0 0 6px;"><strong>${escapeHtml(s.cardLabel)}</strong>
                 <span style="color:var(--text-secondary); font-size:12px;"> — Owned ${s.totalInventory}, Listed ${s.rows.reduce((sum, r) => sum + (r.quantity_listed ?? 0), 0)}</span>
             </p>
-            ${balanceRowsTableHTML(s.rows, templateNameByListingId)}
+            ${balanceRowsTableHTML(s.rows, templateNameByListingId, rosterRowIdByPlId)}
             <div class="lp-group-balance-total-note" style="font-size:12px;"></div>
         </div>
     `;
@@ -4179,10 +4248,16 @@ function renderGroupBalanceQtyBody(root, container, groupRows, sections, templat
             const el = sectionEl(s);
             return s.rows
                 .map(r => {
-                    const input = el.querySelector(`.lp-balance-qty-input[data-pl-id="${r.id}"]`);
-                    return { section: s, row: r, newQty: parseInt(input.value, 10) || 0 };
+                    const qtyInput = el.querySelector(`.lp-balance-qty-input[data-pl-id="${r.id}"]`);
+                    const priceInput = el.querySelector(`.lp-balance-price-input[data-pl-id="${r.id}"]`);
+                    const newQty = parseInt(qtyInput.value, 10) || 0;
+                    const priceRaw = priceInput.value.trim();
+                    const priceEntered = priceRaw === '' ? null : parseFloat(priceRaw);
+                    const qtyChanged = newQty !== (r.quantity_listed ?? 0);
+                    const priceChanged = priceEntered !== (r.pushed_price ?? null);
+                    return { section: s, row: r, newQty, newPrice: priceChanged ? priceEntered : null, qtyChanged, priceChanged };
                 })
-                .filter(({ row, newQty }) => newQty !== (row.quantity_listed ?? 0));
+                .filter(({ qtyChanged, priceChanged }) => qtyChanged || priceChanged);
         });
 
         if (!allChanges.length) {
@@ -4200,18 +4275,37 @@ function renderGroupBalanceQtyBody(root, container, groupRows, sections, templat
         }
 
         const cardCount = new Set(allChanges.map(c => c.section.variantId)).size;
+        const hasPriceChange = allChanges.some(c => c.priceChanged);
         const summary = [...changesByListing.entries()]
             .map(([listingId, changes]) => `${templateNameByListingId[listingId] || listingId}: ${changes.length} card(s) changing`)
             .join('\n');
-        if (!window.confirm(`This will send live quantity changes to ${changesByListing.size} eBay listing(s), covering ${allChanges.length} card change(s) across ${cardCount} card(s):\n\n${summary}\n\nContinue?`)) return;
+        if (!window.confirm(`This will send live ${hasPriceChange ? 'quantity/price' : 'quantity'} changes to ${changesByListing.size} eBay listing(s), covering ${allChanges.length} card change(s) across ${cardCount} card(s):\n\n${summary}\n\nContinue?`)) return;
 
         const confirmBtn = bodyEl.querySelector('#lp-group-balance-confirm');
         confirmBtn.disabled = true;
         confirmBtn.textContent = 'Applying...';
 
+        // Save price pins first (same "pin before push" ordering as the
+        // single-card modal) — a change with no roster row for its
+        // platform_listing_id (adopted/untracked variation) just skips the
+        // pin and still pushes live.
+        const pinFailures = new Set(); // row.id (platform_listing_id) whose pin failed to save
+        for (const change of allChanges) {
+            if (!change.priceChanged) continue;
+            const rosterRowId = rosterRowIdByPlId[change.row.id];
+            if (!rosterRowId) continue;
+            const { error } = await supabase.from('listing_card_assignments')
+                .update({ manual_price: change.newPrice }).eq('id', rosterRowId);
+            if (error) pinFailures.add(change.row.id);
+        }
+
         const allResults = []; // {listingId, plId, ok, detail}
         for (const [listingId, changes] of changesByListing) {
-            allResults.push(...await pushQtyChangeBatch(listingId, changes));
+            const pushable = changes.filter(c => !pinFailures.has(c.row.id));
+            const skipped = changes.filter(c => pinFailures.has(c.row.id))
+                .map(c => ({ listingId, plId: c.row.id, ok: false, detail: 'failed to save price pin — not pushed' }));
+            allResults.push(...skipped);
+            if (pushable.length) allResults.push(...await pushQtyChangeBatch(listingId, pushable));
         }
 
         const resultByPlId = Object.fromEntries(allResults.map(r => [r.plId, r]));
