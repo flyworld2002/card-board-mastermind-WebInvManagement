@@ -114,6 +114,7 @@ let state = {
                               // openTemplate(), works whether or not listing_id is set yet
     accountNum: 1,
     templates: [],           // all listing_templates rows (landing view)
+    restockCounts: new Map(), // template_id -> count of v_restock_candidates rows (landing view)
     template: null,          // the one currently open, or null when on the landing view
     resolvedRows: [],        // resolve_listing_prices() output
     listingRowsByPLId: {},   // platform_listing_id -> platform_listings row (sync_enabled/status/pushed_*/external_id)
@@ -189,7 +190,21 @@ async function renderTemplatesList(container) {
         return;
     }
     state.templates = data || [];
+    await loadRestockCounts();
     renderTemplatesTable(container);
+}
+
+// One row per flagged card (qty 0 live, inventory available to push) —
+// tallied client-side into a template_id -> count map for the landing
+// table's per-row pill. Failure here shouldn't block the templates list
+// from rendering, so it just leaves counts empty on error.
+async function loadRestockCounts() {
+    state.restockCounts = new Map();
+    const { data, error } = await supabase.from('v_restock_candidates').select('template_id');
+    if (error || !data) return;
+    for (const row of data) {
+        state.restockCounts.set(row.template_id, (state.restockCounts.get(row.template_id) || 0) + 1);
+    }
 }
 
 const distinctVals = (key, fallback) =>
@@ -289,7 +304,10 @@ function renderTemplateRows(container) {
                 ${rows.map(t => `
                     <tr class="lp-template-row" data-id="${t.id}" style="cursor:pointer;">
                         <td>${imgHtml(t.nav_image_url)}</td>
-                        <td>${escapeHtml(t.name)}</td>
+                        <td>
+                            ${escapeHtml(t.name)}
+                            ${state.restockCounts.get(t.id) ? `<span class="badge badge-restock" style="margin-left:6px;" title="Cards showing qty 0 live with inventory available to push">${state.restockCounts.get(t.id)}</span>` : ''}
+                        </td>
                         <td>${t.listing_id ? escapeHtml(t.listing_id) : '<span style="color:var(--text-secondary);">(draft — no listing yet)</span>'}</td>
                         <td>${escapeHtml(t.platform)}</td>
                         <td>${t.account ? escapeHtml(t.account) : '<span style="color:var(--text-secondary);">All accounts</span>'}</td>
