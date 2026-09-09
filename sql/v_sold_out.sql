@@ -18,6 +18,10 @@
 -- bucket (9 distinct values) added to cut down the flat table's row
 -- count, which was the actual complaint driving this filter.
 --
+-- image_url is COALESCE(image_url_own, image_url), same pattern as
+-- resolve_listing_prices() -- lets the Sold Out tab show a thumbnail
+-- with zero extra query, card_master is already joined here.
+--
 -- Not applied automatically by anything in this repo -- run manually
 -- against Supabase (see CLAUDE.md's sql/ convention). Source of truth is
 -- the live view; keep this file in sync by hand after any change.
@@ -58,6 +62,7 @@ candidates AS (
     cs.name AS set_name,
     cs.series,
     cm.rarity,
+    COALESCE(cm.image_url_own, cm.image_url) AS image_url,
     COALESCE(inv.total_inventory_qty, 0) AS total_inventory_qty,
     GREATEST(
       COALESCE(inv.total_inventory_qty, 0)
@@ -82,7 +87,7 @@ candidates AS (
 SELECT
   c.assignment_id, c.platform_listing_id, c.listing_id, c.platform, c.account,
   c.template_id, c.template_name, c.variant_id, c.card_name, c.card_number,
-  c.set_id, c.set_name, c.series, c.rarity,
+  c.set_id, c.set_name, c.series, c.rarity, c.image_url,
   c.total_inventory_qty, c.available_qty,
   ls.sale_price AS last_sold_price,
   ls.sold_at AS last_sold_at,

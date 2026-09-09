@@ -14,6 +14,16 @@ function escapeHtml(str) {
     }[c]));
 }
 
+// Same 40x56 thumbnail + lazy-load + broken-image-fallback convention as
+// listing-pricing.js's imgHtml() and issues.js's inline thumb markup.
+function imgHtml(url) {
+    if (!url) return `<div style="width:40px; height:56px; background:var(--bg-tertiary); border-radius:3px; border:1px solid var(--border);"></div>`;
+    return `<img src="${escapeHtml(url)}" alt="" loading="lazy"
+                style="width:40px; height:56px; object-fit:cover; border-radius:3px; border:1px solid var(--border);"
+                onerror="this.replaceWith(Object.assign(document.createElement('div'),
+                    {style:'width:40px;height:56px;background:var(--bg-tertiary);border-radius:3px;border:1px solid var(--border);'}))">`;
+}
+
 function timeAgo(iso) {
     if (!iso) return '';
     const diffMs = Date.now() - new Date(iso).getTime();
@@ -247,6 +257,7 @@ function renderTable(container) {
     wrap.innerHTML = rows.length ? `
         <table>
             <thead><tr>
+                <th>Picture</th>
                 ${SORT_COLUMNS.map(([key, label]) => `
                     <th class="so-sort-th" data-key="${key}" style="cursor:pointer; user-select:none;">${label}${sortArrow(key)}</th>
                 `).join('')}
@@ -254,6 +265,7 @@ function renderTable(container) {
             <tbody>
                 ${rows.map(r => `
                     <tr>
+                        <td>${imgHtml(r.image_url)}</td>
                         <td>${escapeHtml(r.card_number ? `${r.card_number} ${r.card_name}` : r.card_name)}</td>
                         <td>${escapeHtml(r.template_name || '')}</td>
                         <td style="font-variant-numeric:tabular-nums; font-weight:600;">
