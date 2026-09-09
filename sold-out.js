@@ -29,11 +29,12 @@ function timeAgo(iso) {
     return `${years} year${years === 1 ? '' : 's'} ago`;
 }
 
-const PAGE_SIZE = 50;
+const PAGE_SIZES = [50, 100, 200];
 
 let state = {
     rows: [],
     page: 0,
+    pageSize: 50,
     sets: [],        // full card_sets catalog (id, name, series) — Set/Era filters are
                       // data-driven from this, not from whatever's currently sold out,
                       // same convention as catalog.js's loadSetsFilter().
@@ -171,6 +172,11 @@ function renderFilters(container) {
                 </select>
             </label>
             ${rarityFilterHtml()}
+            <select id="so-page-size" style="margin-left:auto;">
+                ${PAGE_SIZES.map(s =>
+                    `<option value="${s}" ${s === state.pageSize ? 'selected' : ''}>${s} per page</option>`
+                ).join('')}
+            </select>
         </div>
     `;
 
@@ -186,6 +192,11 @@ function renderFilters(container) {
     });
     bar.querySelector('#so-filter-set').addEventListener('change', (e) => {
         state.setFilter = e.target.value;
+        state.page = 0;
+        renderTable(container);
+    });
+    bar.querySelector('#so-page-size').addEventListener('change', (e) => {
+        state.pageSize = Number(e.target.value);
         state.page = 0;
         renderTable(container);
     });
@@ -226,9 +237,9 @@ function renderFilters(container) {
 function renderTable(container) {
     const wrap = container.querySelector('#so-table-wrap');
     const allRows = sortRows(filteredRows());
-    const totalPages = Math.max(1, Math.ceil(allRows.length / PAGE_SIZE));
+    const totalPages = Math.max(1, Math.ceil(allRows.length / state.pageSize));
     if (state.page >= totalPages) state.page = totalPages - 1; // e.g. a filter shrank the result set past the current page
-    const rows = allRows.slice(state.page * PAGE_SIZE, state.page * PAGE_SIZE + PAGE_SIZE);
+    const rows = allRows.slice(state.page * state.pageSize, state.page * state.pageSize + state.pageSize);
 
     const sortArrow = (key) => state.sort.key !== key ? ''
         : (state.sort.dir === 'asc' ? ' &#9650;' : ' &#9660;');
@@ -275,13 +286,13 @@ function renderTable(container) {
     renderPagination(container, allRows.length, totalPages);
 }
 
-// Same Previous/Next + "Page X of Y (N rows)" pattern as inventory.js's
-// renderPagination() — capped at 50 rows/page per Fei's request.
+// Same Previous/Next + "Page X of Y (N rows)" + per-page selector pattern
+// as inventory.js's renderPagination()/PAGE_SIZES.
 function renderPagination(container, totalCount, totalPages) {
     const el = container.querySelector('#so-pagination');
     const currentPage = state.page + 1;
 
-    el.innerHTML = totalCount > PAGE_SIZE ? `
+    el.innerHTML = totalCount > state.pageSize ? `
         <button class="btn" id="so-prev" ${state.page === 0 ? 'disabled' : ''}>Previous</button>
         <span>Page ${currentPage} of ${totalPages} (${totalCount.toLocaleString()} rows)</span>
         <button class="btn" id="so-next" ${currentPage >= totalPages ? 'disabled' : ''}>Next</button>
