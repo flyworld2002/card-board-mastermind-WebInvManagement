@@ -31,11 +31,12 @@ function timeAgo(iso) {
 
 let state = {
     rows: [],
-    sets: [],        // full card_sets catalog (id, name) — Set filter is data-driven
-                      // from this, not from whatever's currently sold out, same
-                      // convention as catalog.js's loadSetsFilter().
+    sets: [],        // full card_sets catalog (id, name, series) — Set/Era filters are
+                      // data-driven from this, not from whatever's currently sold out,
+                      // same convention as catalog.js's loadSetsFilter().
     filter: '',
     setFilter: '',    // set_id, or '' for all
+    eraFilter: '',    // card_sets.series ("Era" in the UI), or '' for all
     rarityFilters: new Set(), // rarity strings; empty Set = all rarities
     // Default sort per Fei's spec: most recently sold first.
     sort: { key: 'last_sold_at', dir: 'desc' },
@@ -79,6 +80,7 @@ function filteredRows() {
     const q = state.filter.trim().toLowerCase();
     return state.rows.filter(r => {
         if (state.setFilter && r.set_id !== state.setFilter) return false;
+        if (state.eraFilter && r.series !== state.eraFilter) return false;
         if (state.rarityFilters.size > 0 && !state.rarityFilters.has(r.rarity)) return false;
         if (q && !`${r.card_name} ${r.card_number ?? ''} ${r.template_name ?? ''} ${r.listing_id ?? ''}`
                 .toLowerCase().includes(q)) return false;
@@ -130,7 +132,7 @@ export async function renderSoldOut(container) {
 
     const [soldOutRes, setsRes] = await Promise.all([
         supabase.from('v_sold_out').select('*'),
-        supabase.from('card_sets').select('id, name').order('name'),
+        supabase.from('card_sets').select('id, name, series').order('name'),
     ]);
 
     if (soldOutRes.error) {
@@ -150,6 +152,14 @@ function renderFilters(container) {
         <div class="filters-bar">
             <input type="text" id="so-filter" placeholder="Filter by card or listing..."
                    value="${escapeHtml(state.filter)}" style="min-width:220px;" />
+            <label style="font-size:12px; color:var(--text-secondary);">Era
+                <select id="so-filter-era" style="margin-left:4px;">
+                    <option value="">(all)</option>
+                    ${[...new Set(state.sets.map(s => s.series).filter(Boolean))].sort().map(era =>
+                        `<option value="${escapeHtml(era)}" ${state.eraFilter === era ? 'selected' : ''}>${escapeHtml(era)}</option>`
+                    ).join('')}
+                </select>
+            </label>
             <label style="font-size:12px; color:var(--text-secondary);">Set
                 <select id="so-filter-set" style="margin-left:4px;">
                     <option value="">(all)</option>
@@ -162,6 +172,10 @@ function renderFilters(container) {
 
     bar.querySelector('#so-filter').addEventListener('input', (e) => {
         state.filter = e.target.value;
+        renderTable(container);
+    });
+    bar.querySelector('#so-filter-era').addEventListener('change', (e) => {
+        state.eraFilter = e.target.value;
         renderTable(container);
     });
     bar.querySelector('#so-filter-set').addEventListener('change', (e) => {

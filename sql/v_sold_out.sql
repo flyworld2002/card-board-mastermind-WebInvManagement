@@ -10,10 +10,13 @@
 -- the price + date history this needs already lives in `sales`, written
 -- by record_sale() on every real sale.
 --
--- set_id/set_name/rarity are here so the Sold Out tab (sold-out.js) can
--- filter by them -- deliberately not added to v_restock_candidates, not
--- asked for there. Set filter matches by set_id (not set_name string),
--- same convention as catalog.js's loadSetsFilter().
+-- set_id/set_name/series/rarity are here so the Sold Out tab (sold-out.js)
+-- can filter by them -- deliberately not added to v_restock_candidates,
+-- not asked for there. Set filter matches by set_id (not set_name
+-- string), same convention as catalog.js's loadSetsFilter(). series is
+-- card_sets.series (labeled "Era" in the UI) -- a small-cardinality
+-- bucket (9 distinct values) added to cut down the flat table's row
+-- count, which was the actual complaint driving this filter.
 --
 -- Not applied automatically by anything in this repo -- run manually
 -- against Supabase (see CLAUDE.md's sql/ convention). Source of truth is
@@ -53,6 +56,7 @@ candidates AS (
     cm.card_number,
     cs.id AS set_id,
     cs.name AS set_name,
+    cs.series,
     cm.rarity,
     COALESCE(inv.total_inventory_qty, 0) AS total_inventory_qty,
     GREATEST(
@@ -78,7 +82,7 @@ candidates AS (
 SELECT
   c.assignment_id, c.platform_listing_id, c.listing_id, c.platform, c.account,
   c.template_id, c.template_name, c.variant_id, c.card_name, c.card_number,
-  c.set_id, c.set_name, c.rarity,
+  c.set_id, c.set_name, c.series, c.rarity,
   c.total_inventory_qty, c.available_qty,
   ls.sale_price AS last_sold_price,
   ls.sold_at AS last_sold_at,
