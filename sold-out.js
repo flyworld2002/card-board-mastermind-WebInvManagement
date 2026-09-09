@@ -31,8 +31,11 @@ function timeAgo(iso) {
 
 let state = {
     rows: [],
+    sets: [],        // full card_sets catalog (id, name) — Set filter is data-driven
+                      // from this, not from whatever's currently sold out, same
+                      // convention as catalog.js's loadSetsFilter().
     filter: '',
-    setFilter: '',
+    setFilter: '',    // set_id, or '' for all
     rarityFilter: '',
     // Default sort per Fei's spec: most recently sold first.
     sort: { key: 'last_sold_at', dir: 'desc' },
@@ -75,7 +78,7 @@ function sortRows(rows) {
 function filteredRows() {
     const q = state.filter.trim().toLowerCase();
     return state.rows.filter(r => {
-        if (state.setFilter && r.set_name !== state.setFilter) return false;
+        if (state.setFilter && r.set_id !== state.setFilter) return false;
         if (state.rarityFilter && r.rarity !== state.rarityFilter) return false;
         if (q && !`${r.card_name} ${r.card_number ?? ''} ${r.template_name ?? ''} ${r.listing_id ?? ''}`
                 .toLowerCase().includes(q)) return false;
@@ -105,13 +108,18 @@ export async function renderSoldOut(container) {
         <div id="so-table-wrap"><p>Loading...</p></div>
     `;
 
-    const { data, error } = await supabase.from('v_sold_out').select('*');
-    if (error) {
+    const [soldOutRes, setsRes] = await Promise.all([
+        supabase.from('v_sold_out').select('*'),
+        supabase.from('card_sets').select('id, name').order('name'),
+    ]);
+
+    if (soldOutRes.error) {
         container.querySelector('#so-table-wrap').innerHTML =
-            `<p style="color:var(--danger)">Failed to load sold-out cards: ${escapeHtml(error.message)}</p>`;
+            `<p style="color:var(--danger)">Failed to load sold-out cards: ${escapeHtml(soldOutRes.error.message)}</p>`;
         return;
     }
-    state.rows = data || [];
+    state.rows = soldOutRes.data || [];
+    state.sets = setsRes.data || [];
     renderFilters(container);
     renderTable(container);
 }
@@ -122,7 +130,12 @@ function renderFilters(container) {
         <div class="filters-bar">
             <input type="text" id="so-filter" placeholder="Filter by card or listing..."
                    value="${escapeHtml(state.filter)}" style="min-width:220px;" />
-            ${filterSelect('so-filter-set', 'Set', state.setFilter, distinctVals('set_name'))}
+            <label style="font-size:12px; color:var(--text-secondary);">Set
+                <select id="so-filter-set" style="margin-left:4px;">
+                    <option value="">(all)</option>
+                    ${state.sets.map(s => `<option value="${s.id}" ${state.setFilter === s.id ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}
+                </select>
+            </label>
             ${filterSelect('so-filter-rarity', 'Rarity', state.rarityFilter, distinctVals('rarity'))}
         </div>
     `;
