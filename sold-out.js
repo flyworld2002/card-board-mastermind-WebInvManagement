@@ -36,7 +36,7 @@ let state = {
                       // convention as catalog.js's loadSetsFilter().
     filter: '',
     setFilter: '',    // set_id, or '' for all
-    rarityFilter: '',
+    rarityFilters: new Set(), // rarity strings; empty Set = all rarities
     // Default sort per Fei's spec: most recently sold first.
     sort: { key: 'last_sold_at', dir: 'desc' },
 };
@@ -79,21 +79,36 @@ function filteredRows() {
     const q = state.filter.trim().toLowerCase();
     return state.rows.filter(r => {
         if (state.setFilter && r.set_id !== state.setFilter) return false;
-        if (state.rarityFilter && r.rarity !== state.rarityFilter) return false;
+        if (state.rarityFilters.size > 0 && !state.rarityFilters.has(r.rarity)) return false;
         if (q && !`${r.card_name} ${r.card_number ?? ''} ${r.template_name ?? ''} ${r.listing_id ?? ''}`
                 .toLowerCase().includes(q)) return false;
         return true;
     });
 }
 
-function filterSelect(id, label, current, options) {
+// Multi-select checkbox dropdown for Rarity. Uses a native <details> so
+// open/closed state lives in the DOM itself (no JS state, no document-level
+// click listener to leak across page navigations) -- checkbox changes only
+// patch the summary label and re-render the table, never the filter bar
+// itself, so the <details> element's own open state is never disturbed.
+function rarityFilterHtml() {
+    const rarities = distinctVals('rarity');
+    const label = state.rarityFilters.size > 0 ? `Rarity (${state.rarityFilters.size})` : 'Rarity (all)';
     return `
-        <label style="font-size:12px; color:var(--text-secondary);">${label}
-            <select id="${id}" style="margin-left:4px;">
-                <option value="">(all)</option>
-                ${options.map(o => `<option value="${escapeHtml(o)}" ${current === o ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('')}
-            </select>
-        </label>
+        <details id="so-rarity-details" style="display:inline-block; position:relative; font-size:12px;">
+            <summary class="btn" id="so-rarity-summary" style="display:inline-block; cursor:pointer;">${label}</summary>
+            <div style="position:absolute; top:calc(100% + 4px); left:0; z-index:20; background:var(--bg-secondary);
+                        border:1px solid var(--border); border-radius:6px; padding:8px; min-width:210px;
+                        max-height:260px; overflow-y:auto; box-shadow:0 8px 24px rgba(0,0,0,0.3);">
+                <button type="button" class="btn" id="so-rarity-clear" style="padding:2px 8px; font-size:11px; margin-bottom:6px;">Clear</button>
+                ${rarities.map(r => `
+                    <label style="display:flex; align-items:center; gap:6px; font-size:13px; padding:3px 0; cursor:pointer; color:var(--text);">
+                        <input type="checkbox" class="so-rarity-check" value="${escapeHtml(r)}" ${state.rarityFilters.has(r) ? 'checked' : ''} />
+                        ${escapeHtml(r)}
+                    </label>
+                `).join('')}
+            </div>
+        </details>
     `;
 }
 
@@ -136,7 +151,7 @@ function renderFilters(container) {
                     ${state.sets.map(s => `<option value="${s.id}" ${state.setFilter === s.id ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('')}
                 </select>
             </label>
-            ${filterSelect('so-filter-rarity', 'Rarity', state.rarityFilter, distinctVals('rarity'))}
+            ${rarityFilterHtml()}
         </div>
     `;
 
@@ -148,8 +163,24 @@ function renderFilters(container) {
         state.setFilter = e.target.value;
         renderTable(container);
     });
-    bar.querySelector('#so-filter-rarity').addEventListener('change', (e) => {
-        state.rarityFilter = e.target.value;
+
+    const updateRaritySummary = () => {
+        const summary = bar.querySelector('#so-rarity-summary');
+        if (summary) summary.textContent = state.rarityFilters.size > 0 ? `Rarity (${state.rarityFilters.size})` : 'Rarity (all)';
+    };
+
+    bar.querySelectorAll('.so-rarity-check').forEach(cb => {
+        cb.addEventListener('change', (e) => {
+            if (e.target.checked) state.rarityFilters.add(e.target.value);
+            else state.rarityFilters.delete(e.target.value);
+            updateRaritySummary();
+            renderTable(container);
+        });
+    });
+    bar.querySelector('#so-rarity-clear').addEventListener('click', () => {
+        state.rarityFilters.clear();
+        bar.querySelectorAll('.so-rarity-check').forEach(cb => { cb.checked = false; });
+        updateRaritySummary();
         renderTable(container);
     });
 }
