@@ -29,8 +29,11 @@ function timeAgo(iso) {
     return `${years} year${years === 1 ? '' : 's'} ago`;
 }
 
+const PAGE_SIZE = 50;
+
 let state = {
     rows: [],
+    page: 0,
     sets: [],        // full card_sets catalog (id, name, series) — Set/Era filters are
                       // data-driven from this, not from whatever's currently sold out,
                       // same convention as catalog.js's loadSetsFilter().
@@ -128,6 +131,7 @@ export async function renderSoldOut(container) {
         </p>
         <div id="so-filters"></div>
         <div id="so-table-wrap"><p>Loading...</p></div>
+        <div class="pagination" id="so-pagination"></div>
     `;
 
     const [soldOutRes, setsRes] = await Promise.all([
@@ -172,14 +176,17 @@ function renderFilters(container) {
 
     bar.querySelector('#so-filter').addEventListener('input', (e) => {
         state.filter = e.target.value;
+        state.page = 0;
         renderTable(container);
     });
     bar.querySelector('#so-filter-era').addEventListener('change', (e) => {
         state.eraFilter = e.target.value;
+        state.page = 0;
         renderTable(container);
     });
     bar.querySelector('#so-filter-set').addEventListener('change', (e) => {
         state.setFilter = e.target.value;
+        state.page = 0;
         renderTable(container);
     });
 
@@ -193,6 +200,7 @@ function renderFilters(container) {
             if (e.target.checked) state.rarityFilters.add(e.target.value);
             else state.rarityFilters.delete(e.target.value);
             updateRaritySummary();
+            state.page = 0;
             renderTable(container);
         });
     });
@@ -200,6 +208,7 @@ function renderFilters(container) {
         state.rarityFilters.clear();
         bar.querySelectorAll('.so-rarity-check').forEach(cb => { cb.checked = false; });
         updateRaritySummary();
+        state.page = 0;
         renderTable(container);
     });
 
@@ -216,7 +225,10 @@ function renderFilters(container) {
 
 function renderTable(container) {
     const wrap = container.querySelector('#so-table-wrap');
-    const rows = sortRows(filteredRows());
+    const allRows = sortRows(filteredRows());
+    const totalPages = Math.max(1, Math.ceil(allRows.length / PAGE_SIZE));
+    if (state.page >= totalPages) state.page = totalPages - 1; // e.g. a filter shrank the result set past the current page
+    const rows = allRows.slice(state.page * PAGE_SIZE, state.page * PAGE_SIZE + PAGE_SIZE);
 
     const sortArrow = (key) => state.sort.key !== key ? ''
         : (state.sort.dir === 'asc' ? ' &#9650;' : ' &#9660;');
@@ -258,5 +270,27 @@ function renderTable(container) {
             }
             renderTable(container);
         });
+    });
+
+    renderPagination(container, allRows.length, totalPages);
+}
+
+// Same Previous/Next + "Page X of Y (N rows)" pattern as inventory.js's
+// renderPagination() — capped at 50 rows/page per Fei's request.
+function renderPagination(container, totalCount, totalPages) {
+    const el = container.querySelector('#so-pagination');
+    const currentPage = state.page + 1;
+
+    el.innerHTML = totalCount > PAGE_SIZE ? `
+        <button class="btn" id="so-prev" ${state.page === 0 ? 'disabled' : ''}>Previous</button>
+        <span>Page ${currentPage} of ${totalPages} (${totalCount.toLocaleString()} rows)</span>
+        <button class="btn" id="so-next" ${currentPage >= totalPages ? 'disabled' : ''}>Next</button>
+    ` : '';
+
+    el.querySelector('#so-prev')?.addEventListener('click', () => {
+        if (state.page > 0) { state.page -= 1; renderTable(container); }
+    });
+    el.querySelector('#so-next')?.addEventListener('click', () => {
+        state.page += 1; renderTable(container);
     });
 }
