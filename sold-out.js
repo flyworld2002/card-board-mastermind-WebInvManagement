@@ -99,10 +99,15 @@ function rarityFilterHtml() {
             <summary class="btn" id="so-rarity-summary" style="display:inline-block; cursor:pointer;">${label}</summary>
             <div style="position:absolute; top:calc(100% + 4px); left:0; z-index:20; background:var(--bg-secondary);
                         border:1px solid var(--border); border-radius:6px; padding:8px; min-width:210px;
-                        max-height:260px; overflow-y:auto; box-shadow:0 8px 24px rgba(0,0,0,0.3);">
-                <button type="button" class="btn" id="so-rarity-clear" style="padding:2px 8px; font-size:11px; margin-bottom:6px;">Clear</button>
+                        max-height:300px; overflow-y:auto; box-shadow:0 8px 24px rgba(0,0,0,0.3);">
+                <div style="display:flex; gap:6px; margin-bottom:6px;">
+                    <input type="text" id="so-rarity-search" placeholder="Search..." autocomplete="off"
+                           style="flex:1; padding:3px 6px; font-size:12px;" />
+                    <button type="button" class="btn" id="so-rarity-clear" style="padding:2px 8px; font-size:11px; flex-shrink:0;">Clear</button>
+                </div>
                 ${rarities.map(r => `
-                    <label style="display:flex; align-items:center; gap:6px; font-size:13px; padding:3px 0; cursor:pointer; color:var(--text);">
+                    <label class="so-rarity-row" data-search="${escapeHtml(r.toLowerCase())}"
+                           style="display:flex; align-items:center; gap:6px; font-size:13px; padding:3px 0; cursor:pointer; color:var(--text);">
                         <input type="checkbox" class="so-rarity-check" value="${escapeHtml(r)}" ${state.rarityFilters.has(r) ? 'checked' : ''} />
                         ${escapeHtml(r)}
                     </label>
@@ -182,6 +187,16 @@ function renderFilters(container) {
         bar.querySelectorAll('.so-rarity-check').forEach(cb => { cb.checked = false; });
         updateRaritySummary();
         renderTable(container);
+    });
+
+    // Narrows the checkbox list in place -- only hides non-matching rows,
+    // never touches their checked state, so searching doesn't lose a
+    // selection that scrolls out of view.
+    bar.querySelector('#so-rarity-search').addEventListener('input', (e) => {
+        const q = e.target.value.trim().toLowerCase();
+        bar.querySelectorAll('.so-rarity-row').forEach(row => {
+            row.style.display = row.dataset.search.includes(q) ? 'flex' : 'none';
+        });
     });
 }
 
