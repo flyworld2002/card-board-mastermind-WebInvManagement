@@ -29,7 +29,7 @@ function timeAgo(iso) {
     return `${years} year${years === 1 ? '' : 's'} ago`;
 }
 
-const PAGE_SIZES = [50, 100, 200];
+const PAGE_SIZES = [25, 50, 100, 200];
 
 let state = {
     rows: [],
