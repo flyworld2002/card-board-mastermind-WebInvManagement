@@ -1910,8 +1910,28 @@ async function resolveStagingMatch(container, td, row, option) {
         return;
     }
 
-    row.card_id = option.id;
-    row.match_status = 'matched';
+    // Re-fetch this row's matched_card_name/matched_set_name/matched_number
+    // from v_staging rather than hand-patching card_id/match_status only --
+    // those three are LEFT JOINed off card_id (sql/v_staging_update.sql) and
+    // are what the "Matched:" banner and hasNumberMismatch() actually
+    // render from. Patching just card_id left them stale, so the banner
+    // kept showing the old wrong match even though card_id was already
+    // fixed underneath.
+    const { data: fresh, error: refetchError } = await supabase
+        .from('v_staging')
+        .select('*')
+        .eq('staging_id', row.staging_id)
+        .maybeSingle();
+
+    if (refetchError || !fresh) {
+        // The write above already succeeded -- this only affects whether
+        // the banner shows the fix immediately, so fall back to patching
+        // card_id/match_status rather than losing the update entirely.
+        row.card_id = option.id;
+        row.match_status = 'matched';
+    } else {
+        Object.assign(row, fresh);
+    }
 
     showRowMessage(td, 'Match resolved. You can now push to inventory.', 'success');
     renderTable(container);
