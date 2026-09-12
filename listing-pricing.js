@@ -2497,6 +2497,31 @@ function tierPriceLabel(t) {
     return `market × ${t.multiplier}${plusPart}`;
 }
 
+// Ensures every tier's max_market is exactly the next tier's min_market
+// (or null for the highest tier), after any add/edit/delete -- since the
+// form only ever collects "From" (min_market) now, this is what keeps
+// the two columns from drifting apart the way the 54-gap bug happened
+// (found 2026-09-12: tiers hand-entered with e.g. max=$0.15 next to
+// min=$0.16, leaving the exact value $0.15 matching no tier at all).
+// Safe to call after any write: only ever shrinks a boundary to meet an
+// existing neighbor exactly, never creates a new overlap, so it can't
+// trip check_pricing_tier_no_overlap.
+async function recomputeTierBoundaries(profileId) {
+    const { data: tiers, error } = await supabase
+        .from('pricing_profile_tiers')
+        .select('id, min_market, max_market')
+        .eq('profile_id', profileId)
+        .order('min_market');
+    if (error || !tiers) return;
+
+    for (let i = 0; i < tiers.length; i++) {
+        const correctMax = i < tiers.length - 1 ? tiers[i + 1].min_market : null;
+        if (tiers[i].max_market !== correctMax) {
+            await supabase.from('pricing_profile_tiers').update({ max_market: correctMax }).eq('id', tiers[i].id);
+        }
+    }
+}
+
 async function openEditTiersModal(container, body, profileId, editingTierId = null) {
     const root = body.querySelector('#lp-modal-root');
     const [{ data: profile }, { data: tiers }] = await Promise.all([
@@ -2514,16 +2539,15 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
             <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:460px; max-width:90vw; max-height:85vh; overflow-y:auto;">
                 <h3 style="margin:0 0 4px;">Tiers — ${escapeHtml(profile.name)}</h3>
                 <p style="color:var(--text-secondary); font-size:12px; margin:0 0 14px;">
-                    Market price brackets: min is inclusive, max is exclusive (blank max = open-ended top tier).
+                    Each tier applies from its own price until the next tier's "From" begins. The highest tier is open-ended automatically.
                 </p>
                 ${(tiers || []).length ? `
                     <table style="margin-bottom:12px;">
-                        <thead><tr><th>Min market</th><th>Max market</th><th>Price</th><th style="width:110px;"></th></tr></thead>
+                        <thead><tr><th>From</th><th>Price</th><th style="width:110px;"></th></tr></thead>
                         <tbody>
                             ${tiers.map(t => `
                                 <tr>
                                     <td>${formatPrice(t.min_market)}</td>
-                                    <td>${t.max_market == null ? '(open-ended)' : formatPrice(t.max_market)}</td>
                                     <td>${tierPriceLabel(t)}</td>
                                     <td>
                                         <button type="button" class="btn lp-edit-tier-row-btn" data-id="${t.id}" style="padding:2px 8px; font-size:12px;">Edit</button>
@@ -2537,14 +2561,9 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
 
                 ${isFormOpen ? `
                     <form id="lp-tier-form" style="border-top:1px solid var(--border); padding-top:12px; display:flex; flex-direction:column; gap:10px;">
-                        <div style="display:flex; gap:10px;">
-                            <label style="font-size:12px; color:var(--text-secondary); flex:1;">Min market ($, inclusive)
-                                <input type="number" step="0.01" name="min_market" value="${editingTier?.min_market ?? '0.00'}" style="width:100%; margin-top:4px;" />
-                            </label>
-                            <label style="font-size:12px; color:var(--text-secondary); flex:1;">Max market ($, blank=open-ended)
-                                <input type="number" step="0.01" name="max_market" value="${editingTier?.max_market ?? ''}" style="width:100%; margin-top:4px;" />
-                            </label>
-                        </div>
+                        <label style="font-size:12px; color:var(--text-secondary);">From ($) — applies until the next tier's "From" begins
+                            <input type="number" step="0.01" name="min_market" value="${editingTier?.min_market ?? '0.00'}" style="width:100%; margin-top:4px;" />
+                        </label>
                         <label style="font-size:12px; color:var(--text-secondary);">Pricing
                             <select id="lp-tier-pricing-mode" name="pricing_mode" style="width:100%; margin-top:4px;">
                                 <option value="flat" ${tierMode === 'flat' ? 'selected' : ''}>Flat price</option>
@@ -2594,6 +2613,7 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
                 if (!window.confirm('Delete this tier?')) return;
                 const { error } = await supabase.from('pricing_profile_tiers').delete().eq('id', btn.dataset.id);
                 if (error) { window.alert(`Failed to delete: ${error.message}`); return; }
+                await recomputeTierBoundaries(profileId);
                 await openEditTiersModal(container, body, profileId);
             });
         });
@@ -2621,10 +2641,32 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
             errBox.textContent = 'Multiplier is required for a formula tier.';
             return;
         }
+        const newMin = parseFloat(fd.get('min_market'));
+
+        // The form only collects "From" now -- derive this tier's max_market
+        // (the next sibling's "From", or open-ended) instead of asking for it.
+        // The immediate predecessor also needs shrinking to meet this tier's
+        // new start BEFORE this row is written, or the no-overlap trigger
+        // rejects the write (a transient overlap against the predecessor's
+        // still-too-wide old range) -- see recomputeTierBoundaries() below,
+        // same reasoning.
+        const siblings = (tiers || []).filter(t => t.id !== editingTierId);
+        const next = siblings.filter(t => t.min_market > newMin).sort((a, b) => a.min_market - b.min_market)[0];
+        const prev = siblings.filter(t => t.min_market < newMin).sort((a, b) => b.min_market - a.min_market)[0];
+        const newMax = next ? next.min_market : null;
+
+        if (prev && prev.max_market !== newMin) {
+            const { error: prevErr } = await supabase.from('pricing_profile_tiers').update({ max_market: newMin }).eq('id', prev.id);
+            if (prevErr) {
+                errBox.textContent = `Failed to adjust the tier below: ${prevErr.message}`;
+                return;
+            }
+        }
+
         const payload = {
             profile_id: profileId,
-            min_market: parseFloat(fd.get('min_market')),
-            max_market: fd.get('max_market') ? parseFloat(fd.get('max_market')) : null,
+            min_market: newMin,
+            max_market: newMax,
             list_price: mode === 'flat' ? parseFloat(fd.get('list_price')) : null,
             multiplier: mode === 'formula' ? parseFloat(fd.get('multiplier')) : null,
             plus: mode === 'formula' && fd.get('plus') ? parseFloat(fd.get('plus')) : null,
@@ -2637,6 +2679,7 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
             errBox.textContent = error.message || 'Failed to save tier.';
             return;
         }
+        await recomputeTierBoundaries(profileId);
         await openEditTiersModal(container, body, profileId);
     });
 }
