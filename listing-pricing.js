@@ -134,14 +134,31 @@ let lastClickedCheckboxIndex = null;
 export async function renderListingPricing(container) {
     container.innerHTML = shellHTML();
     setupImagePreview(container);
+    container.querySelector('#lp-refresh-btn').addEventListener('click', () => refreshCurrentView(container));
     const { data } = await supabase.from('pricing_profiles').select('*').order('name');
     state.profiles = data || [];
     await renderTemplatesList(container);
 }
 
+// Re-runs whichever load path produced whatever's currently in #lp-body,
+// without navigating away first — added because Postgres statement
+// timeouts on resolve_listing_prices() occasionally leave the roster view
+// stuck on "Failed to load listing", and going back to the templates list
+// just to reopen the same template was the only prior recovery path.
+async function refreshCurrentView(container) {
+    if (state.templateId) {
+        await loadListing(container);
+    } else {
+        await renderTemplatesList(container);
+    }
+}
+
 function shellHTML() {
     return `
-        <h2 style="margin:0 0 4px;">Listing pricing</h2>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 4px;">
+            <h2 style="margin:0;">Listing pricing</h2>
+            <button id="lp-refresh-btn" class="btn" type="button">Refresh</button>
+        </div>
         <p style="color:var(--text-secondary); font-size:13px; margin:0 0 16px;">
             docs/plans/listing-pricing-system.md — a template IS the listing;
             cards belong to it via an explicit roster, grouped however you like.
