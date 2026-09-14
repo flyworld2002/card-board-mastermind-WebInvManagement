@@ -1049,7 +1049,7 @@ function renderProfilesTable(container) {
         wrap.innerHTML = `
             <table>
                 <thead><tr>
-                    <th>Name</th><th>Tiers</th><th>Default low-stock qty</th><th>Notes</th><th style="width:140px;"></th>
+                    <th>Name</th><th>Tiers</th><th>Default low-stock qty</th><th>Rounding</th><th>Notes</th><th style="width:140px;"></th>
                 </tr></thead>
                 <tbody>
                     ${rows.map(p => `
@@ -1057,6 +1057,7 @@ function renderProfilesTable(container) {
                             <td>${escapeHTML(p.name)}</td>
                             <td style="font-size:12px; color:var(--text-secondary);">${tiersSummary(p.tiers)}</td>
                             <td>${p.default_low_stock_qty ?? '-'}</td>
+                            <td style="font-size:12px; color:var(--text-secondary);">${p.round_to === 'none' ? 'exact' : '$.99'}</td>
                             <td style="color:var(--text-secondary);">${escapeHTML(p.notes || '-')}</td>
                             <td>
                                 <button class="btn edit-profile-btn" data-id="${p.id}">Edit</button>
@@ -1082,7 +1083,7 @@ function renderProfilesTable(container) {
     });
 }
 
-// Copies name/notes/default_low_stock_qty AND every tier — unlike
+// Copies every profile-level setting AND every tier — unlike
 // duplicating a listing template (config only, roster stays empty),
 // tiers ARE the profile's actual pricing rules: a duplicate with none
 // would just fall back to the market*2+1 default and be useless as a
@@ -1101,6 +1102,8 @@ async function duplicateProfile(container, profileId) {
             name: copyName,
             notes: source.notes,
             default_low_stock_qty: source.default_low_stock_qty,
+            default_quantity_limit: source.default_quantity_limit,
+            round_to: source.round_to,
         }).select().single();
         if (insErr) throw insErr;
 
@@ -1135,6 +1138,7 @@ function openProfileModal(container, profileId) {
             ${field('Notes', 'text', 'notes', existing?.notes || '', '', '', true)}
             ${field('Default low-stock qty', 'number', 'default_low_stock_qty', existing?.default_low_stock_qty ?? '', 'holds back this many units from being pushed', '', true)}
             ${field('Default quantity limit', 'number', 'default_quantity_limit', existing?.default_quantity_limit ?? '', "falls back to the listing's default, then 24, if blank", '', true)}
+            ${roundingField(existing?.round_to)}
         </div>
         ${!isEdit ? '<p style="color:var(--text-secondary); font-size:12px; margin-top:10px;">Add tiers after creating the profile, via the "Tiers" button.</p>' : ''}
     `, isEdit, 'profile');
@@ -1156,6 +1160,7 @@ function openProfileModal(container, profileId) {
             notes: fd.get('notes').trim() || null,
             default_low_stock_qty: fd.get('default_low_stock_qty') ? parseInt(fd.get('default_low_stock_qty'), 10) : null,
             default_quantity_limit: fd.get('default_quantity_limit') ? parseInt(fd.get('default_quantity_limit'), 10) : null,
+            round_to: fd.get('round_to') || 'up_99',
         };
         try {
             const { error } = isEdit
@@ -2112,6 +2117,35 @@ function modalShell(title, bodyHTML, isEdit, formName) {
                 </form>
             </div>
         </div>
+    `;
+}
+
+// Rounding applies ONLY to formula tiers (market x multiplier + plus) --
+// flat list_price tiers are exact values set by hand and are never
+// rounded. Always rounds UP, never down, so a rounded price can't dip
+// below what the formula actually computed. Defaults to 'up_99' to match
+// the column default (see the per_profile_price_rounding migration:
+// .99 was already the live account-wide behavior before this became a
+// per-profile choice, so existing profiles keep it unless changed).
+// Radio rather than a checkbox even with only two options today, so
+// adding 'up_95'/'up_dollar' later is a one-line change here.
+const ROUNDING_OPTIONS = [
+    ['none', 'None — use the exact formula result'],
+    ['up_99', 'Round up to the nearest $.99'],
+];
+
+function roundingField(current) {
+    const selected = current || 'up_99';
+    return `
+        <fieldset style="border:1px solid var(--border); border-radius:6px; padding:8px 10px; margin:0;">
+            <legend style="font-size:12px; color:var(--text-secondary); padding:0 4px;">Formula-tier rounding</legend>
+            ${ROUNDING_OPTIONS.map(([val, label]) => `
+                <label style="display:flex; align-items:center; gap:6px; font-size:13px; padding:2px 0; cursor:pointer;">
+                    <input type="radio" name="round_to" value="${val}" ${selected === val ? 'checked' : ''} />
+                    ${label}
+                </label>
+            `).join('')}
+        </fieldset>
     `;
 }
 

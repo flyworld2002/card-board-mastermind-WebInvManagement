@@ -2497,6 +2497,14 @@ function tierPriceLabel(t) {
     return `market × ${t.multiplier}${plusPart}`;
 }
 
+// Mirrors configuration.js's ROUNDING_OPTIONS — same duplication
+// convention already used for openNewProfileModal vs. Configuration's
+// "New pricing profile" modal. Keep the two in sync if a mode is added.
+const LP_ROUNDING_OPTIONS = [
+    ['none', 'None — use the exact formula result'],
+    ['up_99', 'Round up to the nearest $.99'],
+];
+
 // Ensures every tier's max_market is exactly the next tier's min_market
 // (or null for the highest tier), after any add/edit/delete -- since the
 // form only ever collects "From" (min_market) now, this is what keeps
@@ -2538,9 +2546,38 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
         <div style="position:fixed; inset:0; background:rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index:100;">
             <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:20px; width:460px; max-width:90vw; max-height:85vh; overflow-y:auto;">
                 <h3 style="margin:0 0 4px;">Tiers — ${escapeHtml(profile.name)}</h3>
-                <p style="color:var(--text-secondary); font-size:12px; margin:0 0 14px;">
+                <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
                     Each tier applies from its own price until the next tier's "From" begins. The highest tier is open-ended automatically.
                 </p>
+
+                <details id="lp-profile-settings" style="border:1px solid var(--border); border-radius:6px; padding:8px 10px; margin-bottom:14px;">
+                    <summary style="font-size:12px; color:var(--text-secondary); cursor:pointer;">Profile settings — quantity limit, low stock, rounding</summary>
+                    <div style="display:flex; flex-direction:column; gap:10px; margin-top:10px;">
+                        <div style="display:flex; gap:10px;">
+                            <label style="font-size:12px; color:var(--text-secondary); flex:1;">Default quantity limit
+                                <input type="number" id="lp-profile-qty-limit" value="${profile.default_quantity_limit ?? ''}"
+                                       placeholder="falls back to the listing's default, then 24" style="width:100%; margin-top:4px;" />
+                            </label>
+                            <label style="font-size:12px; color:var(--text-secondary); flex:1;">Default low-stock qty
+                                <input type="number" id="lp-profile-low-stock" value="${profile.default_low_stock_qty ?? ''}"
+                                       placeholder="holds back this many units" style="width:100%; margin-top:4px;" />
+                            </label>
+                        </div>
+                        <fieldset style="border:1px solid var(--border); border-radius:6px; padding:8px 10px; margin:0;">
+                            <legend style="font-size:12px; color:var(--text-secondary); padding:0 4px;">Formula-tier rounding</legend>
+                            ${LP_ROUNDING_OPTIONS.map(([val, label]) => `
+                                <label style="display:flex; align-items:center; gap:6px; font-size:13px; padding:2px 0; cursor:pointer; color:var(--text);">
+                                    <input type="radio" name="lp-round-to" value="${val}" ${(profile.round_to || 'up_99') === val ? 'checked' : ''} />
+                                    ${label}
+                                </label>
+                            `).join('')}
+                        </fieldset>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <button type="button" class="btn btn-primary" id="lp-save-profile-settings" style="font-size:12px;">Save profile settings</button>
+                            <span id="lp-profile-settings-msg" style="font-size:12px;"></span>
+                        </div>
+                    </div>
+                </details>
                 ${(tiers || []).length ? `
                     <table style="margin-bottom:12px;">
                         <thead><tr><th>From</th><th>Price</th><th style="width:110px;"></th></tr></thead>
@@ -2601,6 +2638,21 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
     root.querySelector('#lp-tiers-modal-close').addEventListener('click', async () => {
         root.innerHTML = '';
         await loadListing(container);
+    });
+
+    // Profile-level settings save — independent of the tier form below, so
+    // it stays available whether or not a tier is being edited.
+    root.querySelector('#lp-save-profile-settings').addEventListener('click', async () => {
+        const msgEl = root.querySelector('#lp-profile-settings-msg');
+        const qtyRaw = root.querySelector('#lp-profile-qty-limit').value;
+        const lowRaw = root.querySelector('#lp-profile-low-stock').value;
+        const { error } = await supabase.from('pricing_profiles').update({
+            default_quantity_limit: qtyRaw ? parseInt(qtyRaw, 10) : null,
+            default_low_stock_qty: lowRaw ? parseInt(lowRaw, 10) : null,
+            round_to: root.querySelector('input[name="lp-round-to"]:checked')?.value || 'up_99',
+        }).eq('id', profileId);
+        msgEl.style.color = error ? 'var(--danger)' : 'var(--success)';
+        msgEl.textContent = error ? `Failed: ${error.message}` : 'Saved.';
     });
 
     if (!isFormOpen) {
