@@ -444,6 +444,7 @@ function openTemplateModal(container, templateId, duplicateFromId = null) {
                                 <option value="alpha" ${existing?.display_sort === 'alpha' ? 'selected' : ''}>alpha</option>
                                 <option value="release_date" ${existing?.display_sort === 'release_date' ? 'selected' : ''}>release_date (by set release year)</option>
                                 <option value="rarity" ${existing?.display_sort === 'rarity' ? 'selected' : ''}>rarity (common &rarr; rare)</option>
+                                <option value="manual" ${existing?.display_sort === 'manual' ? 'selected' : ''}>manual (by each row's priority_rank)</option>
                             </select>
                         </label>
                         ${f('Name format', 'text', 'name_format', existing?.name_format || '{number}/{base_set_number} {name} {suffix}', '', '', true)}
