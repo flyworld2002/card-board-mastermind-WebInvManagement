@@ -460,10 +460,17 @@ function renderTable(container) {
     const selectedOnPage = selectableRows.filter(r => state.selectedIds.has(r.staging_id));
     const allSelected = selectableRows.length > 0 && selectedOnPage.length === selectableRows.length;
 
+    // Selection can include rows on other pages (see autoMatchSelected),
+    // but quantity is only known for rows currently loaded on this page --
+    // sum what we have and flag if the count doesn't cover every selected id.
+    const selectedRowsWithQty = state.rows.filter(r => state.selectedIds.has(r.staging_id));
+    const selectedQty = selectedRowsWithQty.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0);
+    const offPageSelected = state.selectedIds.size - selectedRowsWithQty.length;
+
     wrap.innerHTML = `
         <div class="batch-actions-bar" style="display:flex; align-items:center; gap:12px; margin-bottom:8px; min-height:32px;">
             <span style="font-size:13px; color:var(--text-secondary);">
-                ${state.selectedIds.size} selected
+                ${state.selectedIds.size} selected &middot; Qty: ${selectedQty}${offPageSelected > 0 ? ` (+${offPageSelected} on other pages, not counted)` : ''}
             </span>
             <button class="btn btn-primary batch-push-btn" ${state.selectedIds.size === 0 ? 'disabled' : ''}>
                 Push selected to inventory
