@@ -63,6 +63,13 @@ candidates AS (
     cs.series,
     cm.rarity,
     COALESCE(cm.image_url_own, cm.image_url) AS image_url,
+    cv.foil_type,
+    cv.foil_pattern,
+    cv.texture,
+    cv.material,
+    cv.size,
+    cv.stamp_type,
+    cv.source_type,
     COALESCE(inv.total_inventory_qty, 0) AS total_inventory_qty,
     GREATEST(
       COALESCE(inv.total_inventory_qty, 0)
@@ -92,7 +99,14 @@ SELECT
   ls.sale_price AS last_sold_price,
   ls.sold_at AS last_sold_at,
   ls.quantity_sold AS last_sold_qty,
-  ls.platform_order_id AS last_sold_order_id
+  ls.platform_order_id AS last_sold_order_id,
+  c.foil_type,
+  c.foil_pattern,
+  c.texture,
+  c.material,
+  c.size,
+  c.stamp_type,
+  c.source_type
 FROM candidates c
 LEFT JOIN LATERAL (
   SELECT s.sale_price, s.sold_at, s.quantity_sold, s.platform_order_id

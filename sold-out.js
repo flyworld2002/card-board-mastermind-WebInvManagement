@@ -6,7 +6,7 @@
 // since inventory is shared across listings) straight from the sales
 // table via v_sold_out — see sql/v_sold_out.sql.
 
-import { supabase } from './shared.js';
+import { supabase, loadAxisOptions, axisDisplay } from './shared.js';
 
 function escapeHtml(str) {
     return String(str ?? '').replace(/[&<>"']/g, c => ({
@@ -22,6 +22,19 @@ function imgHtml(url) {
                 style="width:40px; height:56px; object-fit:cover; border-radius:3px; border:1px solid var(--border);"
                 onerror="this.replaceWith(Object.assign(document.createElement('div'),
                     {style:'width:40px;height:56px;background:var(--bg-tertiary);border-radius:3px;border:1px solid var(--border);'}))">`;
+}
+
+// Same axis-composition convention as inventory.js's variantLabel().
+function variantLabel(row) {
+    return [
+        axisDisplay('foil_type', row.foil_type),
+        axisDisplay('foil_pattern', row.foil_pattern),
+        axisDisplay('texture', row.texture),
+        axisDisplay('material', row.material),
+        axisDisplay('size', row.size),
+        axisDisplay('stamp_type', row.stamp_type),
+        axisDisplay('source_type', row.source_type),
+    ].filter(Boolean).join(' · ') || 'Non-Holo';
 }
 
 function timeAgo(iso) {
@@ -145,7 +158,8 @@ export async function renderSoldOut(container) {
         <div class="pagination" id="so-pagination"></div>
     `;
 
-    const [soldOutRes, setsRes] = await Promise.all([
+    const [, soldOutRes, setsRes] = await Promise.all([
+        loadAxisOptions(),
         supabase.from('v_sold_out').select('*'),
         supabase.from('card_sets').select('id, name, series').order('name'),
     ]);
@@ -266,7 +280,10 @@ function renderTable(container) {
                 ${rows.map(r => `
                     <tr>
                         <td>${imgHtml(r.image_url)}</td>
-                        <td>${escapeHtml(r.card_number ? `${r.card_number} ${r.card_name}` : r.card_name)}</td>
+                        <td>
+                            ${escapeHtml(r.card_number ? `${r.card_number} ${r.card_name}` : r.card_name)}
+                            <div style="color:var(--text-secondary); font-size:12px;">${escapeHtml(variantLabel(r))}</div>
+                        </td>
                         <td>${escapeHtml(r.template_name || '')}</td>
                         <td style="font-variant-numeric:tabular-nums; font-weight:600;">
                             ${r.last_sold_price != null ? `$${Number(r.last_sold_price).toFixed(2)}` : '<span style="color:var(--text-secondary);">—</span>'}
