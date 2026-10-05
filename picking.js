@@ -461,12 +461,17 @@ function buildPickList() {
         if (s.prevLineIds && !s.prevLineIds.has(r.order_line_item_id)) agg.isNew = true;
     }
 
-    // Sort cards within each listing (matched by number; unmatched last)
+    // Sort cards within each listing: by set first (so a listing spanning
+    // several sets/sub-decks — e.g. "Pokemon TCG Classic"'s Deck B/C/V —
+    // keeps each set's cards together instead of interleaving by raw
+    // number), then by number within that set; matched by number, unmatched last.
     const out = [];
     for (const [, L] of listings) {
         const cards = [...L.cards.values()];
         cards.sort((a, b) => {
             if (a.matched !== b.matched) return a.matched ? -1 : 1;
+            const setCmp = (a.setName || '').localeCompare(b.setName || '');
+            if (setCmp !== 0) return setCmp;
             const [an, as] = cardSortKey(a.cardNumber);
             const [bn, bs] = cardSortKey(b.cardNumber);
             return an - bn || as.localeCompare(bs);
