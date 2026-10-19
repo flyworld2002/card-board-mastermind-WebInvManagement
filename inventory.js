@@ -7,6 +7,21 @@ import { supabase, debounce, formatPrice, loadAxisOptions, axisDisplay } from '.
 const PAGE_SIZES = [50, 100, 250];
 const PLATFORMS  = ['ebay', 'tcgplayer', 'amazon', 'shopify', 'wix'];
 
+// Same 7 axes + RPC Listing Pricing's "Batch add cards" advanced search uses
+// (advanced_search_filter_options(), migration 033) — catalog-wide DISTINCT
+// rarity/axis codes computed server-side, so this isn't subject to the
+// 1,000-row REST cap that'd silently truncate values first-appearing late in
+// card_master/card_variants if computed by fetching+deduping client-side.
+const VARIANT_AXES = [
+    { key: 'foil_type', label: 'Foil type' },
+    { key: 'foil_pattern', label: 'Foil pattern' },
+    { key: 'texture', label: 'Texture' },
+    { key: 'material', label: 'Material' },
+    { key: 'size', label: 'Size' },
+    { key: 'stamp_type', label: 'Stamp type' },
+    { key: 'source_type', label: 'Source type' },
+];
+
 // Same picking_api.py the Jobs page and Picking tab talk to — see jobs.js
 // for the full background-job flow. Inventory only ever fires the POST
 // that starts a refresh job; progress/history lives on the Jobs page.
@@ -51,10 +66,19 @@ const state = {
         condition: 'all',
         status: 'all',
         source: 'all',
+        rarity: [],          // multi-select — card_master.rarity codes
+        axis: {               // multi-select per variant axis — see VARIANT_AXES
+            foil_type: [], foil_pattern: [], texture: [],
+            material: [], size: [], stamp_type: [], source_type: [],
+        },
         includeOOS: false,
     },
     sort: { field: 'card_name', asc: true },
     sets: [],
+    rarities: [],            // [code, ...] — loaded once via loadFilterOptions()
+    axisValues: {},          // axis key -> [code, ...]
+    axisLabelMap: {},        // axis key -> { code: display_label }
+    variantPanelOpen: false, // "Variant ▾" disclosure in the filter bar
     visiblePlatforms: loadVisiblePlatforms(),
     expandedVariantId: null,
     listingTemplates: [],   // cached listing_templates rows for the sync-engine template dropdown
@@ -74,6 +98,7 @@ export async function renderInventory(container) {
     await loadSets();
     await loadListingTemplates();
     await loadAxisOptions();  // Inventory only reads AXIS_DISPLAY, no dropdowns needed
+    await loadFilterOptions();
     renderFilters(container);
     await loadAndRender(container);
     setupRealtimeSubscription(container);
@@ -153,6 +178,21 @@ async function loadSets() {
     state.sets = (data || []).map(r => r.name);
 }
 
+async function loadFilterOptions() {
+    const { data, error } = await supabase.rpc('advanced_search_filter_options');
+    if (error) { console.error('loadFilterOptions error:', error); return; }
+
+    const byAxis = {};
+    (data || []).forEach(r => { (byAxis[r.axis] ??= []).push(r); });
+
+    state.rarities = (byAxis.rarity || []).map(r => r.code);
+    VARIANT_AXES.forEach(a => {
+        const rows = byAxis[a.key] || [];
+        state.axisValues[a.key] = rows.map(r => r.code);
+        state.axisLabelMap[a.key] = Object.fromEntries(rows.map(r => [r.code, r.display_label]));
+    });
+}
+
 async function loadListingTemplates() {
     const { data } = await supabase
         .from('listing_templates')
@@ -188,7 +228,10 @@ async function loadAndRender(container) {
     while (true) {
         let query = supabase.from(f.includeOOS ? 'v_inventory_all' : 'v_inventory').select('*');
 
-        if (f.search.trim())       query = query.ilike('card_name', `%${f.search.trim()}%`);
+        // Search is applied client-side below (same multi-word, name/number/
+        // variant-label matching as the New Local Purchase modal's Quick
+        // Search) — v_inventory has no label columns to filter on server-side,
+        // and the other filters below already narrow the fetch.
         if (f.set_name !== 'all')  query = query.eq('set_name', f.set_name);
         if (f.condition !== 'all') query = query.eq('condition', f.condition);
         if (f.status !== 'all')    query = query.eq('listing_status', f.status);
@@ -211,6 +254,43 @@ async function loadAndRender(container) {
 
         if (batch.length < PAGE_SIZE) break;   // last page
         page++;
+    }
+
+    // ── Quick Search — same logic as the New Local Purchase modal's Quick
+    // Search box: split into words, AND them all against card name, card
+    // number, and every variant-axis label (foil/pattern/texture/material/
+    // size/stamp/source), so "clefable 103 holo" and "reverse holo" both
+    // work from one box. ──────────────────────────────────────────────────
+    const searchWords = f.search.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (searchWords.length) {
+        allLots = allLots.filter(lot => {
+            const variantLabel = [
+                axisDisplay('foil_type', lot.foil_type),
+                axisDisplay('foil_pattern', lot.foil_pattern),
+                axisDisplay('texture', lot.texture),
+                axisDisplay('material', lot.material),
+                axisDisplay('size', lot.size),
+                axisDisplay('stamp_type', lot.stamp_type),
+                axisDisplay('source_type', lot.source_type),
+            ].filter(Boolean).join(' ');
+            const haystack = [lot.card_name, lot.card_number, variantLabel]
+                .filter(Boolean).join(' ').toLowerCase();
+            return searchWords.every(w => haystack.includes(w));
+        });
+    }
+
+    // ── Rarity (multi-select, OR within) ───────────────────────────────────────
+    if (f.rarity.length) {
+        allLots = allLots.filter(lot => f.rarity.includes(lot.rarity));
+    }
+
+    // ── Variant axes (multi-select per axis, OR within an axis, AND across
+    // axes — e.g. foil_type IN [holo, reverse_holo] AND stamp_type IN [1st_edition]) ──
+    for (const axis of VARIANT_AXES) {
+        const selected = f.axis[axis.key];
+        if (selected && selected.length) {
+            allLots = allLots.filter(lot => selected.includes(lot[axis.key]));
+        }
     }
 
     // ── Group lots by variant_id ──────────────────────────────────────────────
@@ -327,14 +407,55 @@ async function loadAndRender(container) {
 // Filters
 // ----------------------------------------------------------------
 
+// Shared by each variant-axis select in the Variant panel below — same
+// shape as Listing Pricing's advanced-search multiSelect() helper.
+function multiSelectOptionsHTML(values, selected, labelFn = (v) => v) {
+    return values.map(v =>
+        `<option value="${escapeHtml(v)}" ${selected.includes(v) ? 'selected' : ''}>${escapeHtml(labelFn(v))}</option>`
+    ).join('');
+}
+
+// Multi-select checkbox dropdown for Rarity — same <details>-based pattern
+// as the Sold Out page's rarity filter: open/closed state lives in the DOM
+// itself (no JS state, no document-level click listener to leak across page
+// navigations). Checkbox changes only patch the summary label and reload,
+// never re-render the filter bar itself, so the <details> element's own
+// open state is never disturbed while checking multiple boxes.
+function rarityFilterHtml() {
+    const selected = state.filters.rarity;
+    const label = selected.length > 0 ? `Rarity (${selected.length})` : 'Rarity (all)';
+    return `
+        <details id="inv-rarity-details" style="display:inline-block; position:relative; font-size:12px;">
+            <summary class="btn" id="inv-rarity-summary" style="display:inline-block; cursor:pointer;">${label}</summary>
+            <div style="position:absolute; top:calc(100% + 4px); left:0; z-index:20; background:var(--bg-secondary);
+                        border:1px solid var(--border); border-radius:6px; padding:8px; min-width:210px;
+                        max-height:300px; overflow-y:auto; box-shadow:0 8px 24px rgba(0,0,0,0.3);">
+                <div style="display:flex; gap:6px; margin-bottom:6px;">
+                    <input type="text" id="inv-rarity-search" placeholder="Search..." autocomplete="off"
+                           style="flex:1; padding:3px 6px; font-size:12px;" />
+                    <button type="button" class="btn" id="inv-rarity-clear" style="padding:2px 8px; font-size:11px; flex-shrink:0;">Clear</button>
+                </div>
+                ${state.rarities.map(r => `
+                    <label class="inv-rarity-row" data-search="${escapeHtml(r.toLowerCase())}"
+                           style="display:flex; align-items:center; gap:6px; font-size:13px; padding:3px 0; cursor:pointer; color:var(--text);">
+                        <input type="checkbox" class="inv-rarity-check" value="${escapeHtml(r)}" ${selected.includes(r) ? 'checked' : ''} />
+                        ${escapeHtml(r)}
+                    </label>
+                `).join('')}
+            </div>
+        </details>
+    `;
+}
+
 function renderFilters(container) {
     const bar = container.querySelector('#inv-filters-bar');
     const f   = state.filters;
     const CONDITIONS = ['Near Mint', 'Lightly Played', 'Moderately Played', 'Heavily Played', 'Damaged'];
+    const activeAxisCount = VARIANT_AXES.filter(a => (f.axis[a.key] || []).length > 0).length;
 
     bar.innerHTML = `
-        <input type="search" id="inv-search" placeholder="Search card name..."
-               value="${escapeHtml(f.search)}" style="width:200px;" />
+        <input type="search" id="inv-search" placeholder='Name, number, or variant — e.g. "clefable 103 holo"'
+               value="${escapeHtml(f.search)}" style="width:240px;" />
         <select id="inv-filter-set">
             <option value="all">All sets</option>
             ${state.sets.map(s =>
@@ -358,6 +479,11 @@ function renderFilters(container) {
             <option value="ebay"      ${f.source === 'ebay'      ? 'selected' : ''}>eBay</option>
             <option value="tcgplayer" ${f.source === 'tcgplayer' ? 'selected' : ''}>TCGPlayer</option>
         </select>
+        ${rarityFilterHtml()}
+        <button id="inv-variant-toggle" class="btn"
+                style="${activeAxisCount ? 'border-color:var(--accent); color:var(--accent);' : ''}">
+            Variant${activeAxisCount ? ` (${activeAxisCount})` : ''} ${state.variantPanelOpen ? '▴' : '▾'}
+        </button>
         <button id="inv-reset-filters" class="btn">Reset filters</button>
         <label style="font-size:13px; color:var(--text-secondary); display:flex; align-items:center; gap:6px;">
             <input type="checkbox" id="inv-include-oos" ${f.includeOOS ? 'checked' : ''} />
@@ -380,6 +506,23 @@ function renderFilters(container) {
                 `<option value="${s}" ${s === state.pageSize ? 'selected' : ''}>${s} per page</option>`
             ).join('')}
         </select>
+        ${state.variantPanelOpen ? `
+            <div id="inv-variant-panel"
+                 style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;
+                        width:100%; margin-top:4px; padding:10px; border:1px solid var(--border); border-radius:6px;">
+                ${VARIANT_AXES.filter(a => (state.axisValues[a.key] || []).length > 0).map(a => `
+                    <label style="font-size:12px; color:var(--text-secondary);">
+                        ${escapeHtml(a.label)}
+                        <select class="inv-filter-axis" data-axis="${a.key}"
+                                multiple size="${Math.min(5, Math.max(2, state.axisValues[a.key].length))}"
+                                style="display:block; margin-top:4px; width:150px;">
+                            ${multiSelectOptionsHTML(state.axisValues[a.key], f.axis[a.key], (v) => state.axisLabelMap[a.key]?.[v] || v)}
+                        </select>
+                    </label>
+                `).join('')}
+                <button id="inv-variant-clear" class="btn">Clear variant filters</button>
+            </div>
+        ` : ''}
     `;
 
     bar.querySelector('#inv-search').addEventListener('input', debounce(async (e) => {
@@ -404,8 +547,70 @@ function renderFilters(container) {
         state.filters.source = e.target.value; state.page = 0;
         await loadAndRender(container);
     });
+    const updateRaritySummary = () => {
+        const summary = bar.querySelector('#inv-rarity-summary');
+        if (summary) summary.textContent = state.filters.rarity.length > 0 ? `Rarity (${state.filters.rarity.length})` : 'Rarity (all)';
+    };
+    bar.querySelectorAll('.inv-rarity-check').forEach(cb => {
+        cb.addEventListener('change', async (e) => {
+            if (e.target.checked) state.filters.rarity.push(e.target.value);
+            else state.filters.rarity = state.filters.rarity.filter(v => v !== e.target.value);
+            updateRaritySummary();
+            state.page = 0;
+            await loadAndRender(container);
+        });
+    });
+    bar.querySelector('#inv-rarity-clear').addEventListener('click', async () => {
+        state.filters.rarity = [];
+        bar.querySelectorAll('.inv-rarity-check').forEach(cb => { cb.checked = false; });
+        updateRaritySummary();
+        state.page = 0;
+        await loadAndRender(container);
+    });
+    // Narrows the checkbox list in place — only hides non-matching rows,
+    // never touches their checked state, so searching doesn't lose a
+    // selection that scrolls out of view.
+    bar.querySelector('#inv-rarity-search').addEventListener('input', (e) => {
+        const q = e.target.value.trim().toLowerCase();
+        bar.querySelectorAll('.inv-rarity-row').forEach(row => {
+            row.style.display = row.dataset.search.includes(q) ? 'flex' : 'none';
+        });
+    });
+    bar.querySelector('#inv-variant-toggle').addEventListener('click', () => {
+        state.variantPanelOpen = !state.variantPanelOpen;
+        renderFilters(container); // UI-only — no data change, so no loadAndRender
+    });
+    bar.querySelectorAll('.inv-filter-axis').forEach(sel => {
+        sel.addEventListener('change', async (e) => {
+            state.filters.axis[e.target.dataset.axis] = [...e.target.selectedOptions].map(o => o.value);
+            state.page = 0;
+            // Patch the "Variant (N)" badge in place rather than re-rendering
+            // the whole bar — a full rebuild here would reset scroll position
+            // inside whichever axis <select> the user is actively using.
+            const count = VARIANT_AXES.filter(a => (state.filters.axis[a.key] || []).length > 0).length;
+            const toggleBtn = bar.querySelector('#inv-variant-toggle');
+            toggleBtn.textContent = `Variant${count ? ` (${count})` : ''} ${state.variantPanelOpen ? '▴' : '▾'}`;
+            toggleBtn.style.borderColor = count ? 'var(--accent)' : '';
+            toggleBtn.style.color = count ? 'var(--accent)' : '';
+            await loadAndRender(container);
+        });
+    });
+    const variantClearBtn = bar.querySelector('#inv-variant-clear');
+    if (variantClearBtn) {
+        variantClearBtn.addEventListener('click', async () => {
+            VARIANT_AXES.forEach(a => { state.filters.axis[a.key] = []; });
+            state.page = 0;
+            renderFilters(container);
+            await loadAndRender(container);
+        });
+    }
     bar.querySelector('#inv-reset-filters').addEventListener('click', async () => {
-        state.filters = { search: '', set_name: 'all', condition: 'all', status: 'all', source: 'all', includeOOS: false };
+        state.filters = {
+            search: '', set_name: 'all', condition: 'all', status: 'all', source: 'all',
+            rarity: [],
+            axis: { foil_type: [], foil_pattern: [], texture: [], material: [], size: [], stamp_type: [], source_type: [] },
+            includeOOS: false,
+        };
         state.page = 0;
         renderFilters(container);
         await loadAndRender(container);
