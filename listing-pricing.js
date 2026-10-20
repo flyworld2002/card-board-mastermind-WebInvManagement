@@ -28,14 +28,14 @@ function escapeHtml(str) {
 }
 
 function cardLabel(r) {
-    // custom_name (an explicit per-card override) and preview_name (the
-    // batched render_variation_name() preview for queued rows with no
-    // override yet, set in loadListing()) are both the REAL eBay variation
-    // name, including the template's name_format prefix/suffix (e.g. "SVP
-    // 014 Koraidon") — prefer them over the generic "{number} {name}"
-    // fallback, which every caller of this used to see even when a real
-    // name was already known.
-    if (r.custom_name) return r.custom_name;
+    // preview_name is the computed DEFAULT eBay variation name (via
+    // render_variation_name(), set for every queued row in loadListing()),
+    // including the template's name_format prefix (e.g. "SVP 014
+    // Koraidon") — use it for this generic row-identification label
+    // instead of the bare "{number} {name}" fallback. Deliberately NOT
+    // custom_name: a custom override (e.g. "...Holo") is real eBay-push
+    // text, not an identifier, and only the roster row's own name input
+    // (rowHTML()) should ever display/edit it.
     if (r.preview_name) return r.preview_name;
     return r.card_name ? `${r.card_number ?? ''} ${r.card_name}`.trim() : r.derived_label;
 }
@@ -651,13 +651,17 @@ async function loadListing(container) {
         state.resolvedRows = resolved || [];
         state.groups = groups || [];
 
-        // Preview of the real eBay variation name for any queued row with
-        // no custom_name yet — via render_variation_name() (migration 037,
-        // the same function create_listing()/_do_promotions() use at push
-        // time), not a generic label. Batched in one RPC call rather than
-        // one per row. Shown as the input's placeholder + hover title only
-        // (rowHTML()) — purely a preview, never written to custom_name.
-        const needsPreview = state.resolvedRows.filter(r => r.status === 'queued' && !r.custom_name);
+        // Computed default eBay variation name for every queued row — via
+        // render_variation_name() (migration 037, the same function
+        // create_listing()/_do_promotions() use at push time). Fetched for
+        // ALL queued rows, including ones that already have a custom_name,
+        // so cardLabel() always has the real "SVP 014 Koraidon"-style
+        // default to show for generic row-identification purposes (Fix
+        // card, Balance link, push-ready summary) — those must never show
+        // the custom_name override, only the plain input (rowHTML()) does.
+        // Batched in one RPC call rather than one per row. Purely a display
+        // value — never written to custom_name.
+        const needsPreview = state.resolvedRows.filter(r => r.status === 'queued');
         if (needsPreview.length) {
             const { data: previews } = await supabase.rpc('render_variation_names', {
                 p_template_id: template.id,
