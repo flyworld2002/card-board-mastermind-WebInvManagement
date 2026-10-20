@@ -28,6 +28,15 @@ function escapeHtml(str) {
 }
 
 function cardLabel(r) {
+    // custom_name (an explicit per-card override) and preview_name (the
+    // batched render_variation_name() preview for queued rows with no
+    // override yet, set in loadListing()) are both the REAL eBay variation
+    // name, including the template's name_format prefix/suffix (e.g. "SVP
+    // 014 Koraidon") — prefer them over the generic "{number} {name}"
+    // fallback, which every caller of this used to see even when a real
+    // name was already known.
+    if (r.custom_name) return r.custom_name;
+    if (r.preview_name) return r.preview_name;
     return r.card_name ? `${r.card_number ?? ''} ${r.card_name}`.trim() : r.derived_label;
 }
 
