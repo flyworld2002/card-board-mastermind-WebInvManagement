@@ -210,6 +210,90 @@ function templateOptionsHTML(selectedId) {
         `).join('');
 }
 
+// Collapses a variant's raw v_inventory_all lot rows into the one summary
+// row renderRow()/renderDetailPanel() expect — shared by the full-list
+// group-by in loadAndRender() and refreshRow()'s single-row recompute, so
+// both ways of getting a row always agree on its shape.
+function aggregateVariantRow(variantId, lots) {
+    const first     = lots[0];
+    const totalQty  = lots.reduce((a, r) => a + (r.quantity || 0), 0);
+    const totalSold = lots.reduce((a, r) => a + (r.quantity_sold || 0), 0);
+    const totalAvailable = lots.reduce((a, r) => a + (r.quantity_available ?? (r.quantity - (r.quantity_sold || 0))), 0);
+    // WAC excludes lots with cost_basis = 0 (eBay imports with unknown cost)
+    const costLots  = lots.filter(r => (r.cost_basis || 0) > 0);
+    const totalCost = costLots.reduce((a, r) => a + (r.cost_basis * (r.quantity || 0)), 0);
+    const costQty   = costLots.reduce((a, r) => a + (r.quantity || 0), 0);
+    const wac       = costQty > 0 ? totalCost / costQty : 0;
+    const lastLot   = lots[lots.length - 1]; // most recent (sorted ASC by acquired_at)
+    return {
+        variant_id:        variantId,
+        lots,
+        card_name:         first.card_name,
+        card_number:       first.card_number,
+        set_name:          first.set_name,
+        image_url:         first.image_url,
+        rarity:            first.rarity,
+        foil_type:         first.foil_type,
+        foil_pattern:      first.foil_pattern,
+        texture:           first.texture,
+        material:          first.material,
+        size:              first.size,
+        stamp_type:        first.stamp_type,
+        source_type:       first.source_type,
+        condition:         first.condition,
+        market_price:      first.market_price,
+        market_updated_at: first.market_updated_at,
+        listing_status:    first.listing_status,
+        total_qty:         totalQty,
+        total_sold:        totalSold,
+        total_available:   totalAvailable,
+        wac,
+        last_cost:         lastLot.cost_basis,
+        last_acquired_at:  lastLot.acquired_at,
+    };
+}
+
+// Re-fetches and re-renders ONE variant's row in place — used after the
+// Purchase Order modal closes, so editing a card's lots doesn't blow away
+// scroll position/open rows across the whole table the way a full
+// loadAndRender() reload does. Falls back to a full reload if the row's
+// lots are gone (fully removed) or it isn't on the currently displayed
+// page, since there's nothing sensible to patch in place in either case.
+// Deliberately doesn't touch #inv-summary's totals (variants/cards/cost
+// basis) — a one-row edit can shift those slightly, but recomputing them
+// here would mean re-fetching the full filtered set anyway, defeating the
+// point of a single-row refresh.
+async function refreshRow(container, variantId) {
+    const { data: freshLots } = await supabase
+        .from('v_inventory_all')
+        .select('*')
+        .eq('variant_id', variantId)
+        .order('acquired_at', { ascending: true });
+
+    const idx = state.rows.findIndex(r => r.variant_id === variantId);
+    if (!freshLots || freshLots.length === 0 || idx === -1) {
+        await loadAndRender(container);
+        return;
+    }
+
+    const newRow = aggregateVariantRow(variantId, freshLots);
+    const { data: listings } = await supabase
+        .from('platform_listings')
+        .select('*')
+        .eq('variant_id', variantId);
+    newRow._listings = listings || [];
+
+    state.rows[idx] = newRow;
+
+    const oldTr = container.querySelector(`tr[data-variant-id="${variantId}"]`);
+    if (oldTr) oldTr.replaceWith(renderRow(container, newRow));
+
+    const detailTr = document.getElementById(`detail-${variantId}`);
+    if (detailTr && detailTr.style.display !== 'none') {
+        renderDetailPanel(container, newRow, detailTr.querySelector('td'));
+    }
+}
+
 async function loadAndRender(container) {
     const wrap = container.querySelector('#inv-table-wrap');
     wrap.innerHTML = '<p>Loading inventory...</p>';
@@ -304,42 +388,7 @@ async function loadAndRender(container) {
     // ── Build one summary row per variant ────────────────────────────────────
     const grouped = [];
     for (const [variantId, lots] of variantMap) {
-        const first     = lots[0];
-        const totalQty  = lots.reduce((a, r) => a + (r.quantity || 0), 0);
-        const totalSold = lots.reduce((a, r) => a + (r.quantity_sold || 0), 0);
-        const totalAvailable = lots.reduce((a, r) => a + (r.quantity_available ?? (r.quantity - (r.quantity_sold || 0))), 0);
-        // WAC excludes lots with cost_basis = 0 (eBay imports with unknown cost)
-        const costLots  = lots.filter(r => (r.cost_basis || 0) > 0);
-        const totalCost = costLots.reduce((a, r) => a + (r.cost_basis * (r.quantity || 0)), 0);
-        const costQty   = costLots.reduce((a, r) => a + (r.quantity || 0), 0);
-        const wac       = costQty > 0 ? totalCost / costQty : 0;
-        const lastLot   = lots[lots.length - 1]; // most recent (sorted ASC by acquired_at)
-        grouped.push({
-            variant_id:        variantId,
-            lots,
-            card_name:         first.card_name,
-            card_number:       first.card_number,
-            set_name:          first.set_name,
-            image_url:         first.image_url,
-            rarity:            first.rarity,
-            foil_type:         first.foil_type,
-            foil_pattern:      first.foil_pattern,
-            texture:           first.texture,
-            material:          first.material,
-            size:              first.size,
-            stamp_type:        first.stamp_type,
-            source_type:       first.source_type,
-            condition:         first.condition,
-            market_price:      first.market_price,
-            market_updated_at: first.market_updated_at,
-            listing_status:    first.listing_status,
-            total_qty:         totalQty,
-            total_sold:        totalSold,
-            total_available:   totalAvailable,
-            wac,
-            last_cost:         lastLot.cost_basis,
-            last_acquired_at:  lastLot.acquired_at,
-        });
+        grouped.push(aggregateVariantRow(variantId, lots));
     }
 
     // ── Sort ──────────────────────────────────────────────────────────────────
@@ -1488,7 +1537,7 @@ function renderHistoryModal(container, row, overlay) {
 
     overlay.querySelector('#history-close-btn').addEventListener('click', () => {
         overlay.remove();
-        loadAndRender(container);
+        refreshRow(container, row.variant_id);
     });
 
     // Default date to today
