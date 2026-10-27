@@ -40,6 +40,23 @@ function cardLabel(r) {
     return r.card_name ? `${r.card_number ?? ''} ${r.card_name}`.trim() : r.derived_label;
 }
 
+// "was $X (+N%)" under the Market price input — previous_market_price
+// (migration 054) is only ever set the moment a refresh changes the
+// price, so null here just means "unchanged since last refresh" (or no
+// refresh has run since this column shipped), not missing data.
+function marketPriceChangeHTML(r) {
+    const prev = r.previous_market_price;
+    const curr = r.market_price;
+    if (prev == null || curr == null || Number(prev) === Number(curr)) return '';
+    const pct = ((curr - prev) / prev) * 100;
+    const up = pct > 0;
+    const color = up ? 'var(--success)' : 'var(--danger)';
+    const arrow = up ? '▲' : '▼';
+    return `<div style="font-size:10px; color:${color}; white-space:nowrap;" title="was ${formatPrice(prev)}">
+        ${arrow} ${Math.abs(pct).toFixed(1)}% <span style="color:var(--text-secondary);">(was ${formatPrice(prev)})</span>
+    </div>`;
+}
+
 // Same thumbnail + hover-zoom convention as picking.js: a small fixed
 // image (class="card-thumb") that a page-level mouseover listener blows
 // up into a floating preview near the cursor.
@@ -131,6 +148,10 @@ let state = {
     profiles: [],
     unimportedCount: 0,      // platform_listings rows for this listing_id not yet in the roster
     selected: new Set(),     // selected listing_card_assignments.row_id values
+    // Pure display filters over state.resolvedRows (Fei 2026-10-26 #3/#4)
+    // — never re-fetched for, just narrow which rows renderBody() groups
+    // into the group sections, so toggling is a plain re-render.
+    rowFilters: { onlyChanged: false, onlyMarketChanged: false },
     templateSort: { key: 'name', dir: 'asc' },  // landing-view template list sort
     templateFilters: { search: '', platform: '', account: '', kind: '' },  // landing-view filters
 };
@@ -943,9 +964,25 @@ function renderBody(container) {
     const queuedCount = rows.filter(r => r.status === 'queued').length;
     const pushEnabled = pendingGated.length > 0 || queuedCount > 0;
 
+    // #3/#4 (Fei 2026-10-26): pure display filters, applied AFTER the
+    // pending/pendingGated/queuedCount counts above so the Push button's
+    // own numbers always reflect the true full roster, never the
+    // narrowed view. A 'queued' row counts as "affected by push" too —
+    // pushing is what takes it live in the first place, not just a
+    // price/qty revise — so onlyChanged isn't just needsPush().
+    const marketChanged = (r) => r.previous_market_price != null && r.market_price != null
+        && Number(r.previous_market_price) !== Number(r.market_price);
+    const changedCount = rows.filter(r => r.status === 'queued' || needsPush(r)).length;
+    const marketChangedCount = rows.filter(marketChanged).length;
+    const viewRows = rows.filter(r => {
+        if (state.rowFilters.onlyChanged && !(r.status === 'queued' || needsPush(r))) return false;
+        if (state.rowFilters.onlyMarketChanged && !marketChanged(r)) return false;
+        return true;
+    });
+
     const byGroup = {};
     const ungrouped = [];
-    for (const r of rows) {
+    for (const r of viewRows) {
         if (r.group_id) (byGroup[r.group_id] ??= []).push(r);
         else ungrouped.push(r);
     }
@@ -988,6 +1025,14 @@ function renderBody(container) {
             <button class="btn" id="lp-new-group-btn">+ New group</button>
             <button class="btn" id="lp-add-card-btn">+ Add card to listing</button>
             <button class="btn" id="lp-batch-add-btn">+ Batch add cards</button>
+            <button class="btn" id="lp-toggle-changed-btn" title="Hide every row that a push wouldn't touch"
+                    style="${state.rowFilters.onlyChanged ? 'border-color:var(--accent); color:var(--accent);' : ''}">
+                Review changes only (${changedCount})
+            </button>
+            <button class="btn" id="lp-toggle-market-changed-btn" title="Only rows whose market price moved since the last refresh"
+                    style="${state.rowFilters.onlyMarketChanged ? 'border-color:var(--accent); color:var(--accent);' : ''}">
+                Market changed (${marketChangedCount})
+            </button>
             <span style="margin-left:auto; font-size:12px; color:var(--text-secondary); align-self:center;">
                 ${state.selected.size} selected
             </span>
@@ -1815,6 +1860,12 @@ function groupSectionHTML(group, rows) {
                        title="Select all in this group" ${allSelected ? 'checked' : ''} ${rows.length === 0 ? 'disabled' : ''} />
                 <span class="badge" style="background:rgba(74,140,255,0.15); color:var(--accent);">${title}</span>
                 <span style="font-size:12px; color:var(--text-secondary);">${rows.length} card(s)</span>
+                ${!group ? `
+                    <select id="lp-nogroup-assign-select" style="font-size:12px; margin-left:auto;" ${state.selected.size === 0 ? 'disabled' : ''}>
+                        <option value="">Assign selected to group...</option>
+                        ${state.groups.map(g => `<option value="${g.id}">${escapeHtml(g.name)}</option>`).join('')}
+                    </select>
+                ` : ''}
                 ${group ? `
                     <label style="font-size:12px; color:var(--text-secondary); margin-left:auto;">Profile
                         <select class="lp-group-profile-picker" data-group-id="${group.id}" style="margin-left:6px;">
@@ -1869,7 +1920,8 @@ function rowHTML(r) {
             <td><input type="number" step="0.01" class="lp-market-price-input" data-variant-id="${r.variant_id}" data-row-id="${r.row_id}"
                        value="${r.market_price ?? ''}" placeholder="none"
                        title="${r.market_price_source === 'manual' ? 'Manually set' : ''}"
-                       style="width:70px; ${r.market_price_source === 'manual' ? 'background:rgba(167,139,250,0.12); border-color:#a78bfa;' : ''}" /></td>
+                       style="width:70px; ${r.market_price_source === 'manual' ? 'background:rgba(167,139,250,0.12); border-color:#a78bfa;' : ''}" />
+                       ${marketPriceChangeHTML(r)}</td>
             <td class="lp-resolved-price-cell">${resolvedPriceCellHTML(r, diff)}</td>
             <td class="lp-source-cell">${sourceBadge(r.price_source)}</td>
             <td class="lp-synced-cell">${isActive
@@ -1993,8 +2045,12 @@ function wireControls(container, body) {
         });
     });
 
-    body.querySelector('#lp-bulk-group-select').addEventListener('change', async (e) => {
-        const value = e.target.value;
+    // Shared by the toolbar's "Assign selected to group" dropdown and the
+    // one duplicated into the "(no group)" section header (#2, Fei
+    // 2026-10-26) — both just set group_id on whatever's in
+    // state.selected, so there's one write path regardless of which
+    // control the click came from.
+    const assignSelectedToGroup = async (value) => {
         if (!value) return;
         const groupId = value === '__none__' ? null : value;
         const { error } = await supabase.from('listing_card_assignments')
@@ -2006,7 +2062,10 @@ function wireControls(container, body) {
         }
         state.selected = new Set();
         await loadListing(container);
-    });
+    };
+
+    body.querySelector('#lp-bulk-group-select').addEventListener('change', (e) => assignSelectedToGroup(e.target.value));
+    body.querySelector('#lp-nogroup-assign-select')?.addEventListener('change', (e) => assignSelectedToGroup(e.target.value));
 
     // sync_enabled lives on platform_listings, only meaningful for
     // 'active' rows (queued rows have no platform_listings row at all)
@@ -2061,6 +2120,15 @@ function wireControls(container, body) {
     });
 
     body.querySelector('#lp-new-group-btn').addEventListener('click', () => openNewGroupModal(container, body));
+
+    body.querySelector('#lp-toggle-changed-btn').addEventListener('click', () => {
+        state.rowFilters.onlyChanged = !state.rowFilters.onlyChanged;
+        renderBody(container);
+    });
+    body.querySelector('#lp-toggle-market-changed-btn').addEventListener('click', () => {
+        state.rowFilters.onlyMarketChanged = !state.rowFilters.onlyMarketChanged;
+        renderBody(container);
+    });
 
     body.querySelectorAll('.lp-edit-tiers-btn').forEach(btn => {
         btn.addEventListener('click', () => openEditTiersModal(container, body, btn.dataset.profileId));
