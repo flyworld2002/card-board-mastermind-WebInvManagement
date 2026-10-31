@@ -633,6 +633,10 @@ async function loadListing(container) {
         if (tErr) throw tErr;
 
         state.template = template;
+        // Every eBay-writing call sends state.accountNum -- derive it from
+        // THIS template's account instead of assuming account 1, or pushes
+        // for another account's listing fail ("not the seller").
+        if (template) state.accountNum = await resolveAccountNum(template.account);
 
         if (!template) {
             body.innerHTML = noTemplateHTML();
@@ -1285,6 +1289,31 @@ async function doSyncFromEbay(container) {
         console.error(err);
         msg.innerHTML = `<span style="color:var(--danger)">Sync failed: ${escapeHtml(err.message)}</span>`;
     }
+}
+
+// Maps a template's account name (listing_templates.account, e.g.
+// 'BIGGYFISH2021') to the numbered eBay account the Picking API expects,
+// via GET /api/accounts (names only, built from the desktop's .env).
+// Returns null when it can't be resolved: a null account_num makes the API
+// reject the request (422) instead of silently acting as account 1.
+let accountsCache = null;
+async function resolveAccountNum(accountName) {
+    try {
+        if (!accountsCache) {
+            const resp = await fetch(`${PICKING_API_URL}/api/accounts`, {
+                headers: { 'x-picking-token': PICKING_API_TOKEN },
+            });
+            if (!resp.ok) throw new Error(`${resp.status}`);
+            accountsCache = (await resp.json()).accounts || [];
+        }
+        const match = accountsCache.find(a => a.name === accountName);
+        if (match) return match.account_num;
+        console.warn(`Listing pricing: no eBay account configured for "${accountName}"`);
+    } catch (err) {
+        accountsCache = null;  // retry next time the page opens
+        console.warn('Listing pricing: could not load /api/accounts', err);
+    }
+    return null;
 }
 
 async function callBusinessPolicies() {
