@@ -2835,14 +2835,6 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
         const prev = siblings.filter(t => t.min_market < newMin).sort((a, b) => b.min_market - a.min_market)[0];
         const newMax = next ? next.min_market : null;
 
-        if (prev && prev.max_market !== newMin) {
-            const { error: prevErr } = await supabase.from('pricing_profile_tiers').update({ max_market: newMin }).eq('id', prev.id);
-            if (prevErr) {
-                errBox.textContent = `Failed to adjust the tier below: ${prevErr.message}`;
-                return;
-            }
-        }
-
         const payload = {
             profile_id: profileId,
             min_market: newMin,
@@ -2851,13 +2843,36 @@ async function openEditTiersModal(container, body, profileId, editingTierId = nu
             multiplier: mode === 'formula' ? parseFloat(fd.get('multiplier')) : null,
             plus: mode === 'formula' && fd.get('plus') ? parseFloat(fd.get('plus')) : null,
         };
-        const { error } = editingTierId === 'new'
-            ? await supabase.from('pricing_profile_tiers').insert(payload)
-            : await supabase.from('pricing_profile_tiers').update(payload).eq('id', editingTierId);
-        if (error) {
-            // The non-overlap trigger raises a plain RAISE EXCEPTION message — surface it directly.
-            errBox.textContent = error.message || 'Failed to save tier.';
-            return;
+        const saveTier = async () => {
+            const { error } = editingTierId === 'new'
+                ? await supabase.from('pricing_profile_tiers').insert(payload)
+                : await supabase.from('pricing_profile_tiers').update(payload).eq('id', editingTierId);
+            if (error) {
+                // The non-overlap trigger raises a plain RAISE EXCEPTION message — surface it directly.
+                errBox.textContent = error.message || 'Failed to save tier.';
+                return false;
+            }
+            return true;
+        };
+        const adjustPrev = async () => {
+            if (!prev || prev.max_market === newMin) return true;
+            const { error: prevErr } = await supabase.from('pricing_profile_tiers').update({ max_market: newMin }).eq('id', prev.id);
+            if (prevErr) {
+                errBox.textContent = `Failed to adjust the tier below: ${prevErr.message}`;
+                return false;
+            }
+            return true;
+        };
+
+        // Moving this tier's start UP means the predecessor must grow into
+        // the freed range, so this row has to move first; every other case
+        // (new tier, moving down) needs the predecessor shrunk first.
+        const oldMin = (tiers || []).find(t => t.id === editingTierId)?.min_market;
+        const movingUp = editingTierId !== 'new' && oldMin != null && newMin > oldMin;
+        if (movingUp) {
+            if (!(await saveTier()) || !(await adjustPrev())) return;
+        } else {
+            if (!(await adjustPrev()) || !(await saveTier())) return;
         }
         await recomputeTierBoundaries(profileId);
         await openEditTiersModal(container, body, profileId);
