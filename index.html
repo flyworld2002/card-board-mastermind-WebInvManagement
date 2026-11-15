@@ -204,6 +204,7 @@
                         <a href="#catalog" data-page="catalog">Catalog</a>
                         <a href="#listing-pricing" data-page="listing-pricing">Listing pricing <span id="restock-badge" class="badge badge-restock" style="display:none;"></span></a>
                         <a href="#sold-out" data-page="sold-out">Sold Out <span id="sold-out-badge" class="badge badge-sold-out" style="display:none;"></span></a>
+                        <a href="#price-refresh" data-page="price-refresh">Price refresh <span id="price-holds-badge" class="badge badge-restock" style="display:none;"></span></a>
                         <a href="#configuration" data-page="configuration">Configuration</a>
                         <a href="#jobs" data-page="jobs">Jobs</a>
                         <a href="#" id="signout-link" style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px;">Sign out</a>
@@ -227,7 +228,33 @@
             refreshRestockBadge();
             refreshSoldOutBadge();
             setupRestockRealtime();
+            refreshPriceHoldsBadge();
         }
+
+        // ── Price holds badge — refreshed prices the nightly job held back for
+        // approval (price_refresh_changes.status = 'held'), next to Price
+        // refresh. No realtime subscription: holds only appear once a day, so
+        // a count on sign-in plus a re-count whenever the Price refresh page
+        // approves/rejects (it calls window.__cbmRefreshPriceHoldsBadge) is
+        // enough.
+
+        async function refreshPriceHoldsBadge() {
+            const badge = document.getElementById('price-holds-badge');
+            if (!badge) return;
+
+            const { count, error } = await supabase
+                .from('price_refresh_changes')
+                .select('id', { count: 'exact', head: true })
+                .eq('status', 'held');
+
+            if (!error && count > 0) {
+                badge.textContent = count;
+                badge.style.display = 'inline-block';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+        window.__cbmRefreshPriceHoldsBadge = refreshPriceHoldsBadge;
 
         // ── Issues badge — unresolved ebay_order_issues count next to Sales ──────
         // Lives at the shell level (rendered once per sign-in) rather than inside
@@ -389,6 +416,11 @@
                         const { renderConfiguration } = await import(`./configuration.js?v=${Date.now()}`);
                         const subKey = hash === 'configuration' ? 'sets' : hash;
                         await renderConfiguration(content, subKey);
+                        break;
+                    }
+                    case 'price-refresh': {
+                        const { renderPriceRefresh } = await import(`./price-refresh.js?v=${Date.now()}`);
+                        await renderPriceRefresh(content);
                         break;
                     }
                     case 'jobs': {
