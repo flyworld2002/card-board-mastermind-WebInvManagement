@@ -1,48 +1,69 @@
--- ============================================================
--- push_staging_row_to_inventory(staging_id uuid)
---
--- Ports the logic from staging_workflow.py's _push_batch_by_order
--- for a SINGLE staging row. Designed to be called via:
---   supabase.rpc('push_staging_row_to_inventory', { staging_id: '...' })
---
--- Behavior:
---   1. Validates the staging row is push-ready (card_id set, status allows push)
---   2. Resolves/creates the purchases row by reference_id = order_number
---   3. Resolves/creates the card_variant (IS NOT DISTINCT FROM lookup)
---   4. Inserts card_variant_sources row if source_type present
---   5. Inserts the inventory row (cost/asking split by source)
---   6. Upserts market_prices if price data is available
---   7. Marks the staging row as 'processed'
---
--- Returns: jsonb summary { inventory_id, variant_id, purchase_id }
--- Raises an exception (rolls back) on any validation failure.
--- ============================================================
-
-CREATE OR REPLACE FUNCTION push_staging_row_to_inventory(p_staging_id uuid)
-RETURNS jsonb
+-- Resolves a free-text variant axis value (e.g. "Holiday Calendar" typed via
+-- the staging page's "Custom..." option) to a lookup code, creating the
+-- lookup row if it doesn't exist yet. Every axis is FK-constrained to its
+-- lookup table, so without this the push fails with a card_variants_*_fkey
+-- violation.
+CREATE OR REPLACE FUNCTION public.ensure_axis_code(p_table text, p_raw text)
+RETURNS text
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public
 AS $$
+DECLARE
+    v_code   text;
+    v_exists boolean;
+BEGIN
+    IF p_raw IS NULL OR btrim(p_raw) = '' THEN
+        RETURN NULL;
+    END IF;
+
+    IF p_table NOT IN ('foil_types', 'foil_patterns', 'textures', 'materials',
+                       'sizes', 'stamp_types', 'source_types') THEN
+        RAISE EXCEPTION 'ensure_axis_code: unknown axis table %', p_table;
+    END IF;
+
+    v_code := lower(btrim(p_raw));
+    EXECUTE format('SELECT EXISTS (SELECT 1 FROM public.%I WHERE code = $1)', p_table)
+        INTO v_exists USING v_code;
+    IF v_exists THEN
+        RETURN v_code;
+    END IF;
+
+    v_code := btrim(regexp_replace(lower(btrim(p_raw)), '[^a-z0-9]+', '_', 'g'), '_');
+    IF v_code = '' THEN
+        RETURN NULL;
+    END IF;
+
+    EXECUTE format('SELECT EXISTS (SELECT 1 FROM public.%I WHERE code = $1)', p_table)
+        INTO v_exists USING v_code;
+    IF NOT v_exists THEN
+        EXECUTE format(
+            'INSERT INTO public.%I (code, display_name, sort_order) '
+            'VALUES ($1, $2, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM public.%I)) '
+            'ON CONFLICT (code) DO NOTHING', p_table, p_table)
+            USING v_code, initcap(replace(v_code, '_', ' '));
+    END IF;
+    RETURN v_code;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.push_staging_row_to_inventory(p_staging_id uuid)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
 DECLARE
     v_row            staging%ROWTYPE;
     v_purchase_id    uuid;
     v_variant_id     uuid;
     v_inventory_id   uuid;
-    v_variant_type   text;
-    v_finish         text;
-    v_is_special     boolean;
     v_is_ebay        boolean;
     v_cost           numeric;
     v_asking         numeric;
-    v_list_price     numeric;
     v_market_price   numeric;
     v_market_date    date;
-    v_special_patterns text[] := ARRAY[
-        'Cosmos Holo', 'Master Ball Pattern', 'Poke Ball Pattern',
-        'Cracked Ice Holo', 'Galaxy Holo'
-    ];
 BEGIN
-    -- ── 1. Load and validate the staging row ────────────────────────────
+    -- 1. Load and validate the staging row
     SELECT * INTO v_row FROM staging WHERE id = p_staging_id FOR UPDATE;
 
     IF v_row IS NULL THEN
@@ -57,17 +78,30 @@ BEGIN
         RAISE EXCEPTION 'Staging row % was already processed', p_staging_id;
     END IF;
 
+    -- Normalize the seven variant axes the same way Python's
+    -- get_or_create_variant() does (db/connection.py) — every axis is
+    -- FK-constrained against a lowercase_snake_case lookup table, but
+    -- callers (the web app's free-text "Custom..." axis fallback,
+    -- manual staging edits) aren't guaranteed to send matching case.
+    -- ensure_axis_code() also snake_cases free text and creates the
+    -- lookup row when it's new, so a value like "Holiday Calendar"
+    -- no longer fails the card_variants FK. NULL stays NULL.
+    v_row.foil_type    := ensure_axis_code('foil_types',    v_row.foil_type);
+    v_row.foil_pattern := ensure_axis_code('foil_patterns', v_row.foil_pattern);
+    v_row.texture      := ensure_axis_code('textures',      v_row.texture);
+    v_row.material     := ensure_axis_code('materials',     v_row.material);
+    v_row.size         := ensure_axis_code('sizes',         v_row.size);
+    v_row.stamp_type   := ensure_axis_code('stamp_types',   v_row.stamp_type);
+    v_row.source_type  := ensure_axis_code('source_types',  v_row.source_type);
+
     v_is_ebay := (v_row.source = 'ebay');
 
-    -- ── 2. Resolve or create the purchase ────────────────────────────────
+    -- 2. Resolve or create the purchase
     SELECT id INTO v_purchase_id
     FROM purchases
     WHERE reference_id = v_row.order_number;
 
     IF v_purchase_id IS NULL THEN
-        -- Initial values are placeholders only — step 5b recomputes
-        -- card_count/total_cost/purchase_type from actual inventory rows
-        -- immediately after, so these never go stale.
         INSERT INTO purchases (
             source, purchase_type, reference_id, total_cost,
             card_count, purchased_at
@@ -82,48 +116,34 @@ BEGIN
         RETURNING id INTO v_purchase_id;
     END IF;
 
-    -- ── 3. Resolve or create the card_variant ────────────────────────────
-    v_variant_type := COALESCE(v_row.foil_pattern, v_row.foil_type, 'Non-Holo');
-    v_finish       := COALESCE(v_row.foil_type, 'Non-Holo');
-    v_is_special   := v_variant_type = ANY(v_special_patterns);
-
+    -- 3. Resolve or create the card_variant (seven-axis, NULL-safe)
     SELECT id INTO v_variant_id
     FROM card_variants
-    WHERE card_id = v_row.card_id
-      AND variant_type = v_variant_type
-      AND finish = v_finish
-      AND source_type IS NOT DISTINCT FROM v_row.source_type
-      AND stamp_type  IS NOT DISTINCT FROM v_row.stamp_type;
+    WHERE card_id      = v_row.card_id
+      AND foil_type    IS NOT DISTINCT FROM v_row.foil_type
+      AND foil_pattern IS NOT DISTINCT FROM v_row.foil_pattern
+      AND texture      IS NOT DISTINCT FROM v_row.texture
+      AND material     IS NOT DISTINCT FROM v_row.material
+      AND size         IS NOT DISTINCT FROM v_row.size
+      AND stamp_type   IS NOT DISTINCT FROM v_row.stamp_type
+      AND source_type  IS NOT DISTINCT FROM v_row.source_type;
 
     IF v_variant_id IS NULL THEN
         INSERT INTO card_variants (
-            card_id, variant_type, finish, is_special, source_type, stamp_type
+            card_id, foil_type, foil_pattern, texture,
+            material, size, stamp_type, source_type
         ) VALUES (
-            v_row.card_id, v_variant_type, v_finish, v_is_special,
-            v_row.source_type, v_row.stamp_type
+            v_row.card_id, v_row.foil_type, v_row.foil_pattern, v_row.texture,
+            v_row.material, v_row.size, v_row.stamp_type, v_row.source_type
         )
-        ON CONFLICT (card_id, variant_type, finish, source_type, stamp_type)
-        DO UPDATE SET is_special = EXCLUDED.is_special
+        ON CONFLICT (card_id, variant_key)
+        DO UPDATE SET card_id = EXCLUDED.card_id
         RETURNING id INTO v_variant_id;
     END IF;
 
-    -- ── 4. Record variant source if present (e.g. deck_exclusive) ────────
-    IF v_row.source_type IS NOT NULL THEN
-        INSERT INTO card_variant_sources (variant_id, source_type, product_name)
-        VALUES (v_variant_id, v_row.source_type, v_row.notes)
-        ON CONFLICT (variant_id, source_type, product_name) DO NOTHING;
-    END IF;
-
-    -- ── 5. Insert the inventory row ──────────────────────────────────────
-    v_list_price := COALESCE(v_row.override_price, v_row.calculated_price);
-
-    IF v_is_ebay THEN
-        v_cost   := 0;
-        v_asking := v_row.price;
-    ELSE
-        v_cost   := v_row.price;
-        v_asking := v_list_price;
-    END IF;
+    -- 5. Insert the inventory row (per-source $ handling)
+    v_cost   := v_row.price;
+    v_asking := v_row.listing_price;
 
     INSERT INTO inventory (
         card_id, purchase_id, condition, is_graded, quantity,
@@ -135,10 +155,7 @@ BEGIN
     )
     RETURNING id INTO v_inventory_id;
 
-    -- ── 5b. Recompute purchase summary totals ────────────────────────────
-    -- Reflects ALL inventory rows linked to this purchase, not just this one,
-    -- so card_count/total_cost/purchase_type stay accurate as additional
-    -- staging rows from the same order are pushed over time.
+    -- 5b. Recompute purchase summary totals
     UPDATE purchases p
     SET
         card_count    = totals.card_count,
@@ -153,10 +170,7 @@ BEGIN
     ) AS totals
     WHERE p.id = v_purchase_id;
 
-    -- ── 6. Upsert market price if available ──────────────────────────────
-    -- For eBay rows: staging.market_price / staging.market_price_date columns.
-    -- For TCGPlayer rows: market price was already written during staging
-    -- import (tcgplayer_html.py), so this is a best-effort top-up only.
+    -- 6. Upsert market price snapshot if available
     v_market_price := v_row.market_price;
     v_market_date  := v_row.market_price_date;
 
@@ -175,7 +189,50 @@ BEGIN
         WHERE market_prices.updated_at < EXCLUDED.updated_at;
     END IF;
 
-    -- ── 7. Mark staging row as processed ────────────────────────────────
+    -- 7. Record eBay listing mapping and platform state
+    IF v_is_ebay AND v_variant_id IS NOT NULL THEN
+
+        INSERT INTO ebay_listing_map
+            (item_id, variation_name, variant_id, condition, source, last_synced_at)
+        VALUES (
+            v_row.order_number,
+            COALESCE(v_row.variation_name, ''),
+            v_variant_id,
+            v_row.condition,
+            'manual_push',
+            now()
+        )
+        ON CONFLICT DO NOTHING;
+
+        INSERT INTO platform_listings
+            (variant_id, platform, listing_id, external_id, list_price,
+             quantity_listed, status, account, listed_at)
+        VALUES (
+            v_variant_id,
+            'ebay',
+            v_row.order_number,
+            COALESCE(v_row.variation_name, ''),
+            v_row.listing_price,
+            v_row.quantity,
+            CASE WHEN v_row.quantity > 0 THEN 'active' ELSE 'out_of_stock' END,
+            v_row.account,
+            now()
+        )
+        ON CONFLICT (variant_id, platform, listing_id, external_id) DO NOTHING;
+
+        -- Update list_price and account if staging was manually corrected
+        UPDATE platform_listings
+        SET list_price = v_row.listing_price,
+            account    = v_row.account,
+            synced_at  = now()
+        WHERE variant_id  = v_variant_id
+          AND platform    = 'ebay'
+          AND listing_id  = v_row.order_number
+          AND external_id = COALESCE(v_row.variation_name, '');
+
+    END IF;
+
+    -- 8. Mark staging row as processed
     UPDATE staging
     SET status = 'processed', updated_at = now()
     WHERE id = p_staging_id;
@@ -186,4 +243,4 @@ BEGIN
         'purchase_id',  v_purchase_id
     );
 END;
-$$;
+$function$;
