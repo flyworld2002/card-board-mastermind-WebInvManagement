@@ -683,6 +683,18 @@ function listingGroupHtml(L, s, idx) {
     const allChecked = L.cards.length > 0 && L.cards.every(c => !!s.checked[c.key]);
     const someChecked = L.cards.some(c => !!s.checked[c.key]);
 
+    // Total cards to pick from this box (sum of every row's qty), and how many
+    // of those are already checked off.
+    const totalQty = L.cards.reduce((n, c) => n + c.qty, 0);
+    const pickedQty = L.cards.reduce((n, c) => n + (s.checked[c.key] ? c.qty : 0), 0);
+    const totalHtml = `
+        <span style="font-size:15px; font-weight:700; color:var(--accent, #7fb0ff); white-space:nowrap;"
+              title="Total cards to pick from this listing">
+            ${totalQty} card${totalQty === 1 ? '' : 's'}${pickedQty > 0
+                ? ` <span style="font-weight:400; font-size:12px; color:var(--text-secondary);">· ${pickedQty} picked · ${totalQty - pickedQty} left</span>`
+                : ''}
+        </span>`;
+
     return `
     <div style="border:1px solid var(--border); border-radius:8px; overflow:hidden; margin-bottom:12px;">
         <div style="padding:8px 12px; background:var(--bg-secondary); font-size:13px; font-weight:600;
@@ -691,6 +703,7 @@ function listingGroupHtml(L, s, idx) {
                    ${!allChecked && someChecked ? 'data-indeterminate="1"' : ''}
                    title="Check/uncheck all cards in this listing">
             <span style="flex:1;">${escapeHtml(L.title || '(untitled listing)')}</span>
+            ${totalHtml}
             <span style="color:var(--text-secondary); font-weight:400; font-size:11px;">item ${escapeHtml(L.itemId || '—')}</span>
         </div>
         <table style="table-layout:fixed; font-size:15px;">
