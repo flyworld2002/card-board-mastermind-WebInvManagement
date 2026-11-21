@@ -120,6 +120,26 @@ export async function renderSales(container) {
 // Data
 // ----------------------------------------------------------------
 
+// Supabase returns at most 1000 rows per request, so a plain select('*') on a
+// bigger table silently drops the rest (sale_line_item_fees has thousands of
+// rows, and the newest orders' fees were the ones missing). Page through the
+// whole table, in a stable order.
+async function fetchAllRows(table) {
+    const pageSize = 1000;
+    let all = [];
+    for (let from = 0; ; from += pageSize) {
+        const { data, error } = await supabase
+            .from(table)
+            .select('*')
+            .order('id', { ascending: true })
+            .range(from, from + pageSize - 1);
+        if (error) return { data: null, error };
+        all = all.concat(data || []);
+        if (!data || data.length < pageSize) break;
+    }
+    return { data: all, error: null };
+}
+
 async function loadAndRender(container) {
     const wrap = container.querySelector('#sales-table-wrap');
     wrap.innerHTML = '<p>Loading sales...</p>';
@@ -131,12 +151,8 @@ async function loadAndRender(container) {
             .order('sold_at', { ascending: false })
             .order('created_at', { ascending: false })
             .limit(500),
-        supabase
-            .from('sale_orders')
-            .select('*'),
-        supabase
-            .from('sale_line_item_fees')
-            .select('*'),
+        fetchAllRows('sale_orders'),
+        fetchAllRows('sale_line_item_fees'),
     ]);
 
     if (salesRes.error) {
