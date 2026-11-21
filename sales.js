@@ -213,6 +213,17 @@ function visibleOrders() {
         }
         eventById[r.sale_group_id].rows.push(r);
     }
+    // Revenue per eBay line item across ALL loaded sales (not only the filtered
+    // ones). When one line item is recorded as several sale events (e.g. a
+    // custom mixed lot entered one card per sale), the line's fee is split
+    // between those events by revenue instead of being counted once per event.
+    const lineRevenue = {};
+    for (const r of state.rows) {
+        if (!r.order_line_item_id) continue;
+        const k = lineFeeKey(r.platform, r.account, r.order_line_item_id);
+        lineRevenue[k] = (lineRevenue[k] || 0) + (r.sale_price || 0) * (r.quantity_sold || 0);
+    }
+
     for (const ev of events) {
         ev.qty         = ev.rows.reduce((a, r) => a + (r.quantity_sold || 0), 0);
         ev.revenue     = ev.rows.reduce((a, r) => a + (r.sale_price || 0) * (r.quantity_sold || 0), 0);
@@ -231,10 +242,16 @@ function visibleOrders() {
             const key = lineFeeKey(ev.first.platform, ev.first.account, lid);
             const lf = state.lineFees[key];
             if (lf) {
+                // This event's share of the line (1 unless the line is split
+                // across several sale events, see lineRevenue above).
+                const evLineRev = ev.rows
+                    .filter(r => r.order_line_item_id === lid)
+                    .reduce((a, r) => a + (r.sale_price || 0) * (r.quantity_sold || 0), 0);
+                const share = lineRevenue[key] > 0 ? Math.min(evLineRev / lineRevenue[key], 1) : 1;
                 ev.hasLineFeeData = true;
-                ev.lineFVF      += lf.final_value_fee || 0;
-                ev.lineDiscount += lf.discount_amount || 0;
-                ev.lineRefund   += lf.refund_amount || 0;
+                ev.lineFVF      += (lf.final_value_fee || 0) * share;
+                ev.lineDiscount += (lf.discount_amount || 0) * share;
+                ev.lineRefund   += (lf.refund_amount || 0) * share;
             }
         }
     }
