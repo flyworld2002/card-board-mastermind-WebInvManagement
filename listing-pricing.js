@@ -940,6 +940,7 @@ function isGatedIn(r) {
 
 function sourceBadge(source) {
     if (source === 'pin') return `<span class="badge" style="background:rgba(167,139,250,0.15); color:#a78bfa;">pinned</span>`;
+    if (source === 'floor') return `<span class="badge" style="background:rgba(245,166,35,0.15); color:#f5b649;" title="The floor price is higher than the market/tier price">floor</span>`;
     if (source === 'default') return `<span class="badge badge-ambiguous">default</span>`;
     return `<span class="badge badge-matched">group</span>`;
 }
@@ -1912,7 +1913,7 @@ function groupSectionHTML(group, rows) {
             ${rows.length ? `
                 <table>
                     <thead><tr>
-                        <th style="width:24px;"></th><th></th><th>Variation</th><th>Set</th><th>Status</th><th>Market</th><th>Resolved</th><th>Source</th><th>Synced?</th><th>Available</th><th>Resolved Qty</th><th>Low-stock qty</th><th>Manual pin</th><th>Qty Limit pin</th><th>Actions</th>
+                        <th style="width:24px;"></th><th></th><th>Variation</th><th>Set</th><th>Status</th><th>Market</th><th>Resolved</th><th>Source</th><th>Synced?</th><th>Available</th><th>Resolved Qty</th><th>Low-stock qty</th><th title="Pin = exact price. Floor = never below this price (market/tier can go higher). A pin wins over a floor.">Pin / floor</th><th>Qty Limit pin</th><th>Actions</th>
                     </tr></thead>
                     <tbody>${rows.map(r => rowHTML(r)).join('')}</tbody>
                 </table>
@@ -1963,8 +1964,12 @@ function rowHTML(r) {
             <td class="lp-resolved-qty-cell">${resolvedQtyCellHTML(r, diff)}</td>
             <td><input type="number" class="lp-low-stock-input" data-row-id="${r.row_id}"
                        value="${r.row_low_stock_qty ?? ''}" placeholder="-" style="width:60px;" /></td>
-            <td><input type="number" step="0.01" class="lp-pin-input" data-row-id="${r.row_id}"
-                       value="${r.manual_price ?? ''}" placeholder="unpinned" style="width:80px;" /></td>
+            <td>
+                <input type="number" step="0.01" class="lp-pin-input" data-row-id="${r.row_id}"
+                       value="${r.manual_price ?? ''}" placeholder="pin (exact)" title="Pin: exact price" style="width:90px; display:block;" />
+                <input type="number" step="0.01" class="lp-floor-input" data-row-id="${r.row_id}"
+                       value="${r.floor_price ?? ''}" placeholder="floor (min)" title="Floor: never below this price (ignored while a pin is set)" style="width:90px; display:block; margin-top:3px;" />
+            </td>
             <td><input type="number" class="lp-qty-limit-input" data-row-id="${r.row_id}"
                        value="${r.row_quantity_limit ?? ''}" placeholder="default" style="width:70px;" /></td>
             <td style="white-space:nowrap;">${actionsHTML(r)}</td>
@@ -2254,6 +2259,20 @@ function wireControls(container, body) {
             const manualPrice = raw === '' ? null : parseFloat(raw);
             const { error } = await supabase.from('listing_card_assignments').update({ manual_price: manualPrice }).eq('id', rowId);
             if (error) { window.alert(`Failed to save pin: ${error.message}`); return; }
+            await refreshRowDerivedCells(container, rowId);
+        });
+    });
+
+    // Floor (floor_price): the price never drops below this, but the market/tier
+    // price can go higher. A manual pin still wins over a floor.
+    body.querySelectorAll('.lp-floor-input').forEach(input => {
+        input.addEventListener('change', async () => {
+            const rowId = input.dataset.rowId;
+            const raw = input.value.trim();
+            const floorPrice = raw === '' ? null : parseFloat(raw);
+            if (floorPrice !== null && !(floorPrice > 0)) { window.alert('Floor price must be more than 0.'); return; }
+            const { error } = await supabase.from('listing_card_assignments').update({ floor_price: floorPrice }).eq('id', rowId);
+            if (error) { window.alert(`Failed to save floor price: ${error.message}`); return; }
             await refreshRowDerivedCells(container, rowId);
         });
     });
