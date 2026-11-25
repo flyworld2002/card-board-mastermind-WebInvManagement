@@ -37,6 +37,10 @@ let syncControlsState = {
     statuses: [],
 };
 
+let platformRulesState = {
+    rules: [],
+};
+
 let profilesState = {
     profiles: [],
 };
@@ -113,6 +117,11 @@ export async function renderConfiguration(container, initialKey = 'sets') {
         container.innerHTML = configShell(syncControlsSectionHTML());
         wireConfigNav(container, 'sync-controls');
         await loadSyncControls(container);
+    } else if (initialKey === 'platform-rules') {
+        platformRulesState = { rules: [] };
+        container.innerHTML = configShell(platformRulesSectionHTML());
+        wireConfigNav(container, 'platform-rules');
+        await loadPlatformRules(container);
     } else if (initialKey === 'pricing-profiles') {
         profilesState = { profiles: [] };
         container.innerHTML = configShell(profilesSectionHTML());
@@ -147,6 +156,7 @@ function configShell(bodyHTML) {
                 <a href="#sets" data-config-nav="sets" class="config-nav-item">Sets</a>
                 <a href="#card-games" data-config-nav="card-games" class="config-nav-item">Card games</a>
                 <a href="#pricing-rules" data-config-nav="pricing-rules" class="config-nav-item">Pricing rules</a>
+                <a href="#platform-rules" data-config-nav="platform-rules" class="config-nav-item">Platform rules</a>
                 <a href="#pricing-profiles" data-config-nav="pricing-profiles" class="config-nav-item">Pricing profiles</a>
                 <a href="#groups" data-config-nav="groups" class="config-nav-item">Groups</a>
                 <a href="#description-templates" data-config-nav="description-templates" class="config-nav-item">Description templates</a>
@@ -190,6 +200,8 @@ function wireConfigNav(container, activeKey) {
                 await renderConfiguration(container, 'variant-attributes');
             } else if (key === 'sync-controls') {
                 await renderConfiguration(container, 'sync-controls');
+            } else if (key === 'platform-rules') {
+                await renderConfiguration(container, 'platform-rules');
             } else if (key === 'pricing-profiles') {
                 await renderConfiguration(container, 'pricing-profiles');
             } else if (key === 'groups') {
@@ -210,6 +222,7 @@ function labelFor(key) {
         'card-games': 'Card games',
         'pricing-rules': 'Pricing rules',
         'sync-controls': 'Sync controls',
+        'platform-rules': 'Platform rules',
         'pricing-profiles': 'Pricing profiles',
         'groups': 'Groups',
         'description-templates': 'Description templates',
@@ -2093,6 +2106,162 @@ function openSyncStatusModal(container, statusId) {
         } catch (err) {
             console.error(err);
             errBox.textContent = err.message || 'Failed to save kill switch.';
+        }
+    });
+}
+
+// ── Platform rules section (platform_price_rules) ───────────────────────────
+// Per-platform, per-product-type pricing rules applied on top of the normal
+// tier pricing. Today there is one kind: the "shipping band" — eBay ships a
+// single card on the $0.78 label up to $20 and charges $5.99 above that, so a
+// computed price from the band start up to the first band's top becomes the
+// first band price (e.g. $19.99), and a price above that up to the second
+// band's top becomes the second band price (e.g. $25.99). Prices below the band
+// start and above the second band keep their normal tier price. A manual pin or
+// a floor price on a card still wins. A platform with no row here is unchanged.
+// The database stores the last price that stays normal (normal_up_to); the form
+// shows the band START (normal_up_to + 0.01) because that is how it is read.
+
+function platformRulesSectionHTML() {
+    return `
+        <p style="color:var(--text-secondary); font-size:12px; margin:0 0 12px;">
+            Pricing rules that belong to one platform and product type. The eBay single-card
+            <b>shipping band</b> moves computed prices out of the zone where eBay's $5.99 shipping makes a card
+            net less than it would at the cheap-label price. Pins and floors still win. A platform with no
+            row here keeps normal tier pricing. Changes reach eBay the next time a listing is pushed.
+        </p>
+        <div class="filters-bar" style="justify-content:flex-end;">
+            <button class="btn btn-primary" id="new-platformrule-btn">+ New rule</button>
+        </div>
+        <div id="platformrule-table-wrap"><p>Loading...</p></div>
+        <div id="platformrule-modal-root"></div>
+    `;
+}
+
+async function loadPlatformRules(container) {
+    const wrap = container.querySelector('#platformrule-table-wrap');
+    try {
+        const { data, error } = await supabase.from('platform_price_rules').select('*').order('platform').order('product_type');
+        if (error) throw error;
+        platformRulesState.rules = data || [];
+        renderPlatformRulesTable(container);
+    } catch (err) {
+        console.error(err);
+        wrap.innerHTML = `<p style="color:var(--danger)">Failed to load platform rules: ${err.message}</p>`;
+    }
+}
+
+function money(n) {
+    return '$' + Number(n).toFixed(2);
+}
+
+function bandStart(rule) {
+    return Number((Number(rule.normal_up_to) + 0.01).toFixed(2));
+}
+
+function describeRule(rule) {
+    return `Below ${money(bandStart(rule))}: normal price. ${money(bandStart(rule))} to ${money(rule.band1_up_to)} → ${money(rule.band1_price)}. `
+         + `Above ${money(rule.band1_up_to)} up to ${money(rule.band2_up_to)} → ${money(rule.band2_price)}. `
+         + `Above ${money(rule.band2_up_to)}: normal price.`;
+}
+
+function renderPlatformRulesTable(container) {
+    const wrap = container.querySelector('#platformrule-table-wrap');
+    const rules = platformRulesState.rules;
+
+    if (!rules.length) {
+        wrap.innerHTML = `<p style="color:var(--text-secondary)">No platform rules — every platform uses normal tier pricing.</p>`;
+    } else {
+        wrap.innerHTML = `
+            <table>
+                <thead><tr>
+                    <th>Platform</th><th>Product type</th><th>Rule (shipping band)</th><th>Status</th><th>Notes</th><th style="width:60px;"></th>
+                </tr></thead>
+                <tbody>
+                    ${rules.map(r => `
+                        <tr>
+                            <td>${escapeHTML(r.platform)}</td>
+                            <td>${escapeHTML(r.product_type)}</td>
+                            <td style="font-size:12px;">${escapeHTML(describeRule(r))}</td>
+                            <td>${r.enabled
+                                ? '<span style="color:var(--success);">On</span>'
+                                : '<span style="color:var(--danger); font-weight:600;">OFF</span>'}</td>
+                            <td style="color:var(--text-secondary); font-size:12px;">${escapeHTML(r.note || '-')}</td>
+                            <td><button class="btn edit-platformrule-btn" data-id="${r.id}">Edit</button></td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+    }
+
+    container.querySelector('#new-platformrule-btn').addEventListener('click', () => openPlatformRuleModal(container, null));
+    wrap.querySelectorAll('.edit-platformrule-btn').forEach(btn => {
+        btn.addEventListener('click', () => openPlatformRuleModal(container, btn.dataset.id));
+    });
+}
+
+function openPlatformRuleModal(container, ruleId) {
+    const isEdit = !!ruleId;
+    const existing = isEdit ? platformRulesState.rules.find(r => String(r.id) === String(ruleId)) : null;
+    const root = container.querySelector('#platformrule-modal-root');
+
+    root.innerHTML = modalShell(isEdit ? 'Edit platform rule' : 'New platform rule', `
+        <div style="display:flex; flex-direction:column; gap:10px;">
+            ${field('Platform', 'text', 'platform', existing?.platform || 'ebay')}
+            ${field('Product type', 'text', 'product_type', existing?.product_type || 'single_card')}
+            <label style="font-size:12px; color:var(--text-secondary); display:flex; align-items:center; gap:8px;">
+                <input type="checkbox" name="enabled" ${existing ? (existing.enabled ? 'checked' : '') : 'checked'} />
+                Rule on (uncheck to go back to normal tier pricing for this platform and product type)
+            </label>
+            ${field('Band starts at (prices below this stay normal)', 'number', 'band_start', existing ? bandStart(existing) : 16.99, '', '0.01')}
+            ${field('First band goes up to (and including)', 'number', 'band1_up_to', existing?.band1_up_to ?? 21.99, '', '0.01')}
+            ${field('First band price', 'number', 'band1_price', existing?.band1_price ?? 19.99, '', '0.01')}
+            ${field('Second band goes up to (and including)', 'number', 'band2_up_to', existing?.band2_up_to ?? 25.99, '', '0.01')}
+            ${field('Second band price', 'number', 'band2_price', existing?.band2_price ?? 25.99, '', '0.01')}
+            ${field('Notes', 'text', 'note', existing?.note || '', 'what this rule is for', '', true)}
+        </div>
+    `, isEdit, 'platformrule');
+
+    root.querySelector('#modal-cancel').addEventListener('click', () => { root.innerHTML = ''; });
+    if (isEdit) {
+        root.querySelector('#modal-delete').addEventListener('click', async () => {
+            root.innerHTML = '';
+            await confirmDelete(container, 'platform_price_rules', existing.id, `this platform rule`, () => loadPlatformRules(container));
+        });
+    }
+    root.querySelector('#modal-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const errBox = root.querySelector('#modal-error');
+        errBox.textContent = '';
+        const fd = new FormData(e.target);
+        const num = (k) => parseFloat(fd.get(k));
+        const start = num('band_start');
+        const b1Up = num('band1_up_to'), b1Price = num('band1_price');
+        const b2Up = num('band2_up_to'), b2Price = num('band2_price');
+        if ([start, b1Up, b1Price, b2Up, b2Price].some(x => !(x > 0))) { errBox.textContent = 'Every price must be more than 0.'; return; }
+        if (!(start <= b1Up)) { errBox.textContent = 'The band start must be at or below the first band\'s top.'; return; }
+        if (!(b1Up < b2Up)) { errBox.textContent = 'The second band must go higher than the first.'; return; }
+        const payload = {
+            platform: fd.get('platform').trim(),
+            product_type: fd.get('product_type').trim(),
+            enabled: fd.get('enabled') === 'on',
+            normal_up_to: Number((start - 0.01).toFixed(2)),
+            band1_up_to: b1Up, band1_price: b1Price,
+            band2_up_to: b2Up, band2_price: b2Price,
+            note: fd.get('note').trim() || null,
+            updated_at: new Date().toISOString(),
+        };
+        try {
+            const { error } = isEdit
+                ? await supabase.from('platform_price_rules').update(payload).eq('id', existing.id)
+                : await supabase.from('platform_price_rules').insert(payload);
+            if (error) throw error;
+            root.innerHTML = '';
+            await loadPlatformRules(container);
+        } catch (err) {
+            console.error(err);
+            errBox.textContent = err.message || 'Failed to save platform rule.';
         }
     });
 }

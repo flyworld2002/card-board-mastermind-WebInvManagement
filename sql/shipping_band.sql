@@ -55,3 +55,11 @@ RETURNS numeric LANGUAGE sql STABLE AS $f$
     WHERE r.platform = p_platform AND r.product_type = p_product_type AND r.enabled
     LIMIT 1), p)
 $f$;
+
+-- Same access rule as the other settings tables: signed-in users only (the public
+-- key alone can neither read nor change pricing rules). Applied 2026-11-24.
+ALTER TABLE public.platform_price_rules ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "authenticated only" ON public.platform_price_rules FOR ALL USING (auth.role() = 'authenticated'::text);
+
+-- Corrected 2026-11-24: the band starts AT 16.99 (normal_up_to = 16.98 means prices up to 16.98 stay normal).
+-- UPDATE platform_price_rules SET normal_up_to = 16.98 WHERE platform = 'ebay' AND product_type = 'single_card';
