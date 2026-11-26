@@ -280,7 +280,7 @@ function msgHtml(o) {
     if (mi.unseen) parts.push(`<span style="color:var(--accent); font-weight:600;">✉ ${mi.unseen} new</span>`);
     else if (mi.unreadOnTcg) parts.push('<span style="color:var(--accent);">✉ unread on TCGplayer</span>');
     else parts.push('✉');
-    if (mi.turn) parts.push(esc(mi.turn));
+    if (mi.turn && !(mi.unreadOnTcg && !mi.unseen && mi.turn.startsWith('unread on TCGplayer'))) parts.push(esc(mi.turn));
     return `<div style="font-size:11px; color:var(--text-secondary); margin-top:2px;">${parts.join(' · ')}</div>`;
 }
 
