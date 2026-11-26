@@ -267,7 +267,11 @@
             const badge = document.getElementById('incoming-badge');
             if (!badge) return;
             const { data, error } = await supabase.from('v_tcg_order_alerts').select('order_number');
-            const n = error ? 0 : new Set((data || []).map(r => r.order_number)).size;
+            const orders = new Set(error ? [] : (data || []).map(r => r.order_number));
+            // + orders with seller messages not looked at yet
+            const msgs = await supabase.from('tcg_msg_messages').select('order_number').eq('direction', 'in').is('seen_at', null).limit(5000);
+            if (!msgs.error) for (const m of msgs.data || []) orders.add(m.order_number);
+            const n = orders.size;
             if (n > 0) {
                 badge.textContent = n;
                 badge.style.display = 'inline-block';
