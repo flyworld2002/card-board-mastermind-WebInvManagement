@@ -199,6 +199,7 @@
                         <a href="#inventory" data-page="inventory">Inventory</a>
                         <a href="#purchases" data-page="purchases">Purchases</a>
                         <a href="#incoming" data-page="incoming">Incoming <span id="incoming-badge" class="badge badge-restock" style="display:none;"></span></a>
+                        <a href="#held" data-page="held">Held <span id="held-badge" class="badge badge-restock" style="display:none;"></span></a>
                         <a href="#sales" data-page="sales">Sales</a>
                         <a href="#issues" data-page="issues">Issues <span id="issues-badge" class="badge badge-not_found" style="display:none;"></span></a>
                         <a href="#picking" data-page="picking">Picking</a>
@@ -231,7 +232,28 @@
             setupRestockRealtime();
             refreshPriceHoldsBadge();
             refreshIncomingBadge();
+            refreshHeldBadge();
         }
+
+        // ── Held badge — TCGplayer cards currently set aside (tcg_held_cards.status = 'held').
+        async function refreshHeldBadge() {
+            const badge = document.getElementById('held-badge');
+            if (!badge) return;
+            const { count, error } = await supabase
+                .from('tcg_held_cards')
+                .select('id', { count: 'exact', head: true })
+                .eq('status', 'held');
+            // + refunds still waiting for a decision (v_tcg_refund_review)
+            const refunds = await supabase.from('v_tcg_refund_review').select('refund_id', { count: 'exact', head: true });
+            const n = (error ? 0 : (count || 0)) + (refunds.error ? 0 : (refunds.count || 0));
+            if (n > 0) {
+                badge.textContent = n;
+                badge.style.display = 'inline-block';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+        window.__cbmRefreshHeldBadge = refreshHeldBadge;
 
         // ── Incoming badge — open TCGplayer orders that need a look (stuck, no
         // tracking too long, past the estimated delivery). Orders are read once a
@@ -397,6 +419,11 @@
                     case 'purchases': {
                         const { renderPurchases } = await import(`./purchases.js?v=${Date.now()}`);
                         await renderPurchases(content);
+                        break;
+                    }
+                    case 'held': {
+                        const { renderHeld } = await import(`./held.js?v=${Date.now()}`);
+                        await renderHeld(content);
                         break;
                     }
                     case 'incoming': {

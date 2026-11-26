@@ -34,6 +34,7 @@ const state = {
         // Full unfiltered counts — used for dropdown option lists
     },
     expandedRowId: null,
+    tcgMarks: new Map(),   // staging_id -> tcg_staged_lines row (rows that came from a TCGplayer order)
     selectedIds: new Set(),
     sort: { column: null, ascending: true }, // null = default order_date/card_name sort
     // Last batch-action summary (push/delete/rematch), rendered into
@@ -54,6 +55,16 @@ export async function renderStagingReview(container) {
         </div>
         <div class="pagination" id="pagination"></div>
     `;
+
+    // Coming from the Incoming page ("Open in Staging Review"): show just that order's batch.
+    const preset = window.__cbmStagingPreset;
+    if (preset) {
+        window.__cbmStagingPreset = null;
+        Object.assign(state.filters, { source: 'all', status: 'all', match_status: 'all', set_name: 'all', search: '',
+                                       import_batch: preset.import_batch });
+        state.page = 0;
+        state.selectedIds.clear();
+    }
 
     await loadImportBatches();
     await loadSets();
@@ -251,6 +262,14 @@ async function loadAndRenderRows(container) {
 
     state.rows = data;
     state.totalCount = count ?? 0;
+
+    // Rows that came from a TCGplayer order carry a tcg_staged_lines row (ordered / short / held counts).
+    state.tcgMarks = new Map();
+    const ids = data.map(r => r.staging_id);
+    if (ids.length) {
+        const { data: marks } = await supabase.from('tcg_staged_lines').select('*').in('staging_id', ids);
+        for (const m of marks || []) state.tcgMarks.set(m.staging_id, m);
+    }
 
     renderTable(container);
     renderPagination(container);
@@ -689,6 +708,15 @@ function customVariantWarningHTML(row) {
     return `<span title="Custom value, not a real dropdown option -- ${escapeHtml(detail)}" style="margin-left:4px; cursor:help;">⚠️</span>`;
 }
 
+// "ordered 6 · short 1 · held 1" next to a card that came from a TCGplayer order.
+function tcgChips(row) {
+    const m = state.tcgMarks.get(row.staging_id);
+    if (!m || (!m.short_qty && !m.held_qty)) return '';
+    const chip = (t, c) => `<span style="margin-left:6px; font-size:11px; padding:1px 6px; border-radius:8px; border:1px solid ${c}; color:${c};">${t}</span>`;
+    return (m.short_qty ? chip(`short ${m.short_qty}`, 'var(--danger)') : '')
+         + (m.held_qty ? chip(`held ${m.held_qty}`, 'var(--warning)') : '');
+}
+
 function renderRow(container, row) {
     const tr = document.createElement('tr');
     tr.dataset.stagingId = row.staging_id;
@@ -705,7 +733,7 @@ function renderRow(container, row) {
         </td>
         <td style="cursor:pointer;">${state.expandedRowId === row.staging_id ? '&#9660;' : '&#9656;'}</td>
         <td style="cursor:pointer; color:var(--text-secondary); font-size:12px;">${escapeHtml(cardNum)}</td>
-        <td style="cursor:pointer;">${escapeHtml(row.card_name || '')}</td>
+        <td style="cursor:pointer;">${escapeHtml(row.card_name || '')}${tcgChips(row)}</td>
         <td style="cursor:pointer;">${escapeHtml(row.set_name || row.matched_set_name || '-')}</td>
         <td style="cursor:pointer;">${escapeHtml(row.condition || '-')}</td>
         <td style="cursor:pointer; font-size:12px;">${escapeHtml(variantLabel(row))}${customVariantWarningHTML(row)}</td>
@@ -745,6 +773,66 @@ function renderRow(container, row) {
     }
 
     return tr;
+}
+
+// ----------------------------------------------------------------
+// TCGplayer order rows: Short (did not arrive) and Hold (arrived, set aside)
+// ----------------------------------------------------------------
+
+const HOLD_REASONS = [
+    ['wrong_condition', 'Wrong condition'], ['error', 'Error card'],
+    ['grading', 'Hold for grading'], ['waiting_seller', 'Waiting on seller'],
+];
+
+function wireTcgPanel(container, td, row) {
+    const mark = state.tcgMarks.get(row.staging_id);
+    const form = td.querySelector('.tcg-form');
+    const left = mark.ordered_qty - mark.short_qty - mark.held_qty;
+    const done = async (promise) => {
+        const { error } = await promise;
+        if (error) { form.insertAdjacentHTML('beforeend', `<div style="color:var(--danger); margin-top:6px;">${escapeHtml(error.message)}</div>`); return; }
+        await loadAndRenderRows(container);
+    };
+
+    td.querySelector('.tcg-short-btn').addEventListener('click', () => {
+        form.innerHTML = `
+            <label>How many of the ${mark.ordered_qty} did not arrive?
+                <input type="number" class="tcg-short-qty" min="0" max="${mark.ordered_qty - mark.held_qty}" value="${Math.max(mark.short_qty, 1)}" style="width:70px;" /></label>
+            <input type="text" class="tcg-short-note" placeholder="Note (optional)" value="${escapeHtml(mark.short_note || '')}" style="width:240px; margin-left:8px;" />
+            <button class="btn btn-primary tcg-short-save" type="button" style="margin-left:8px;">Save</button>
+            <span style="color:var(--text-secondary); font-size:12px; margin-left:6px;">0 clears it</span>`;
+        form.querySelector('.tcg-short-save').addEventListener('click', () => done(
+            supabase.rpc('tcg_set_short', {
+                p_staging_id: row.staging_id,
+                p_short_qty: Number(form.querySelector('.tcg-short-qty').value),
+                p_note: form.querySelector('.tcg-short-note').value.trim() || null,
+            })));
+    });
+
+    td.querySelector('.tcg-hold-btn').addEventListener('click', () => {
+        if (left < 1) { form.innerHTML = '<span style="color:var(--text-secondary);">No cards left on this line to hold.</span>'; return; }
+        form.innerHTML = `
+            <div style="margin-bottom:6px;">
+                <label>How many to hold?
+                    <input type="number" class="tcg-hold-qty" min="1" max="${left}" value="1" style="width:70px;" /></label>
+                <span style="color:var(--text-secondary); font-size:12px; margin-left:6px;">Each held card is its own record; the rest go to inventory.</span>
+            </div>
+            <div style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:6px;">
+                ${HOLD_REASONS.map(([k, label]) => `<label style="display:flex; gap:4px; align-items:center;"><input type="checkbox" class="tcg-hold-flag" value="${k}" />${label}</label>`).join('')}
+            </div>
+            <input type="text" class="tcg-hold-note" placeholder="Note (optional)" style="width:300px;" />
+            <button class="btn btn-primary tcg-hold-save" type="button" style="margin-left:8px;">Hold</button>`;
+        form.querySelector('.tcg-hold-save').addEventListener('click', () => {
+            const flags = [...form.querySelectorAll('.tcg-hold-flag:checked')].map(c => c.value);
+            if (!flags.length) { alert('Pick at least one reason.'); return; }
+            done(supabase.rpc('tcg_hold_cards', {
+                p_staging_id: row.staging_id,
+                p_qty: Number(form.querySelector('.tcg-hold-qty').value),
+                p_flags: flags,
+                p_note: form.querySelector('.tcg-hold-note').value.trim() || null,
+            }));
+        });
+    });
 }
 
 // ----------------------------------------------------------------
@@ -876,9 +964,23 @@ function renderExpandedRow(container, row) {
             <div class="match-resolution"></div>
             <div class="rematch-results" style="margin-bottom:8px;"></div>
 
+            ${state.tcgMarks.has(row.staging_id) ? `
+            <div class="tcg-panel" style="margin-top:12px; padding:10px 12px; border:1px solid var(--border); border-radius:6px; font-size:13px;">
+                <div><strong>TCGplayer order ${escapeHtml(state.tcgMarks.get(row.staging_id).order_number)}</strong>:
+                    ordered ${state.tcgMarks.get(row.staging_id).ordered_qty},
+                    short ${state.tcgMarks.get(row.staging_id).short_qty},
+                    held ${state.tcgMarks.get(row.staging_id).held_qty},
+                    arriving into inventory ${row.quantity}.</div>
+                <div style="display:flex; gap:8px; margin-top:8px;">
+                    <button class="btn tcg-short-btn" type="button">Short (didn't arrive)</button>
+                    <button class="btn tcg-hold-btn" type="button">Hold (set aside)</button>
+                </div>
+                <div class="tcg-form" style="margin-top:8px;"></div>
+            </div>` : ''}
+
             <div style="display:flex; gap:8px; margin-top:12px;">
                 <button class="btn save-btn">Save changes</button>
-                <button class="btn btn-primary push-btn" ${(row.match_status !== 'matched' || row.status === 'processed') ? 'disabled' : ''}>
+                <button class="btn btn-primary push-btn" ${(row.match_status !== 'matched' || row.status === 'processed' || !(row.quantity > 0)) ? 'disabled' : ''}>
                     Push to inventory
                 </button>
                 <button class="btn skip-btn">Skip</button>
@@ -906,6 +1008,8 @@ function renderExpandedRow(container, row) {
             renderWrongMatchResolution(container, td, row, matchDiv);
         });
     }
+
+    if (state.tcgMarks.has(row.staging_id)) wireTcgPanel(container, td, row);
 
     // Save changes
     td.querySelector('.save-btn').addEventListener('click', () => saveRowChanges(container, td, row));
@@ -1999,7 +2103,7 @@ async function batchPushSelected(container) {
     const allIds = [...state.selectedIds];
     const pushable = allIds.filter(id => {
         const row = state.rows.find(r => r.staging_id === id);
-        return row && row.match_status === 'matched' && row.status !== 'processed';
+        return row && row.match_status === 'matched' && row.status !== 'processed' && row.quantity > 0;
     });
     const skipped = allIds.length - pushable.length;
 

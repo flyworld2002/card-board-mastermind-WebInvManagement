@@ -28,7 +28,7 @@ const FILTERS = [
     ['refunds', 'Refunds'], ['received', 'Received'],
 ];
 
-const state = { orders: [], alerts: new Map(), lines: new Map(), files: [], filter: 'open', openOrder: null, seller: '' };
+const state = { toFix: 0, orders: [], alerts: new Map(), lines: new Map(), files: [], filter: 'open', openOrder: null, seller: '' };
 
 const fmtDate = (d) => d ? new Date(d + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
 const money = (v) => v == null ? '—' : formatPrice(v);
@@ -42,6 +42,8 @@ function ago(iso) {
     return `${d} day${d === 1 ? '' : 's'} ago`;
 }
 
+const matchModule = () => import(`./incoming-match.js?v=${Date.now()}`);
+
 async function load() {
     const [orders, alerts, files] = await Promise.all([
         supabase.from('tcg_orders').select('*').order('ordered_on', { ascending: false }).limit(2000),
@@ -51,6 +53,7 @@ async function load() {
     const err = orders.error || alerts.error || files.error;
     if (err) throw new Error(err.message);
     state.orders = orders.data || [];
+    try { state.toFix = await (await matchModule()).countLinesToFix(); } catch { state.toFix = 0; }
     state.files = files.data || [];
     state.alerts = new Map();
     for (const a of alerts.data || []) {
@@ -142,12 +145,17 @@ function draw(container) {
             </div>` : ''}
         <div class="filters-bar" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px;">
             ${FILTERS.map(([k, label]) => `<button class="btn inc-filter" data-f="${k}" style="${state.filter === k ? 'background:var(--accent); color:#fff;' : ''}">${label} (${counts[k]})</button>`).join('')}
+            <button class="btn" id="inc-fix" title="Cards on order that are not tied to one exact card of ours yet">Fix card matches${state.toFix ? ` (${state.toFix} lines)` : ''}</button>
             <input type="text" id="inc-search" placeholder="Seller, order or tracking #..." value="${esc(state.seller)}" style="margin-left:auto; min-width:220px;" />
         </div>
         <div id="inc-table"></div>
     `;
 
     container.querySelectorAll('.inc-filter').forEach(b => b.addEventListener('click', () => { state.filter = b.dataset.f; draw(container); }));
+    container.querySelector('#inc-fix').addEventListener('click', async () => {
+        const m = await matchModule();
+        await m.renderMatchFixer(container, () => renderIncoming(container));
+    });
     container.querySelector('#inc-search').addEventListener('input', (e) => {
         state.seller = e.target.value;
         drawTable(container);
@@ -178,6 +186,7 @@ function drawTable(container) {
         drawTable(container);
         if (state.openOrder) await showLines(container, state.openOrder);
     }));
+    wrap.querySelectorAll('.inc-stage').forEach(b => b.addEventListener('click', () => openInStaging(container, b)));
     wrap.querySelectorAll('.inc-recv').forEach(b => b.addEventListener('click', () => setReceived(container, b.dataset.order, true)));
     wrap.querySelectorAll('.inc-undo').forEach(b => b.addEventListener('click', () => setReceived(container, b.dataset.order, false)));
     if (state.openOrder) showLines(container, state.openOrder);
@@ -190,9 +199,13 @@ function rowHtml(o) {
     const action = o.status === 'cancelled' ? ''
         : o.received_at
             ? (o.received_by === 'manual'
-                ? `<button class="btn inc-undo" data-order="${esc(o.order_number)}" style="font-size:11px;">Undo received</button>`
-                : `<span style="font-size:11px; color:var(--text-secondary);">in system</span>`)
-            : `<button class="btn inc-recv" data-order="${esc(o.order_number)}" style="font-size:12px;">Mark received</button>`;
+                ? `<button class="btn inc-stage" data-order="${esc(o.order_number)}" style="font-size:12px;">Open in Staging Review</button>
+                   <button class="btn inc-undo" data-order="${esc(o.order_number)}" style="font-size:11px;">Undo received</button>`
+                : o.received_by === 'staging'
+                    ? `<button class="btn inc-stage" data-order="${esc(o.order_number)}" style="font-size:12px;">Staging Review</button>`
+                    : `<span style="font-size:11px; color:var(--text-secondary);">in system</span>`)
+            : `<button class="btn btn-primary inc-stage" data-order="${esc(o.order_number)}" style="font-size:12px;">Open in Staging Review</button>
+               <button class="btn inc-recv" data-order="${esc(o.order_number)}" style="font-size:12px;">Mark received</button>`;
     const open = state.openOrder === o.order_number;
     return `
         <tr class="inc-row" data-order="${esc(o.order_number)}" style="cursor:pointer;">
@@ -241,6 +254,22 @@ async function showLines(container, orderNumber) {
                 </tr>`).join('')}</tbody>
         </table>
         <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">An orange dot means the line is not tied to one exact card variant yet, so it is not counted in the "On order" columns.</div>`;
+}
+
+// Copies the order's cards into Staging Review (once; a second click just opens it again) and
+// marks the order received. Then Staging Review opens on that order's batch, where each card can
+// be marked Short (did not arrive) or Hold (set aside) before pushing the rest to inventory.
+async function openInStaging(container, btn) {
+    const o = state.orders.find(x => x.order_number === btn.dataset.order);
+    if (!o.received_at && !confirm(`Open ${o.seller}'s order in Staging Review?
+
+Its ${o.quantity ?? ''} cards are added to staging and the order is marked received.`)) return;
+    btn.disabled = true;
+    const { data, error } = await supabase.rpc('stage_tcg_order', { p_order: o.order_number });
+    if (error) { btn.disabled = false; alert(`Could not stage this order: ${error.message}`); return; }
+    window.__cbmStagingPreset = { import_batch: data.batch_id };
+    window.__cbmRefreshIncomingBadge?.();
+    location.hash = '#staging';
 }
 
 async function setReceived(container, orderNumber, received) {
