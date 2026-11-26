@@ -22,6 +22,7 @@ const ALERT_TEXT = {
     no_tracking_14d: (d) => `Shipped without tracking ${d} days after the order`,
     not_confirmed_7d: (d) => `Shipping still not confirmed ${d} days after the order`,
     past_estimate: (d) => `${d} day${d === 1 ? '' : 's'} past the estimated delivery date`,
+    carrier_delivered: (d) => d === 0 ? 'Delivered today, not marked received yet' : `Delivered ${d} day${d === 1 ? '' : 's'} ago, not marked received yet`,
 };
 const FILTERS = [
     ['open', 'On order'], ['alerts', 'Needs a look'], ['cancelled', 'Cancelled'],
@@ -106,6 +107,7 @@ function draw(container) {
     const open = state.orders.filter(isOpen);
     const flagged = open.filter(o => state.alerts.has(o.order_number));
     const { pages, ok, warns } = pullInfo();
+    const trackChecked = state.orders.map(o => o.carrier_checked_at).filter(Boolean).sort().pop() || null;
     const openCards = open.reduce((a, o) => a + (o.quantity || 0), 0);
     const openMoney = open.reduce((a, o) => a + Number(o.total || 0), 0);
     const counts = {
@@ -125,6 +127,11 @@ function draw(container) {
             <strong>Last pulled:</strong>
             ${pages ? `order pages read ${esc(ago(pages.parsed_at))} (${esc(new Date(pages.parsed_at).toLocaleString())})` : 'never'}
             ${ok ? ` · Grok's last successful grab: ${esc(fmtDate(ok.grabbed_on))}${ok.window_days ? ` (${esc(ok.window_days)})` : ''}` : ''}
+            <div style="margin-top:4px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                <span><strong>Delivery dates checked:</strong> ${trackChecked ? esc(ago(trackChecked)) + ` (${esc(new Date(trackChecked).toLocaleString())})` : 'never'}</span>
+                <button class="btn" id="inc-track" style="font-size:12px;" title="Copies a request you can paste to Claude, who reads each tracking page in your Chrome and updates these dates">Update delivery dates</button>
+                <span id="inc-track-msg" style="font-size:12px; color:var(--text-secondary);"></span>
+            </div>
             ${warns.map(w => `<div style="color:var(--warning); margin-top:4px;">⚠ ${esc(w)}</div>`).join('')}
         </div>
         <div style="display:flex; gap:24px; margin-bottom:12px; font-size:13px;">
@@ -152,6 +159,14 @@ function draw(container) {
     `;
 
     container.querySelectorAll('.inc-filter').forEach(b => b.addEventListener('click', () => { state.filter = b.dataset.f; draw(container); }));
+    container.querySelector('#inc-track').addEventListener('click', async () => {
+        const text = 'Update the delivery dates on my open TCGplayer orders: open each tracking link in my Chrome, read the estimated or delivered date, and load them into the Incoming page.';
+        let copied = false;
+        try { await navigator.clipboard.writeText(text); copied = true; } catch { /* clipboard blocked */ }
+        container.querySelector('#inc-track-msg').textContent = copied
+            ? 'Request copied. Paste it to Claude in Claude Code and the dates are updated from the tracking pages.'
+            : `Send Claude this: "${text}"`;
+    });
     container.querySelector('#inc-fix').addEventListener('click', async () => {
         const m = await matchModule();
         await m.renderMatchFixer(container, () => renderIncoming(container));
@@ -217,9 +232,19 @@ function rowHtml(o) {
             <td style="padding:8px 6px;">
                 <div>${esc(STATUS_LABEL[o.status])}</div>
                 ${track ? `<div style="font-size:11px;">${track}${o.carrier ? ` (${esc(o.carrier)})` : ''}</div>` : ''}
+                ${o.carrier_status && !o.carrier_delivered_on ? `<div style="font-size:11px; color:var(--text-secondary);" title="${esc(o.carrier_summary || '')}">${esc(o.carrier)}: ${esc(o.carrier_status)}</div>` : ''}
                 ${alerts.map(a => `<div style="font-size:11px; color:var(--warning);">⚠ ${esc(ALERT_TEXT[a.alert_type](a.days))}</div>`).join('')}
             </td>
-            <td style="padding:8px 6px;">${esc(fmtDate(o.est_delivery))}</td>
+            <td style="padding:8px 6px;">
+                ${o.carrier_delivered_on
+                    ? `<div style="color:var(--success); font-weight:600;">Delivered ${esc(fmtDate(o.carrier_delivered_on))}</div>
+                       <div style="font-size:11px; color:var(--text-secondary);">per ${esc(o.carrier || 'carrier')}${o.received_at ? '' : ' · mark it received once the cards are in hand'}</div>`
+                    : o.carrier_est_delivery
+                        ? `<div style="font-weight:600;">${esc(o.carrier || 'Carrier')} est. ${esc(fmtDate(o.carrier_est_delivery))}</div>
+                           <div style="font-size:11px; color:var(--text-secondary);">TCGplayer est. ${esc(fmtDate(o.est_delivery))}</div>`
+                        : `<div>${esc(fmtDate(o.est_delivery))}</div>
+                           ${o.tracking_number ? `<div style="font-size:11px; color:var(--text-secondary);" title="${esc(o.carrier_error || '')}">${o.carrier_error ? 'carrier date not available' : 'carrier date not checked yet'}</div>` : ''}`}
+            </td>
             <td style="padding:8px 6px; text-align:right;">${o.quantity ?? '—'}</td>
             <td style="padding:8px 6px; text-align:right;">
                 ${money(o.total)}

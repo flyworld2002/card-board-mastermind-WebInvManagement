@@ -17,7 +17,8 @@ GROUP BY l.variant_id;
 -- Orders that need a look. Ages count from the order date (TCGplayer shows no ship date).
 --   no_tracking_14d   shipped without tracking and ordered 14+ days ago
 --   not_confirmed_7d  "Shipping Not Confirmed" and ordered 7+ days ago
---   past_estimate     estimated delivery date has passed and the order is still open
+--   past_estimate     the estimated delivery date (carrier's if known, else TCGplayer's) has passed and the order is still open
+--   carrier_delivered the carrier says it was delivered but it is not marked received (updated 2026-11-26)
 CREATE OR REPLACE VIEW v_tcg_order_alerts WITH (security_invoker = true) AS
 WITH t AS (SELECT (now() AT TIME ZONE 'America/New_York')::date AS today)
 SELECT o.order_number, a.alert_type, a.days
@@ -25,6 +26,7 @@ FROM tcg_orders o CROSS JOIN t
 CROSS JOIN LATERAL (VALUES
     ('no_tracking_14d',  CASE WHEN o.status = 'shipped_no_tracking' AND t.today - o.ordered_on >= 14 THEN t.today - o.ordered_on END),
     ('not_confirmed_7d', CASE WHEN o.status = 'not_shipped' AND t.today - o.ordered_on >= 7 THEN t.today - o.ordered_on END),
-    ('past_estimate',    CASE WHEN o.status <> 'cancelled' AND o.est_delivery < t.today THEN t.today - o.est_delivery END)
+    ('past_estimate',    CASE WHEN o.status <> 'cancelled' AND COALESCE(o.carrier_est_delivery, o.est_delivery) < t.today THEN t.today - COALESCE(o.carrier_est_delivery, o.est_delivery) END),
+    ('carrier_delivered', CASE WHEN o.carrier_delivered_on IS NOT NULL THEN t.today - o.carrier_delivered_on END)
 ) AS a(alert_type, days)
 WHERE o.received_at IS NULL AND o.status <> 'cancelled' AND a.days IS NOT NULL;
