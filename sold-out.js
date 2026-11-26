@@ -56,7 +56,7 @@ function timeAgo(iso) {
 function onOrderHtml(o) {
     if (!o) return '<span style="color:var(--text-secondary);">—</span>';
     const est = o.next_est_delivery ? new Date(o.next_est_delivery + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
-    return `<a href="#incoming" style="font-weight:600;">${o.on_order_qty}</a>
+    return `<a href="#incoming" style="font-weight:600; color:var(--accent);">${o.on_order_qty}</a>
         <div style="color:var(--text-secondary); font-size:11px;">${o.order_count} order${o.order_count === 1 ? '' : 's'}${est ? ` · est ${est}` : ''}</div>`;
 }
 

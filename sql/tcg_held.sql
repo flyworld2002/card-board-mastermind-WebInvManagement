@@ -146,3 +146,17 @@ JOIN tcg_orders o ON o.order_number = r.order_number
 LEFT JOIN LATERAL (SELECT SUM(x.amount) AS used FROM tcg_refund_allocations x
                    WHERE x.order_number = r.order_number AND x.refund_id = r.refund_id) a ON true
 WHERE o.status <> 'cancelled' AND r.amount - COALESCE(a.used, 0) > 0.004;
+
+-- Only signed-in users may call the tracker's write functions (RLS already stops anon, this makes it explicit).
+-- Applied 2026-11-26. tcg_gallery stays public on purpose.
+DO $$
+DECLARE f text;
+BEGIN
+    FOREACH f IN ARRAY ARRAY[
+        'stage_tcg_order(text)', 'tcg_set_short(uuid,integer,text)', 'tcg_hold_cards(uuid,integer,text[],text)', '_tcg_recompute(uuid)',
+        'tcg_link_line(uuid,uuid)', 'tcg_clear_link(uuid)', 'tcg_resolve_held(uuid,text,numeric)', 'tcg_release_held(uuid,numeric)',
+        'tcg_allocate_refund(text,bigint,text,numeric,uuid,uuid,integer,text)'] LOOP
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION public.%s FROM PUBLIC, anon', f);
+        EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO authenticated', f);
+    END LOOP;
+END $$;

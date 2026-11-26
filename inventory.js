@@ -847,6 +847,7 @@ function sourceBadge(source) {
 
 function renderTable(container) {
     const wrap = container.querySelector('#inv-table-wrap');
+    if (!wrap) return;   // page was navigated away from while this was still loading
 
     if (state.rows.length === 0) {
         wrap.innerHTML = `
@@ -1007,7 +1008,7 @@ function renderRow(container, row) {
         </td>
         <td style="text-align:center; padding:8px 4px;">
             ${row._onOrder
-                ? `<a href="#incoming" style="font-weight:600; font-size:14px;" title="${row._onOrder.order_count} open TCGplayer order(s)">+${row._onOrder.on_order_qty}</a>`
+                ? `<a href="#incoming" style="font-weight:600; font-size:14px; color:var(--accent);" title="${row._onOrder.order_count} open TCGplayer order(s)">+${row._onOrder.on_order_qty}</a>`
                 : '<span style="color:var(--text-secondary);">—</span>'}
         </td>
         <td style="padding:8px 6px;">${costCell}</td>
