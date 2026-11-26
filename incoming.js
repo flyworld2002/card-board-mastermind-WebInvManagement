@@ -232,7 +232,7 @@ function rowHtml(o) {
             <td style="padding:8px 6px;">
                 <div>${esc(STATUS_LABEL[o.status])}</div>
                 ${track ? `<div style="font-size:11px;">${track}${o.carrier ? ` (${esc(o.carrier)})` : ''}</div>` : ''}
-                ${o.carrier_status && !o.carrier_delivered_on ? `<div style="font-size:11px; color:var(--text-secondary);" title="${esc(o.carrier_summary || '')}">${esc(o.carrier)}: ${esc(o.carrier_status)}</div>` : ''}
+                ${o.carrier_status && !o.carrier_delivered_on ? `<div style="font-size:11px; color:var(--text-secondary);" title="${esc(o.carrier_summary || '')}">${esc(o.carrier || 'Carrier')}: ${esc(o.carrier_status)}</div>` : ''}
                 ${alerts.map(a => `<div style="font-size:11px; color:var(--warning);">⚠ ${esc(ALERT_TEXT[a.alert_type](a.days))}</div>`).join('')}
             </td>
             <td style="padding:8px 6px;">
