@@ -198,6 +198,7 @@
                         <a href="#staging" data-page="staging">Staging Review</a>
                         <a href="#inventory" data-page="inventory">Inventory</a>
                         <a href="#purchases" data-page="purchases">Purchases</a>
+                        <a href="#incoming" data-page="incoming">Incoming <span id="incoming-badge" class="badge badge-restock" style="display:none;"></span></a>
                         <a href="#sales" data-page="sales">Sales</a>
                         <a href="#issues" data-page="issues">Issues <span id="issues-badge" class="badge badge-not_found" style="display:none;"></span></a>
                         <a href="#picking" data-page="picking">Picking</a>
@@ -229,7 +230,26 @@
             refreshSoldOutBadge();
             setupRestockRealtime();
             refreshPriceHoldsBadge();
+            refreshIncomingBadge();
         }
+
+        // ── Incoming badge — open TCGplayer orders that need a look (stuck, no
+        // tracking too long, past the estimated delivery). Orders are read once a
+        // day, so a count on sign-in plus a re-count when the Incoming page marks
+        // something received (window.__cbmRefreshIncomingBadge) is enough.
+        async function refreshIncomingBadge() {
+            const badge = document.getElementById('incoming-badge');
+            if (!badge) return;
+            const { data, error } = await supabase.from('v_tcg_order_alerts').select('order_number');
+            const n = error ? 0 : new Set((data || []).map(r => r.order_number)).size;
+            if (n > 0) {
+                badge.textContent = n;
+                badge.style.display = 'inline-block';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+        window.__cbmRefreshIncomingBadge = refreshIncomingBadge;
 
         // ── Price holds badge — refreshed prices the nightly job held back for
         // approval (price_refresh_changes.status = 'held'), next to Price
@@ -377,6 +397,11 @@
                     case 'purchases': {
                         const { renderPurchases } = await import(`./purchases.js?v=${Date.now()}`);
                         await renderPurchases(content);
+                        break;
+                    }
+                    case 'incoming': {
+                        const { renderIncoming } = await import(`./incoming.js?v=${Date.now()}`);
+                        await renderIncoming(content);
                         break;
                     }
                     case 'sales': {

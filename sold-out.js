@@ -52,10 +52,19 @@ function timeAgo(iso) {
     return `${years} year${years === 1 ? '' : 's'} ago`;
 }
 
+// "12 on order" + the earliest estimated delivery, linking to the Incoming page.
+function onOrderHtml(o) {
+    if (!o) return '<span style="color:var(--text-secondary);">—</span>';
+    const est = o.next_est_delivery ? new Date(o.next_est_delivery + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+    return `<a href="#incoming" style="font-weight:600;">${o.on_order_qty}</a>
+        <div style="color:var(--text-secondary); font-size:11px;">${o.order_count} order${o.order_count === 1 ? '' : 's'}${est ? ` · est ${est}` : ''}</div>`;
+}
+
 const PAGE_SIZES = [25, 50, 100, 200];
 
 let state = {
     rows: [],
+    onOrder: new Map(),   // variant_id -> v_tcg_on_order row
     page: 0,
     pageSize: 50,
     sets: [],        // full card_sets catalog (id, name, series) — Set/Era filters are
@@ -158,11 +167,14 @@ export async function renderSoldOut(container) {
         <div class="pagination" id="so-pagination"></div>
     `;
 
-    const [, soldOutRes, setsRes] = await Promise.all([
+    const [, soldOutRes, setsRes, onOrderRes] = await Promise.all([
         loadAxisOptions(),
         supabase.from('v_sold_out').select('*'),
         supabase.from('card_sets').select('id, name, series').order('name'),
+        supabase.from('v_tcg_on_order').select('*'),
     ]);
+    // On order: TCGplayer orders not yet received (Incoming page). A failure here only hides the column data.
+    state.onOrder = new Map((onOrderRes.data || []).map(r => [r.variant_id, r]));
 
     if (soldOutRes.error) {
         container.querySelector('#so-table-wrap').innerHTML =
@@ -275,6 +287,7 @@ function renderTable(container) {
                 ${SORT_COLUMNS.map(([key, label]) => `
                     <th class="so-sort-th" data-key="${key}" style="cursor:pointer; user-select:none;">${label}${sortArrow(key)}</th>
                 `).join('')}
+                <th>On order</th>
             </tr></thead>
             <tbody>
                 ${rows.map(r => `
@@ -291,6 +304,7 @@ function renderTable(container) {
                         <td style="color:var(--text-secondary); font-size:12px;">
                             ${r.last_sold_at ? escapeHtml(timeAgo(r.last_sold_at)) : '<span>no sale on record</span>'}
                         </td>
+                        <td>${onOrderHtml(state.onOrder.get(r.variant_id))}</td>
                     </tr>
                 `).join('')}
             </tbody>

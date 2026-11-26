@@ -434,6 +434,13 @@ async function loadAndRender(container) {
         }
     }
 
+    // On order: open TCGplayer orders (Incoming page) for the variants on this page.
+    if (variantIds.length > 0) {
+        const { data: onOrder } = await supabase.from('v_tcg_on_order').select('*').in('variant_id', variantIds);
+        const byVariant = new Map((onOrder || []).map(r => [r.variant_id, r]));
+        for (const row of state.rows) row._onOrder = byVariant.get(row.variant_id) || null;
+    }
+
     renderTable(container);
     renderPagination(container);
 
@@ -854,7 +861,7 @@ function renderTable(container) {
     const platHeads = state.visiblePlatforms.map(p =>
         `<th style="text-align:center;">${p === 'tcgplayer' ? 'TCG' : p.charAt(0).toUpperCase() + p.slice(1)}</th>`
     ).join('');
-    const totalCols = 7 + state.visiblePlatforms.length;
+    const totalCols = 8 + state.visiblePlatforms.length;
 
     wrap.innerHTML = `
         <table style="width:100%; border-collapse:collapse; table-layout:fixed;">
@@ -864,6 +871,7 @@ function renderTable(container) {
                 <col style="width:50px"/>
                 <col style="width:115px"/>
                 <col style="width:50px"/>
+                <col style="width:70px"/>
                 <col style="width:75px"/>
                 <col style="width:75px"/>
                 ${platCols}
@@ -887,6 +895,7 @@ function renderTable(container) {
                         style="cursor:pointer; user-select:none; text-align:center;">
                         Qty${state.sort.field === 'quantity' ? (state.sort.asc ? ' ↑' : ' ↓') : ''}
                     </th>
+                    <th style="text-align:center;">On order</th>
                     <th class="sortable-header" data-field="cost_basis"
                         style="cursor:pointer; user-select:none;">
                         WAC${state.sort.field === 'cost_basis' ? (state.sort.asc ? ' ↑' : ' ↓') : ''}
@@ -995,6 +1004,11 @@ function renderRow(container, row) {
             ${(row.total_available ?? row.total_qty ?? 0) === 0
                 ? `<div style="font-size:10px; color:var(--warning);">sold out</div>`
                 : (row.total_sold ? `<div style="font-size:10px; color:var(--text-secondary);">sold: ${row.total_sold}</div>` : '')}
+        </td>
+        <td style="text-align:center; padding:8px 4px;">
+            ${row._onOrder
+                ? `<a href="#incoming" style="font-weight:600; font-size:14px;" title="${row._onOrder.order_count} open TCGplayer order(s)">+${row._onOrder.on_order_qty}</a>`
+                : '<span style="color:var(--text-secondary);">—</span>'}
         </td>
         <td style="padding:8px 6px;">${costCell}</td>
         <td style="padding:8px 6px;">${marketCell}</td>
