@@ -27,7 +27,7 @@ const ALERT_TEXT = {
     carrier_delivered: (d) => d === 0 ? 'Delivered today, not marked received yet' : `Delivered ${d} day${d === 1 ? '' : 's'} ago, not marked received yet`,
 };
 const FILTERS = [
-    ['open', 'On order'], ['followups', 'Follow-ups'], ['rate', 'Rate sellers'], ['alerts', 'Needs a look'], ['cancelled', 'Cancelled'],
+    ['open', 'On order'], ['followups', 'Follow-ups'], ['rate', 'Rate sellers'], ['escalate', 'Escalate'], ['alerts', 'Needs a look'], ['cancelled', 'Cancelled'],
     ['refunds', 'Refunds'], ['received', 'Received'],
 ];
 
@@ -36,7 +36,7 @@ const REASON_LABEL = {
     active_thread: 'recent messages', awaiting_reply: 'waiting on seller', manual: 'manual',
 };
 
-const state = { rateCount: 0, outbox: new Map(), followups: new Map(), manualFollow: new Map(), threads: new Map(), messages: new Map(), toFix: 0, orders: [], alerts: new Map(), lines: new Map(), files: [], filter: 'open', openOrder: null, seller: '', editTrack: null, refreshing: false };
+const state = { rateCount: 0, escalateCount: 0, outbox: new Map(), followups: new Map(), manualFollow: new Map(), threads: new Map(), messages: new Map(), toFix: 0, orders: [], alerts: new Map(), lines: new Map(), files: [], filter: 'open', openOrder: null, seller: '', editTrack: null, refreshing: false };
 
 const fmtDate = (d) => d ? new Date(d + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
 const money = (v) => v == null ? '—' : formatPrice(v);
@@ -119,6 +119,7 @@ async function load() {
     await loadMessages();
     try { state.ratingsWaiting = (await supabase.from('tcg_rating_outbox').select('id, status, exported_at').eq('status', 'exported')).data || []; } catch { state.ratingsWaiting = []; }
     try { state.rateCount = await (await import(`./rate-sellers.js?v=${Date.now()}`)).countRateCandidates(); } catch { state.rateCount = 0; }
+    try { state.escalateCount = await (await import(`./escalate.js?v=${Date.now()}`)).countEscalate(); } catch { state.escalateCount = 0; }
     try { state.toFix = await (await matchModule()).countLinesToFix(); } catch { state.toFix = 0; }
     state.files = files.data || [];
     state.alerts = new Map();
@@ -177,7 +178,7 @@ function derived() {
     const open = state.orders.filter(isOpen);
     const flagged = open.filter(o => state.alerts.has(o.order_number));
     const counts = {
-        open: open.length, followups: state.orders.filter(o => state.followups.has(o.order_number)).length, rate: state.rateCount, alerts: flagged.length,
+        open: open.length, followups: state.orders.filter(o => state.followups.has(o.order_number)).length, rate: state.rateCount, escalate: state.escalateCount, alerts: flagged.length,
         cancelled: state.orders.filter(o => o.status === 'cancelled').length,
         refunds: state.orders.filter(o => Number(o.refund_total) > 0).length,
         received: state.orders.filter(o => o.received_at && o.status !== 'cancelled').length,
@@ -313,6 +314,15 @@ function drawTable(container) {
             state.rateCount = n;
             const b = container.querySelector('.inc-filter[data-f="rate"]');
             if (b) b.textContent = `Rate sellers (${n})`;
+        } }));
+        return;
+    }
+    if (state.filter === 'escalate') {
+        // the Escalate tab has its own screen (escalate.js)
+        import(`./escalate.js?v=${Date.now()}`).then(m => m.renderEscalate(wrap, { onChange: (n) => {
+            state.escalateCount = n;
+            const b = container.querySelector('.inc-filter[data-f="escalate"]');
+            if (b) b.textContent = `Escalate (${n})`;
         } }));
         return;
     }
@@ -698,7 +708,7 @@ async function softRefresh(container) {
         if (fix) fix.textContent = `Fix card matches${state.toFix ? ` (${state.toFix} lines)` : ''}`;
         window.__cbmRefreshIncomingBadge?.();
         window.__cbmSyncLogChanges?.([...changed].map(n => { const o = state.orders.find(x => x.order_number === n); return o ? `${o.seller} (${n.slice(0, 8)})` : n; }));
-        if (state.filter === 'rate' || !changed.size) return;      // the Rate sellers screen is redrawn when you open it
+        if (state.filter === 'rate' || state.filter === 'escalate' || !changed.size) return;      // the Rate sellers screen is redrawn when you open it
 
         const wrap = container.querySelector('#inc-table');
         if (!wrap) return;

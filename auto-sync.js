@@ -2,12 +2,11 @@
 // Runs the TCGplayer "Sync" (read what Grok saved in Dropbox, hand over approved messages/ratings,
 // refresh the follow-up list) on its own, and shows a small indicator in the top corner of every page.
 //
-// When it runs:
-//   - when the app opens, and when you open the Incoming page, if the last sync is over 5 minutes old
-//   - every 60 s while the Incoming page is open (same 5-minute rule)
-//   - every 2 minutes (page visible) while something approved is still waiting on Grok, so Grok's
-//     result shows up by itself
-//   - the Sync button on Incoming and a click on the indicator run it right now
+// When it runs: ONLY while the Incoming page is open.
+//   - when you open the Incoming page (or load the app straight onto it), if the last sync is over 5 minutes old
+//   - every 60 s while the Incoming page stays open (same 5-minute rule)
+//   - the Sync button on Incoming and "Sync now" in the sync log run it right now
+// On every other page nothing syncs by itself. The indicator is still shown everywhere.
 // If the PC cannot be reached it stays quiet and does not retry on its own for 10 minutes.
 //
 // Pages hear about it through window events:
@@ -18,7 +17,6 @@ import { callDesktop } from './desktop-api.js';
 import { supabase } from './shared.js';
 
 const STALE_MS = 5 * 60 * 1000;
-const PENDING_POLL_MS = 2 * 60 * 1000;
 const BACKOFF_MS = 10 * 60 * 1000;
 const TIMEOUT_MS = 75 * 1000;          // no answer from the PC by then = failed (the API may be down)
 const LOG_MAX = 25;
@@ -88,6 +86,8 @@ function renderLog() {
 }
 
 
+const onIncoming = () => location.hash.replace('#', '').split('/')[0] === 'incoming';
+
 export async function runSync({ manual = false } = {}) {
     if (S.running) return;
     S.running = true; S.error = null; S.msg = 'Reading Grok\'s files (can take up to a minute)...';
@@ -103,7 +103,7 @@ export async function runSync({ manual = false } = {}) {
             : summary.settling ? `${summary.settling} new file(s) from Grok are still being saved. Syncing again in about 2 minutes.`
                 : `Nothing new from Grok. Follow-up list refreshed (${summary.followups ?? '?'} orders).`;
         S.last = Date.now();
-        if (summary.settling) setTimeout(() => runSync(), 100 * 1000);   // Grok's files are still settling: look again once they have
+        if (summary.settling) setTimeout(() => { if (onIncoming()) runSync(); }, 100 * 1000);   // Grok's files are still settling: look again once they have (only if you are still on Incoming)
         try { localStorage.setItem('cbmLastSync', String(S.last)); } catch { /* ignore */ }
         ok = true;
     } catch (e) {
@@ -126,12 +126,6 @@ export function maybeSync() {
     if (S.running || Date.now() < S.nextAuto) return;
     if (S.last && Date.now() - S.last < STALE_MS) return;
     runSync();
-}
-
-async function pendingWork() {
-    const [m, r] = await Promise.all(['tcg_msg_outbox', 'tcg_rating_outbox'].map(t =>
-        supabase.from(t).select('id', { count: 'exact', head: true }).in('status', ['approved', 'exported'])));
-    return (m.count || 0) + (r.count || 0);
 }
 
 export function initAutoSync() {
@@ -159,12 +153,7 @@ export function initAutoSync() {
     document.addEventListener('click', (e) => { if (!pop.contains(e.target) && e.target !== chip) pop.style.display = 'none'; });
     paint();
 
-    const onIncoming = () => location.hash.replace('#', '').split('/')[0] === 'incoming';
     window.addEventListener('hashchange', () => { if (onIncoming()) maybeSync(); });
     setInterval(() => { if (onIncoming() && !document.hidden) maybeSync(); }, 60 * 1000);
-    setInterval(async () => {
-        if (document.hidden || S.running || Date.now() < S.nextAuto) return;
-        try { if (await pendingWork() > 0) runSync(); } catch { /* try again next time */ }
-    }, PENDING_POLL_MS);
-    maybeSync();
+    if (onIncoming()) maybeSync();
 }
