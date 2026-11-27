@@ -66,6 +66,7 @@ function describe(sm) {
     if (sm.results) bits.push(`${sm.results} result(s) back from Grok`);
     if (sm.exported) bits.push(`${sm.exported} item(s) handed to Grok`);
     if (sm.unknown) bits.push(`${sm.unknown} marked no-answer`);
+    if (sm.settling) bits.push(`${sm.settling} new file(s) from Grok still being saved, syncing again in about 2 minutes`);
     return bits.length ? bits.join(' · ') : 'nothing new from Grok';
 }
 
@@ -99,8 +100,10 @@ export async function runSync({ manual = false } = {}) {
         const kinds = Object.entries(summary.kinds || {}).map(([k, n]) => `${n} ${k.replace('_', ' ')}`).join(', ');
         S.msg = summary.files
             ? `Read ${summary.files} file(s) (${kinds}); ${summary.new_messages || 0} new message(s). ${summary.followups ?? '?'} orders on the follow-up list.`
-            : `Nothing new from Grok. Follow-up list refreshed (${summary.followups ?? '?'} orders).`;
+            : summary.settling ? `${summary.settling} new file(s) from Grok are still being saved. Syncing again in about 2 minutes.`
+                : `Nothing new from Grok. Follow-up list refreshed (${summary.followups ?? '?'} orders).`;
         S.last = Date.now();
+        if (summary.settling) setTimeout(() => runSync(), 100 * 1000);   // Grok's files are still settling: look again once they have
         try { localStorage.setItem('cbmLastSync', String(S.last)); } catch { /* ignore */ }
         ok = true;
     } catch (e) {

@@ -205,7 +205,9 @@ function topHtml() {
             <div style="margin-top:4px;"><strong>Seller messages read:</strong> ${msgList ? esc(ago(msgList.parsed_at)) + ` (${esc(new Date(msgList.parsed_at).toLocaleString())})` : 'never'}
                 <button class="btn" id="inc-sync" style="font-size:12px; margin-left:8px;" ${window.__cbmSync?.running ? 'disabled' : ''}
                     title="Reads what Grok saved in Dropbox (orders and messages) and refreshes the follow-up list">${window.__cbmSync?.running ? 'Syncing...' : 'Sync'}</button>
-                <span id="inc-sync-msg" style="font-size:12px; color:var(--text-secondary); margin-left:6px;">${esc(window.__cbmSync?.msg || '')}</span></div>
+                <span id="inc-sync-msg" style="font-size:12px; color:var(--text-secondary); margin-left:6px;">${esc(window.__cbmSync?.msg || '')}</span>
+                <button class="btn" id="inc-unread" style="font-size:12px; margin-left:8px;" title="Copies the command that tells Grok to save only the unread seller messages. Paste it to Grok.">Copy "do unread" for Grok</button>
+                <span id="inc-unread-msg" style="font-size:12px; color:var(--text-secondary); margin-left:6px;"></span></div>
             ${warns.map(w => `<div style="color:var(--warning); margin-top:4px;">⚠ ${esc(w)}</div>`).join('')}
         </div>
         <div style="display:flex; gap:24px; margin-bottom:12px; font-size:13px;">
@@ -237,6 +239,11 @@ function wireTop(container) {
             : `Send Claude this: "${text}"`;
     });
     container.querySelector('#inc-sync').addEventListener('click', () => runSync({ manual: true }));
+    container.querySelector('#inc-unread').addEventListener('click', async () => {
+        const msg = container.querySelector('#inc-unread-msg');
+        try { await navigator.clipboard.writeText('do unread'); msg.textContent = 'Copied. Paste "do unread" to Grok. When it finishes, the next sync shows the new messages.'; }
+        catch { msg.textContent = 'Tell Grok: do unread'; }
+    });
     container.querySelectorAll('.inc-jump').forEach(a => a.addEventListener('click', (e) => {
         e.preventDefault();
         state.filter = 'alerts'; state.openOrder = a.dataset.order; draw(container);
