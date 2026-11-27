@@ -11,7 +11,7 @@
 
 ALTER TABLE tcg_held_cards DROP CONSTRAINT IF EXISTS tcg_held_cards_status_check;
 ALTER TABLE tcg_held_cards ADD CONSTRAINT tcg_held_cards_status_check
-    CHECK (status IN ('held', 'grading', 'returned', 'refunded', 'released'));
+    CHECK (status IN ('held', 'grading', 'kept', 'returned', 'refunded', 'released'));
 
 CREATE OR REPLACE FUNCTION public.tcg_set_grading(p_held_id uuid, p_on boolean) RETURNS void
 LANGUAGE plpgsql AS $f$

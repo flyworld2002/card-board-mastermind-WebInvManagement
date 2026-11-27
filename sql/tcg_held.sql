@@ -93,22 +93,27 @@ END $f$;
 
 -- A held card is fine after all (or kept after a refund): it goes into Staging Review as one approved
 -- card at p_cost (default: its landed cost) and is pushed to inventory from there.
-CREATE OR REPLACE FUNCTION public.tcg_release_held(p_held_id uuid, p_cost numeric DEFAULT NULL) RETURNS jsonb
+DROP FUNCTION IF EXISTS public.tcg_release_held(uuid, numeric);
+CREATE OR REPLACE FUNCTION public.tcg_release_held(p_held_id uuid, p_cost numeric DEFAULT NULL, p_condition text DEFAULT NULL) RETURNS jsonb
 LANGUAGE plpgsql AS $f$
 DECLARE h tcg_held_cards; s staging; v_batch text;
 BEGIN
-    SELECT * INTO h FROM tcg_held_cards WHERE id = p_held_id AND status IN ('held', 'grading') FOR UPDATE;
+    IF p_condition IS NOT NULL AND p_condition NOT IN ('Near Mint', 'Lightly Played', 'Moderately Played', 'Heavily Played', 'Damaged') THEN
+        RAISE EXCEPTION 'Unknown condition %', p_condition;
+    END IF;
+    SELECT * INTO h FROM tcg_held_cards WHERE id = p_held_id AND status IN ('held', 'grading', 'kept') FOR UPDATE;
     IF NOT FOUND THEN RAISE EXCEPTION 'That card is not on hold'; END IF;
     SELECT * INTO s FROM staging WHERE id = h.staging_id;
     v_batch := 'TCGP_HELD_' || to_char(now() AT TIME ZONE 'UTC', 'YYYYMMDD_HH24MISS');
     INSERT INTO staging (import_batch, order_number, order_date, source, card_name, set_name, condition, foil_type, foil_pattern, texture,
                          material, size, stamp_type, source_type, quantity, price, card_id, match_status, status, notes, card_number)
     VALUES (v_batch, h.order_number, COALESCE(s.order_date, now()), 'tcgplayer', h.card_name, COALESCE(s.set_name, h.set_label),
-            COALESCE(s.condition, 'Near Mint'), s.foil_type, s.foil_pattern, s.texture, s.material, s.size, s.stamp_type, s.source_type,
+            COALESCE(NULLIF(p_condition, ''), s.condition, 'Near Mint'), s.foil_type, s.foil_pattern, s.texture, s.material, s.size, s.stamp_type, s.source_type,
             1, COALESCE(p_cost, h.unit_cost, 0), h.card_id,
             CASE WHEN h.card_id IS NOT NULL THEN 'matched' ELSE 'not_found' END,
             CASE WHEN h.card_id IS NOT NULL THEN 'approved' ELSE 'pending' END,
-            'Released from hold (' || array_to_string(h.flags, ', ') || '). Check the condition before pushing.', h.card_number);
+            CASE WHEN h.status = 'kept' THEN 'Kept without a refund (' || COALESCE(h.keep_reason, 'no reason') || '). Check the condition before pushing.'
+                 ELSE 'Released from hold (' || array_to_string(h.flags, ', ') || '). Check the condition before pushing.' END, h.card_number);
     UPDATE tcg_held_cards SET status = 'released', resolved_at = now() WHERE id = p_held_id;
     RETURN jsonb_build_object('batch_id', v_batch);
 END $f$;
@@ -154,7 +159,7 @@ DECLARE f text;
 BEGIN
     FOREACH f IN ARRAY ARRAY[
         'stage_tcg_order(text)', 'tcg_set_short(uuid,integer,text)', 'tcg_hold_cards(uuid,integer,text[],text)', '_tcg_recompute(uuid)',
-        'tcg_link_line(uuid,uuid)', 'tcg_clear_link(uuid)', 'tcg_resolve_held(uuid,text,numeric)', 'tcg_release_held(uuid,numeric)',
+        'tcg_link_line(uuid,uuid)', 'tcg_clear_link(uuid)', 'tcg_resolve_held(uuid,text,numeric)', 'tcg_release_held(uuid,numeric,text)',
         'tcg_allocate_refund(text,bigint,text,numeric,uuid,uuid,integer,text)'] LOOP
         EXECUTE format('REVOKE EXECUTE ON FUNCTION public.%s FROM PUBLIC, anon', f);
         EXECUTE format('GRANT EXECUTE ON FUNCTION public.%s TO authenticated', f);

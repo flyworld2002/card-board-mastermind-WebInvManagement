@@ -86,7 +86,7 @@ async function loadContext(orderNumber) {
         supabase.from('tcg_orders').select('*').eq('order_number', orderNumber).single(),
         supabase.from('tcg_msg_threads').select('*').eq('order_number', orderNumber).order('last_date', { ascending: false }),
         supabase.from('tcg_held_cards').select('*').eq('order_number', orderNumber).eq('status', 'held'),
-        supabase.from('tcg_staged_lines').select('*').eq('order_number', orderNumber).gt('short_qty', 0),
+        supabase.from('tcg_staged_lines').select('*').eq('order_number', orderNumber).gt('short_qty', 0).is('short_resolved_at', null),
         supabase.from('tcg_held_photos').select('id').eq('order_number', orderNumber),
         supabase.from('tcg_order_photos').select('id').eq('order_number', orderNumber).eq('show_to_seller', true).not('public_path', 'is', null),
         supabase.from('tcg_msg_outbox').select('*').eq('order_number', orderNumber).order('created_at', { ascending: false }),

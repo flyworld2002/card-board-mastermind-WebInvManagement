@@ -249,7 +249,8 @@
                 .eq('status', 'held');
             // + refunds still waiting for a decision (v_tcg_refund_review)
             const refunds = await supabase.from('v_tcg_refund_review').select('refund_id', { count: 'exact', head: true });
-            const n = (error ? 0 : (count || 0)) + (refunds.error ? 0 : (refunds.count || 0));
+            const missing = await supabase.from('v_tcg_short_work').select('staging_id', { count: 'exact', head: true }).eq('is_open', true);
+            const n = (error ? 0 : (count || 0)) + (refunds.error ? 0 : (refunds.count || 0)) + (missing.error ? 0 : (missing.count || 0));
             if (n > 0) {
                 badge.textContent = n;
                 badge.style.display = 'inline-block';

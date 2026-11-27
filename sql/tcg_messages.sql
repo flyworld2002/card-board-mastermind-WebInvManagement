@@ -80,8 +80,7 @@ reasons AS (
     SELECT o.order_number, 'on_order'::text AS reason FROM tcg_orders o
         WHERE o.received_at IS NULL AND o.status <> 'cancelled'
     UNION ALL SELECT DISTINCT h.order_number, 'held' FROM tcg_held_cards h WHERE h.status = 'held'
-    UNION ALL SELECT DISTINCT sl.order_number, 'short' FROM tcg_staged_lines sl
-        WHERE sl.short_qty > 0 AND NOT EXISTS (SELECT 1 FROM tcg_refund_allocations a WHERE a.line_id = sl.line_id AND a.kind = 'short')
+    UNION ALL SELECT DISTINCT w.order_number, 'short' FROM v_tcg_short_work w WHERE w.is_open     -- tcg_short_work.sql
     UNION ALL SELECT DISTINCT r.order_number, 'refund' FROM v_tcg_refund_review r
     UNION ALL SELECT DISTINCT t.order_number, 'active_thread' FROM tcg_msg_threads t, today
         WHERE t.last_date >= today.d - 30

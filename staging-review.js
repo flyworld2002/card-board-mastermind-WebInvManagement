@@ -711,10 +711,11 @@ function customVariantWarningHTML(row) {
 // "ordered 6 · short 1 · held 1" next to a card that came from a TCGplayer order.
 function tcgChips(row) {
     const m = state.tcgMarks.get(row.staging_id);
-    if (!m || (!m.short_qty && !m.held_qty)) return '';
+    if (!m || (!m.short_qty && !m.held_qty && !m.kept_qty)) return '';
     const chip = (t, c) => `<span style="margin-left:6px; font-size:11px; padding:1px 6px; border-radius:8px; border:1px solid ${c}; color:${c};">${t}</span>`;
     return (m.short_qty ? chip(`short ${m.short_qty}`, 'var(--danger)') : '')
-         + (m.held_qty ? chip(`held ${m.held_qty}`, 'var(--warning)') : '');
+         + (m.held_qty ? chip(`held ${m.held_qty}`, 'var(--warning)') : '')
+         + (m.kept_qty ? chip(`kept ${m.kept_qty}`, 'var(--accent)') : '');
 }
 
 function renderRow(container, row) {
@@ -784,10 +785,17 @@ const HOLD_REASONS = [
     ['grading', 'Hold for grading'], ['waiting_seller', 'Waiting on seller'],
 ];
 
+const KEEP_REASONS = [
+    ['damaged', 'Damaged, too poor to sell'], ['lower_condition', 'Lower condition than listed, will sell later'],
+    ['wrong_card', 'Wrong card, keeping it'], ['small_value', 'Not worth chasing'], ['other', 'Other (write a note)'],
+];
+const KEEP_LABEL = Object.fromEntries(KEEP_REASONS);
+const CONDITIONS = ['Near Mint', 'Lightly Played', 'Moderately Played', 'Heavily Played', 'Damaged'];
+
 function wireTcgPanel(container, td, row) {
     const mark = state.tcgMarks.get(row.staging_id);
     const form = td.querySelector('.tcg-form');
-    const left = mark.ordered_qty - mark.short_qty - mark.held_qty;
+    const left = mark.ordered_qty - mark.short_qty - mark.held_qty - (mark.kept_qty || 0);
     const done = async (promise) => {
         const { error } = await promise;
         if (error) { form.insertAdjacentHTML('beforeend', `<div style="color:var(--danger); margin-top:6px;">${escapeHtml(error.message)}</div>`); return; }
@@ -807,6 +815,27 @@ function wireTcgPanel(container, td, row) {
                 p_short_qty: Number(form.querySelector('.tcg-short-qty').value),
                 p_note: form.querySelector('.tcg-short-note').value.trim() || null,
             })));
+    });
+
+    td.querySelector('.tcg-keep-btn').addEventListener('click', () => {
+        if (left < 1) { form.innerHTML = '<span style="color:var(--text-secondary);">No cards left on this line to keep.</span>'; return; }
+        form.innerHTML = `
+            <label>How many to keep?
+                <input type="number" class="tcg-keep-qty" min="1" max="${left}" value="1" style="width:70px;" /></label>
+            <select class="tcg-keep-reason" style="margin-left:8px;"><option value="">Pick a reason...</option>${KEEP_REASONS.map(([k, l]) => `<option value="${k}">${escapeHtml(l)}</option>`).join('')}</select>
+            <input type="text" class="tcg-keep-note" placeholder="Note (required for Other)" style="width:220px; margin-left:6px;" />
+            <button class="btn btn-primary tcg-keep-save" type="button" style="margin-left:6px;">Keep</button>
+            <div class="tcg-keep-msg" style="color:var(--danger); font-size:12px; margin-top:4px;"></div>`;
+        form.querySelector('.tcg-keep-save').addEventListener('click', () => {
+            const reason = form.querySelector('.tcg-keep-reason').value;
+            if (!reason) { form.querySelector('.tcg-keep-msg').textContent = 'Pick a reason first.'; return; }
+            done(supabase.rpc('tcg_keep_cards', {
+                p_staging_id: row.staging_id,
+                p_qty: Number(form.querySelector('.tcg-keep-qty').value),
+                p_reason: reason,
+                p_note: form.querySelector('.tcg-keep-note').value.trim() || null,
+            }));
+        });
     });
 
     td.querySelector('.tcg-hold-btn').addEventListener('click', () => {
@@ -976,10 +1005,12 @@ function renderExpandedRow(container, row) {
                     ordered ${state.tcgMarks.get(row.staging_id).ordered_qty},
                     short ${state.tcgMarks.get(row.staging_id).short_qty},
                     held ${state.tcgMarks.get(row.staging_id).held_qty},
+                    kept ${state.tcgMarks.get(row.staging_id).kept_qty || 0},
                     arriving into inventory ${row.quantity}.</div>
                 <div style="display:flex; gap:8px; margin-top:8px;">
                     <button class="btn tcg-short-btn" type="button">Short (didn't arrive)</button>
                     <button class="btn tcg-hold-btn" type="button">Hold (set aside)</button>
+                    <button class="btn tcg-keep-btn" type="button" title="It arrived wrong but you will not chase the seller: set it aside with a reason, out of inventory and off the work list">Keep (no refund)</button>
                 </div>
                 <div class="tcg-form" style="margin-top:8px;"></div>
             </div>` : ''}

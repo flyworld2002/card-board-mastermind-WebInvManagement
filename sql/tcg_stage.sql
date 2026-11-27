@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS tcg_staged_lines (
     created_at    timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS tcg_staged_lines_order_idx ON tcg_staged_lines (order_number);
+ALTER TABLE tcg_staged_lines ADD COLUMN IF NOT EXISTS kept_qty integer NOT NULL DEFAULT 0;   -- cards kept without a refund (see tcg_keep_pile.sql)
 
 CREATE TABLE IF NOT EXISTS tcg_held_cards (
     id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -63,8 +64,8 @@ BEGIN
     IF NOT FOUND THEN RAISE EXCEPTION 'This staging row did not come from a TCGplayer order'; END IF;
     SELECT * INTO s FROM staging WHERE id = p_staging_id FOR UPDATE;
     IF s.status = 'processed' THEN RAISE EXCEPTION 'Already pushed to inventory, cannot change it here'; END IF;
-    q := l.ordered_qty - l.short_qty - l.held_qty;
-    IF q < 0 THEN RAISE EXCEPTION 'Short + held (%) is more than the % ordered', l.short_qty + l.held_qty, l.ordered_qty; END IF;
+    q := l.ordered_qty - l.short_qty - l.held_qty - l.kept_qty;
+    IF q < 0 THEN RAISE EXCEPTION 'Short + held + kept (%) is more than the % ordered', l.short_qty + l.held_qty + l.kept_qty, l.ordered_qty; END IF;
     UPDATE staging SET quantity = GREATEST(q, 0),
         status = CASE WHEN q = 0 THEN 'skipped'
                       WHEN s.status = 'skipped' THEN (CASE WHEN s.card_id IS NOT NULL AND s.match_status = 'matched' THEN 'approved' ELSE 'pending' END)
@@ -94,7 +95,7 @@ BEGIN
     END IF;
     SELECT * INTO l FROM tcg_staged_lines WHERE staging_id = p_staging_id FOR UPDATE;
     IF NOT FOUND THEN RAISE EXCEPTION 'This staging row did not come from a TCGplayer order'; END IF;
-    IF l.ordered_qty - l.short_qty - l.held_qty < p_qty THEN RAISE EXCEPTION 'Only % card(s) left on this line', l.ordered_qty - l.short_qty - l.held_qty; END IF;
+    IF l.ordered_qty - l.short_qty - l.held_qty - l.kept_qty < p_qty THEN RAISE EXCEPTION 'Only % card(s) left on this line', l.ordered_qty - l.short_qty - l.held_qty - l.kept_qty; END IF;
     SELECT * INTO s FROM staging WHERE id = p_staging_id;
     SELECT * INTO ln FROM tcg_order_lines WHERE id = l.line_id;
     INSERT INTO tcg_held_cards (order_number, line_id, staging_id, card_id, card_name, card_number, set_label, condition_raw, unit_cost, flags, note, status)

@@ -59,7 +59,7 @@ LANGUAGE sql SECURITY DEFINER SET search_path = public AS $f$
                 'photos', (SELECT jsonb_agg(p.path ORDER BY p.created_at) FROM tcg_held_photos p WHERE p.held_id = h.id)
             ) ORDER BY h.created_at)
             FROM tcg_held_cards h
-            WHERE h.order_number = o.order_number AND h.status <> 'grading' AND EXISTS (SELECT 1 FROM tcg_held_photos p2 WHERE p2.held_id = h.id)
+            WHERE h.order_number = o.order_number AND h.status NOT IN ('grading', 'kept') AND EXISTS (SELECT 1 FROM tcg_held_photos p2 WHERE p2.held_id = h.id)
         ), '[]'::jsonb),
         'order_photos', COALESCE((
             SELECT jsonb_agg(jsonb_build_object('path', op.public_path, 'kind', op.kind, 'caption', op.caption) ORDER BY op.created_at)
@@ -69,7 +69,7 @@ LANGUAGE sql SECURITY DEFINER SET search_path = public AS $f$
         'missing', COALESCE((
             SELECT jsonb_agg(jsonb_build_object('card_name', l.card_name, 'card_number', l.card_number, 'qty', sl.short_qty) ORDER BY l.line_no)
             FROM tcg_staged_lines sl JOIN tcg_order_lines l ON l.id = sl.line_id
-            WHERE sl.order_number = o.order_number AND sl.short_qty > 0
+            WHERE sl.order_number = o.order_number AND sl.short_qty > 0 AND sl.short_resolved_at IS NULL
         ), '[]'::jsonb))
     FROM tcg_orders o WHERE o.gallery_token = p_token
 $f$;
