@@ -142,11 +142,11 @@ function rowHtml(c) {
 
 const OB_LABEL = { approved: 'approved, waiting to be handed to Grok', exported: 'waiting for Grok to submit it', sent: 'rated', failed: 'FAILED', unknown: 'no answer from Grok, check TCGplayer', skipped: 'skipped', draft: 'draft' };
 
-function recentHtml() {
-    const rows = st.outbox.filter(r => r.status !== 'draft').slice(0, 15);
+function recentHtml(only) {
+    const rows = st.outbox.filter(r => r.status !== 'draft' && (!only || r.order_number === only)).slice(0, only ? 5 : 15);
     if (!rows.length) return '';
     return `
-    <h4 style="margin:18px 0 6px;">Recent ratings</h4>
+    <h4 style="margin:18px 0 6px;">${only ? 'This order' : 'Recent ratings'}</h4>
     ${rows.map(r => `
         <div style="font-size:12px; padding:3px 0; border-top:1px solid var(--border);">
             <strong>${esc(r.seller)}</strong> ${r.stars ? '★'.repeat(r.stars) : ''} ·
@@ -161,8 +161,19 @@ function recentHtml() {
 
 // ── page ──────────────────────────────────────────────────────────────────────
 export async function renderRateSellers(el, opts = {}) {
+    const only = opts.only || null;                      // one order (the Rate seller button on an order)
     const draw = () => {
-        const clean = st.cands.filter(isClean);
+        const list = only ? st.cands.filter(c => c.order_number === only) : st.cands;
+        const clean = only ? [] : st.cands.filter(isClean);
+        if (only) {
+            el.innerHTML = `
+            <p style="color:var(--text-secondary); font-size:13px; margin:0 0 8px;">Starts with a suggestion from what the app knows about this order. Change anything, then Approve. A rating is public and posted under your name, so nothing is sent until you click Approve.</p>
+            <span id="rs-msg" style="font-size:12px; color:var(--text-secondary);">${esc(st.msg)}</span>
+            ${list.length ? list.map(rowHtml).join('') : `<p style="color:var(--text-secondary);">${st.outbox.some(r => r.order_number === only && ['approved', 'exported'].includes(r.status)) ? 'This rating is waiting for Grok to submit it.' : st.outbox.some(r => r.order_number === only && r.status === 'sent') ? 'This order is already rated.' : st.outbox.some(r => r.order_number === only && r.status === 'skipped') ? 'You skipped rating this order (see below to bring it back).' : 'TCGplayer is not offering a rating on this order (already rated there, or not available yet).'}</p>`}
+            ${recentHtml(only)}`;
+            wire();
+            return;
+        }
         el.innerHTML = `
         <p style="color:var(--text-secondary); font-size:13px; margin:0 0 8px;">
             Orders TCGplayer still lets you rate. Any status works. Each row starts with a suggestion from what the app knows; change anything, then Approve.
@@ -301,4 +312,28 @@ export async function renderRateSellers(el, opts = {}) {
 export async function countRateCandidates() {
     const { count } = await supabase.from('v_tcg_rate_candidates').select('order_number', { count: 'exact', head: true });
     return count ?? 0;
+}
+
+// The "Rate seller" button on an order: the same rating form for that one order, in a window.
+export async function openRateModal(orderNumber, onDone) {
+    if (document.getElementById('rate-modal')) return;
+    const overlay = document.createElement('div');
+    overlay.id = 'rate-modal';
+    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.65); display:flex; align-items:center; justify-content:center; z-index:900;';
+    overlay.innerHTML = `
+        <div style="background:var(--bg); border:1px solid var(--border); border-radius:10px; width:min(760px, 96vw); max-height:92vh; display:flex; flex-direction:column;">
+            <div style="display:flex; align-items:center; padding:8px 14px; border-bottom:1px solid var(--border);">
+                <strong>Rate seller</strong>
+                <button class="btn" id="rate-modal-x" style="margin-left:auto;" title="Close (Esc)">✕</button>
+            </div>
+            <div id="rate-modal-body" style="overflow:auto; padding:12px 18px 18px;"></div>
+        </div>`;
+    document.body.appendChild(overlay);
+    const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); window.removeEventListener('hashchange', close); onDone?.(); };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('hashchange', close);
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#rate-modal-x').addEventListener('click', close);
+    await renderRateSellers(overlay.querySelector('#rate-modal-body'), { only: orderNumber });
 }

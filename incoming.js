@@ -409,6 +409,7 @@ async function showLines(container, orderNumber) {
         <div style="display:flex; gap:8px; align-items:center; margin:4px 0 8px;">
             ${switchBtn}
             <button class="btn btn-primary inc-msg" data-order="${esc(orderNumber)}" style="font-size:12px;" title="Write a message to this seller (nothing is sent until you approve it)">Message seller</button>
+            <button class="btn inc-rate" data-order="${esc(orderNumber)}" style="font-size:12px;" title="Rate this seller on TCGplayer (nothing is sent until you approve it)">Rate seller</button>
             <span style="font-size:12px; color:var(--text-secondary);">${reasons ? 'Following up: ' + esc(reasons.map(r => REASON_LABEL[r] || r).join(', ')) : 'Not on the Follow-ups list'}</span>
         </div>
         ${outboxBlock(orderNumber)}
@@ -429,6 +430,13 @@ async function showLines(container, orderNumber) {
         </table>
         <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">An orange dot means the line is not tied to one exact card variant yet, so it is not counted in the "On order" columns.</div>`;
     cell.querySelector('.inc-msg')?.addEventListener('click', () => openMessage(container, { orderNumber }));
+    cell.querySelector('.inc-rate')?.addEventListener('click', async () => {
+        const m = await import(`./rate-sellers.js?v=${Date.now()}`);
+        await m.openRateModal(orderNumber, async () => {
+            try { state.rateCount = await m.countRateCandidates(); } catch { /* keep */ }
+            const b = container.querySelector('.inc-filter[data-f="rate"]'); if (b) b.textContent = `Rate sellers (${state.rateCount})`;
+        });
+    });
     import(`./order-photos.js?v=${Date.now()}`).then(m => m.renderOrderPhotos(cell.querySelector('.inc-photos'), orderNumber)).catch(() => {});
     cell.querySelectorAll('.inc-ob-edit').forEach(b => b.addEventListener('click', () => {
         const m = (state.outbox.get(orderNumber) || []).find(x => x.id === b.dataset.id);
