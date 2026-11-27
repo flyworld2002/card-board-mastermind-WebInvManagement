@@ -111,3 +111,16 @@ LEFT JOIN LATERAL (
     WHERE t.order_number = o.order_number) m ON true
 WHERE o.rate_available IS TRUE
   AND NOT EXISTS (SELECT 1 FROM tcg_rating_outbox r WHERE r.order_number = o.order_number AND r.status IN ('approved', 'exported', 'sent', 'unknown', 'skipped'));
+
+
+-- Same for ratings; the order then stops being offered for rating.
+CREATE OR REPLACE FUNCTION public.tcg_mark_rating_sent(p_id uuid) RETURNS void
+LANGUAGE plpgsql AS $f$
+DECLARE v_order text;
+BEGIN
+    UPDATE tcg_rating_outbox SET status = 'sent', sent_at = now(), error = NULL WHERE id = p_id AND status IN ('exported', 'unknown', 'failed') RETURNING order_number INTO v_order;
+    IF v_order IS NULL THEN RAISE EXCEPTION 'Only a rating that is waiting on Grok, failed, or has no answer can be marked as sent'; END IF;
+    UPDATE tcg_orders SET rate_available = false WHERE order_number = v_order;
+END $f$;
+REVOKE EXECUTE ON FUNCTION public.tcg_mark_rating_sent(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.tcg_mark_rating_sent(uuid) TO authenticated;

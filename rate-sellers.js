@@ -155,6 +155,8 @@ function recentHtml(only) {
             ${r.comment ? `<span style="color:var(--text-secondary);"> · ${esc(r.comment.slice(0, 90))}</span>` : ''}
             ${r.error ? `<span style="color:var(--danger);"> · ${esc(r.error)}</span>` : ''}
             ${r.status === 'skipped' ? `<button class="btn rs-unskip" data-id="${esc(r.id)}" style="font-size:11px; margin-left:6px;">Bring back</button>` : ''}
+            ${['exported', 'unknown'].includes(r.status) ? `<button class="btn rs-sent" data-id="${esc(r.id)}" style="font-size:11px; margin-left:6px;" title="Use this when you saw it on TCGplayer but Grok did not report back">I checked, it was submitted</button>` : ''}
+            ${r.status === 'exported' && r.exported_at && Date.now() - new Date(r.exported_at).getTime() > 7200000 ? `<span style="color:var(--danger);"> · no answer from Grok for ${Math.floor((Date.now() - new Date(r.exported_at).getTime()) / 3600000)} hours</span>` : ''}
             ${['approved', 'exported'].includes(r.status) ? `<button class="btn rs-withdraw" data-id="${esc(r.id)}" style="font-size:11px; margin-left:6px;" title="Take it back to a draft so you can edit it. Works until Grok has submitted it.">Withdraw to edit</button>` : ''}
         </div>`).join('')}`;
 }
@@ -294,6 +296,13 @@ export async function renderRateSellers(el, opts = {}) {
         el.querySelectorAll('.rs-unskip').forEach(b => b.addEventListener('click', async () => {
             const { error } = await supabase.from('tcg_rating_outbox').delete().eq('id', b.dataset.id).eq('status', 'skipped');
             if (error) { say(error.message); return; }
+            await refresh();
+        }));
+        el.querySelectorAll('.rs-sent').forEach(b => b.addEventListener('click', async () => {
+            if (!confirm('Mark this rating as submitted? Only do this if you saw it on TCGplayer.')) return;
+            const { error } = await supabase.rpc('tcg_mark_rating_sent', { p_id: b.dataset.id });
+            if (error) { say(error.message); return; }
+            callDesktop('/api/tcg/messages/export').catch(() => { /* the next sync removes the file */ });
             await refresh();
         }));
         el.querySelectorAll('.rs-withdraw').forEach(b => b.addEventListener('click', async () => {

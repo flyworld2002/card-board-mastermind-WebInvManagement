@@ -117,6 +117,7 @@ async function load() {
     if (err) throw new Error(err.message);
     state.orders = orders.data || [];
     await loadMessages();
+    try { state.ratingsWaiting = (await supabase.from('tcg_rating_outbox').select('id, status, exported_at').eq('status', 'exported')).data || []; } catch { state.ratingsWaiting = []; }
     try { state.rateCount = await (await import(`./rate-sellers.js?v=${Date.now()}`)).countRateCandidates(); } catch { state.rateCount = 0; }
     try { state.toFix = await (await matchModule()).countLinesToFix(); } catch { state.toFix = 0; }
     state.files = files.data || [];
@@ -134,6 +135,8 @@ function pullInfo() {
     const ok = state.files.filter(f => f.kind === 'grab_ok').sort((a, b) => b.grabbed_on.localeCompare(a.grabbed_on))[0];
     const failed = state.files.filter(f => f.kind === 'run_failed').sort((a, b) => b.grabbed_on.localeCompare(a.grabbed_on))[0];
     const warns = [];
+    const stuck = [...[...state.outbox.values()].flat(), ...(state.ratingsWaiting || [])].filter(m => waitedHours(m) >= 2).length;
+    if (stuck) warns.push(`${stuck} message/rating${stuck === 1 ? ' is' : 's are'} still waiting for Grok after 2+ hours. Check Grok, or use "I checked, it was sent" if it already went out.`);
     const lastMs = pages ? new Date(pages.parsed_at).getTime() : 0;
     if (!pages) warns.push('No order pages have been read yet.');
     else if (Date.now() - lastMs > 2 * 86400000) warns.push('No new order pages for over 2 days. Check that Grok is still grabbing.');
@@ -452,6 +455,13 @@ async function showLines(container, orderNumber) {
         if (error) { alert(error.message); return; }
         await loadMessages(); draw(container);
     }));
+    cell.querySelectorAll('.inc-ob-sent').forEach(b => b.addEventListener('click', async () => {
+        if (!confirm('Mark this message as sent? Only do this if you saw it on TCGplayer.')) return;
+        const { error } = await supabase.rpc('tcg_mark_message_sent', { p_id: b.dataset.id });
+        if (error) { alert(error.message); return; }
+        callDesktop('/api/tcg/messages/export').catch(() => { /* the next sync removes the file */ });
+        await loadMessages(); draw(container);
+    }));
     cell.querySelectorAll('.inc-ob-withdraw').forEach(b => b.addEventListener('click', async () => {
         const { error } = await supabase.rpc('tcg_withdraw_message', { p_id: b.dataset.id });
         if (error) { alert(error.message); return; }
@@ -478,6 +488,9 @@ const OB_STATUS = {
     unknown: ['no answer from Grok, check TCGplayer before sending again', 'var(--danger)'],
 };
 
+// hours since it was handed to Grok with no result back (0 when not waiting)
+const waitedHours = (m) => m.status === 'exported' && m.exported_at ? Math.floor((Date.now() - new Date(m.exported_at).getTime()) / 3600000) : 0;
+
 // Messages you wrote to the seller from here, with where each one stands.
 function outboxBlock(orderNumber) {
     const list = state.outbox.get(orderNumber) || [];
@@ -488,13 +501,14 @@ function outboxBlock(orderNumber) {
         <div style="border:1px dashed var(--border); border-radius:6px; padding:6px 10px; margin-bottom:6px;">
             <div style="font-size:12px;"><strong>Your message to ${esc(m.seller)}</strong>
                 <span style="color:var(--text-secondary);"> · ${esc(m.subject)} · ${m.mode === 'reply' ? 'reply in thread' : 'new thread'} · response ${m.response_needed ? 'needed' : 'not needed'}</span>
-                · <span style="color:${color}; font-weight:600;">${esc(label)}</span>${m.sent_at ? ` <span style="color:var(--text-secondary);">${esc(new Date(m.sent_at).toLocaleString())}</span>` : ''}</div>
+                · <span style="color:${color}; font-weight:600;">${esc(label)}</span>${waitedHours(m) >= 2 ? ` <span style="color:var(--danger);">· no answer from Grok for ${waitedHours(m)} hours</span>` : ''}${m.sent_at ? ` <span style="color:var(--text-secondary);">${esc(new Date(m.sent_at).toLocaleString())}</span>` : ''}</div>
             <div style="font-size:12px; white-space:pre-wrap; margin-top:4px;">${esc(m.body)}</div>
             ${m.error ? `<div style="font-size:12px; color:var(--danger); margin-top:3px;">${esc(m.error)}</div>` : ''}
             <div style="margin-top:4px; display:flex; gap:6px;">
                 ${m.status === 'draft' ? `<button class="btn inc-ob-edit" data-id="${esc(m.id)}" style="font-size:11px;">Edit draft</button>
                     <button class="btn inc-ob-discard" data-id="${esc(m.id)}" style="font-size:11px;">Discard</button>` : ''}
                 ${['approved', 'exported'].includes(m.status) ? `<button class="btn inc-ob-withdraw" data-id="${esc(m.id)}" style="font-size:11px;" title="Take it back to a draft so you can edit it. Works until Grok has sent it.">Withdraw to edit</button>` : ''}
+                ${['exported', 'unknown'].includes(m.status) ? `<button class="btn inc-ob-sent" data-id="${esc(m.id)}" style="font-size:11px;" title="Use this when you saw it on TCGplayer but Grok did not report back">I checked, it was sent</button>` : ''}
                 ${['failed', 'unknown'].includes(m.status) ? `<button class="btn inc-ob-redraft" data-id="${esc(m.id)}" style="font-size:11px;">New draft from this</button>` : ''}
             </div>
         </div>`;

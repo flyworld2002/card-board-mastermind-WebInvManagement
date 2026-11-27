@@ -79,3 +79,14 @@ REVOKE EXECUTE ON FUNCTION public.tcg_approve_message(uuid) FROM PUBLIC, anon;
 REVOKE EXECUTE ON FUNCTION public.tcg_withdraw_message(uuid) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.tcg_approve_message(uuid) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.tcg_withdraw_message(uuid) TO authenticated;
+
+
+-- Fei saw it on TCGplayer but Grok wrote no result file: record it as sent (only from "waiting on Grok" states).
+CREATE OR REPLACE FUNCTION public.tcg_mark_message_sent(p_id uuid) RETURNS void
+LANGUAGE plpgsql AS $f$
+BEGIN
+    UPDATE tcg_msg_outbox SET status = 'sent', sent_at = now(), error = NULL WHERE id = p_id AND status IN ('exported', 'unknown', 'failed');
+    IF NOT FOUND THEN RAISE EXCEPTION 'Only a message that is waiting on Grok, failed, or has no answer can be marked as sent'; END IF;
+END $f$;
+REVOKE EXECUTE ON FUNCTION public.tcg_mark_message_sent(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.tcg_mark_message_sent(uuid) TO authenticated;
