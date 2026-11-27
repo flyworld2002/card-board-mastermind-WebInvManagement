@@ -667,6 +667,7 @@ async function softRefresh(container) {
         const fix = container.querySelector('#inc-fix');
         if (fix) fix.textContent = `Fix card matches${state.toFix ? ` (${state.toFix} lines)` : ''}`;
         window.__cbmRefreshIncomingBadge?.();
+        window.__cbmSyncLogChanges?.([...changed].map(n => { const o = state.orders.find(x => x.order_number === n); return o ? `${o.seller} (${n.slice(0, 8)})` : n; }));
         if (state.filter === 'rate' || !changed.size) return;      // the Rate sellers screen is redrawn when you open it
 
         const wrap = container.querySelector('#inc-table');
