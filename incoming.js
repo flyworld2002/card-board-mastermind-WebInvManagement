@@ -9,6 +9,7 @@
 
 import { supabase, formatPrice } from './shared.js';
 import { callDesktop } from './desktop-api.js';
+import { runSync } from './auto-sync.js';
 
 const esc = (s) => (s ?? '').toString()
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -35,7 +36,7 @@ const REASON_LABEL = {
     active_thread: 'recent messages', awaiting_reply: 'waiting on seller', manual: 'manual',
 };
 
-const state = { rateCount: 0, outbox: new Map(), followups: new Map(), manualFollow: new Map(), threads: new Map(), messages: new Map(), toFix: 0, orders: [], alerts: new Map(), lines: new Map(), files: [], filter: 'open', openOrder: null, seller: '', editTrack: null, syncMsg: '', syncing: false };
+const state = { rateCount: 0, outbox: new Map(), followups: new Map(), manualFollow: new Map(), threads: new Map(), messages: new Map(), toFix: 0, orders: [], alerts: new Map(), lines: new Map(), files: [], filter: 'open', openOrder: null, seller: '', editTrack: null, refreshing: false };
 
 const fmtDate = (d) => d ? new Date(d + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
 const money = (v) => v == null ? '—' : formatPrice(v);
@@ -146,6 +147,7 @@ export async function renderIncoming(container) {
         container.innerHTML = `<h2>Incoming orders</h2><p style="color:var(--danger)">Failed to load: ${esc(e.message)}</p>`;
         return;
     }
+    bindSync(container);
     draw(container);
 }
 
@@ -167,27 +169,27 @@ function visible() {
     });
 }
 
-function draw(container) {
+// Everything above the filter tabs: "last pulled" strip, totals, "Needs a look" box.
+function derived() {
     const open = state.orders.filter(isOpen);
     const flagged = open.filter(o => state.alerts.has(o.order_number));
-    const { pages, ok, warns } = pullInfo();
-    const trackChecked = state.orders.map(o => o.carrier_checked_at).filter(Boolean).sort().pop() || null;
-    const openCards = open.reduce((a, o) => a + (o.quantity || 0), 0);
-    const openMoney = open.reduce((a, o) => a + Number(o.total || 0), 0);
-    const msgList = state.files.find(f => f.kind === 'msglist');
     const counts = {
         open: open.length, followups: state.orders.filter(o => state.followups.has(o.order_number)).length, rate: state.rateCount, alerts: flagged.length,
         cancelled: state.orders.filter(o => o.status === 'cancelled').length,
         refunds: state.orders.filter(o => Number(o.refund_total) > 0).length,
         received: state.orders.filter(o => o.received_at && o.status !== 'cancelled').length,
     };
+    return { open, flagged, counts };
+}
 
-    container.innerHTML = `
-        <h2 style="margin:0 0 4px;">Incoming orders</h2>
-        <p style="color:var(--text-secondary); font-size:13px; margin:0 0 12px;">
-            TCGplayer orders not yet received. TCGplayer never says "Delivered", so an order drops off
-            when it reaches Staging/Purchases or when you mark it received here.
-        </p>
+function topHtml() {
+    const { open, flagged } = derived();
+    const { pages, ok, warns } = pullInfo();
+    const trackChecked = state.orders.map(o => o.carrier_checked_at).filter(Boolean).sort().pop() || null;
+    const openCards = open.reduce((a, o) => a + (o.quantity || 0), 0);
+    const openMoney = open.reduce((a, o) => a + Number(o.total || 0), 0);
+    const msgList = state.files.find(f => f.kind === 'msglist');
+    return `
         <div style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:6px; padding:10px 14px; margin-bottom:12px; font-size:13px;">
             <strong>Last pulled:</strong>
             ${pages ? `order pages read ${esc(ago(pages.parsed_at))} (${esc(new Date(pages.parsed_at).toLocaleString())})` : 'never'}
@@ -198,9 +200,9 @@ function draw(container) {
                 <span id="inc-track-msg" style="font-size:12px; color:var(--text-secondary);"></span>
             </div>
             <div style="margin-top:4px;"><strong>Seller messages read:</strong> ${msgList ? esc(ago(msgList.parsed_at)) + ` (${esc(new Date(msgList.parsed_at).toLocaleString())})` : 'never'}
-                <button class="btn" id="inc-sync" style="font-size:12px; margin-left:8px;" ${state.syncing ? 'disabled' : ''}
-                    title="Reads what Grok saved in Dropbox (orders and messages) and refreshes the follow-up list">${state.syncing ? 'Syncing...' : 'Sync'}</button>
-                <span id="inc-sync-msg" style="font-size:12px; color:var(--text-secondary); margin-left:6px;">${esc(state.syncMsg)}</span></div>
+                <button class="btn" id="inc-sync" style="font-size:12px; margin-left:8px;" ${window.__cbmSync?.running ? 'disabled' : ''}
+                    title="Reads what Grok saved in Dropbox (orders and messages) and refreshes the follow-up list">${window.__cbmSync?.running ? 'Syncing...' : 'Sync'}</button>
+                <span id="inc-sync-msg" style="font-size:12px; color:var(--text-secondary); margin-left:6px;">${esc(window.__cbmSync?.msg || '')}</span></div>
             ${warns.map(w => `<div style="color:var(--warning); margin-top:4px;">⚠ ${esc(w)}</div>`).join('')}
         </div>
         <div style="display:flex; gap:24px; margin-bottom:12px; font-size:13px;">
@@ -219,6 +221,38 @@ function draw(container) {
                         <div style="color:var(--warning); font-size:12px;">${state.alerts.get(o.order_number).map(a => esc(ALERT_TEXT[a.alert_type](a.days))).join(' · ')}</div>
                     </div>`).join('')}
             </div>` : ''}
+    `;
+}
+
+function wireTop(container) {
+    container.querySelector('#inc-track').addEventListener('click', async () => {
+        const text = 'Update the delivery dates on my open TCGplayer orders: open each tracking link in my Chrome, read the estimated or delivered date, and load them into the Incoming page.';
+        let copied = false;
+        try { await navigator.clipboard.writeText(text); copied = true; } catch { /* clipboard blocked */ }
+        container.querySelector('#inc-track-msg').textContent = copied
+            ? 'Request copied. Paste it to Claude in Claude Code and the dates are updated from the tracking pages.'
+            : `Send Claude this: "${text}"`;
+    });
+    container.querySelector('#inc-sync').addEventListener('click', () => runSync({ manual: true }));
+    container.querySelectorAll('.inc-jump').forEach(a => a.addEventListener('click', (e) => {
+        e.preventDefault();
+        state.filter = 'alerts'; state.openOrder = a.dataset.order; draw(container);
+    }));
+}
+
+function draw(container) {
+    const { counts } = derived();
+
+    container.innerHTML = `
+        <div style="display:flex; align-items:center; gap:12px; margin:14px 0 4px;">
+            <h2 style="margin:0;">Incoming orders</h2>
+            <button class="btn" id="inc-held" style="margin-left:auto;" title="Cards set aside, missing cards, refunds to review">Held<span class="held-count">${esc(document.getElementById('held-badge')?.textContent > 0 ? ` (${document.getElementById('held-badge').textContent})` : '')}</span></button>
+        </div>
+        <p style="color:var(--text-secondary); font-size:13px; margin:0 0 12px;">
+            TCGplayer orders not yet received. TCGplayer never says "Delivered", so an order drops off
+            when it reaches Staging/Purchases or when you mark it received here.
+        </p>
+        <div id="inc-top">${topHtml()}</div>
         <div class="filters-bar" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px;">
             ${FILTERS.map(([k, label]) => `<button class="btn inc-filter" data-f="${k}" style="${state.filter === k ? 'background:var(--accent); color:#fff;' : ''}">${label} (${counts[k]})</button>`).join('')}
             <button class="btn" id="inc-fix" title="Cards on order that are not tied to one exact card of ours yet">Fix card matches${state.toFix ? ` (${state.toFix} lines)` : ''}</button>
@@ -228,15 +262,8 @@ function draw(container) {
     `;
 
     container.querySelectorAll('.inc-filter').forEach(b => b.addEventListener('click', () => { state.filter = b.dataset.f; draw(container); }));
-    container.querySelector('#inc-track').addEventListener('click', async () => {
-        const text = 'Update the delivery dates on my open TCGplayer orders: open each tracking link in my Chrome, read the estimated or delivered date, and load them into the Incoming page.';
-        let copied = false;
-        try { await navigator.clipboard.writeText(text); copied = true; } catch { /* clipboard blocked */ }
-        container.querySelector('#inc-track-msg').textContent = copied
-            ? 'Request copied. Paste it to Claude in Claude Code and the dates are updated from the tracking pages.'
-            : `Send Claude this: "${text}"`;
-    });
-    container.querySelector('#inc-sync').addEventListener('click', () => syncFromGrok(container));
+    wireTop(container);
+    container.querySelector('#inc-held').addEventListener('click', () => openHeldModal());
     container.querySelector('#inc-fix').addEventListener('click', async () => {
         const m = await matchModule();
         await m.renderMatchFixer(container, () => renderIncoming(container));
@@ -245,11 +272,27 @@ function draw(container) {
         state.seller = e.target.value;
         drawTable(container);
     });
-    container.querySelectorAll('.inc-jump').forEach(a => a.addEventListener('click', (e) => {
-        e.preventDefault();
-        state.filter = 'alerts'; state.openOrder = a.dataset.order; draw(container);
-    }));
     drawTable(container);
+}
+
+function wireRows(container, root) {
+    root.querySelectorAll('tr.inc-row').forEach(tr => tr.addEventListener('click', async (e) => {
+        if (e.target.closest('button, a, input')) return;
+        state.openOrder = state.openOrder === tr.dataset.order ? null : tr.dataset.order;
+        drawTable(container);
+        if (state.openOrder) await showLines(container, state.openOrder);
+    }));
+    root.querySelectorAll('.inc-track-add').forEach(b => b.addEventListener('click', () => { state.editTrack = b.dataset.order; drawTable(container); container.querySelector('.inc-track-input')?.focus(); }));
+    root.querySelectorAll('.inc-track-cancel').forEach(b => b.addEventListener('click', () => { state.editTrack = null; drawTable(container); }));
+    root.querySelectorAll('.inc-track-save').forEach(b => b.addEventListener('click', () => saveTracking(container, b.dataset.order, b.closest('.inc-trackform').querySelector('.inc-track-input').value)));
+    root.querySelectorAll('.inc-track-input').forEach(i => i.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') saveTracking(container, i.closest('.inc-trackform').querySelector('.inc-track-save').dataset.order, i.value);
+        if (e.key === 'Escape') { state.editTrack = null; drawTable(container); }
+    }));
+    root.querySelectorAll('.inc-row-resolve').forEach(b => b.addEventListener('click', () => setFollowUp(container, b.dataset.order, false)));
+    root.querySelectorAll('.inc-stage').forEach(b => b.addEventListener('click', () => openInStaging(container, b)));
+    root.querySelectorAll('.inc-recv').forEach(b => b.addEventListener('click', () => setReceived(container, b.dataset.order, true)));
+    root.querySelectorAll('.inc-undo').forEach(b => b.addEventListener('click', () => setReceived(container, b.dataset.order, false)));
 }
 
 function drawTable(container) {
@@ -274,23 +317,7 @@ function drawTable(container) {
             </tr></thead>
             <tbody>${rows.map(rowHtml).join('')}</tbody>
         </table>`;
-    wrap.querySelectorAll('tr.inc-row').forEach(tr => tr.addEventListener('click', async (e) => {
-        if (e.target.closest('button, a, input')) return;
-        state.openOrder = state.openOrder === tr.dataset.order ? null : tr.dataset.order;
-        drawTable(container);
-        if (state.openOrder) await showLines(container, state.openOrder);
-    }));
-    wrap.querySelectorAll('.inc-track-add').forEach(b => b.addEventListener('click', () => { state.editTrack = b.dataset.order; drawTable(container); container.querySelector('.inc-track-input')?.focus(); }));
-    wrap.querySelectorAll('.inc-track-cancel').forEach(b => b.addEventListener('click', () => { state.editTrack = null; drawTable(container); }));
-    wrap.querySelectorAll('.inc-track-save').forEach(b => b.addEventListener('click', () => saveTracking(container, b.dataset.order, b.closest('.inc-trackform').querySelector('.inc-track-input').value)));
-    wrap.querySelectorAll('.inc-track-input').forEach(i => i.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') saveTracking(container, i.closest('.inc-trackform').querySelector('.inc-track-save').dataset.order, i.value);
-        if (e.key === 'Escape') { state.editTrack = null; drawTable(container); }
-    }));
-    wrap.querySelectorAll('.inc-row-resolve').forEach(b => b.addEventListener('click', () => setFollowUp(container, b.dataset.order, false)));
-    wrap.querySelectorAll('.inc-stage').forEach(b => b.addEventListener('click', () => openInStaging(container, b)));
-    wrap.querySelectorAll('.inc-recv').forEach(b => b.addEventListener('click', () => setReceived(container, b.dataset.order, true)));
-    wrap.querySelectorAll('.inc-undo').forEach(b => b.addEventListener('click', () => setReceived(container, b.dataset.order, false)));
+    wireRows(container, wrap);
     if (state.openOrder) showLines(container, state.openOrder);
 }
 
@@ -547,26 +574,125 @@ async function saveTracking(container, orderNumber, raw) {
 
 // "Sync": the desktop reads whatever Grok saved in the Dropbox inbox (order pages, message pages,
 // tracking files) and rewrites follow_up.txt; then this page reloads its data.
-async function syncFromGrok(container) {
-    if (state.syncing) return;
-    state.syncing = true;
-    state.syncMsg = 'Reading Grok\'s files (can take up to a minute)...';
-    draw(container);
-    try {
-        const r = await callDesktop('/api/tcg/messages/sync');
-        const sm = r.summary || {};
-        if (sm.error) throw new Error(sm.error);
-        const kinds = Object.entries(sm.kinds || {}).map(([k, n]) => `${n} ${k.replace('_', ' ')}`).join(', ');
-        state.syncMsg = sm.files
-            ? `Read ${sm.files} file(s) (${kinds}); ${sm.new_messages || 0} new message(s). ${sm.followups ?? '?'} orders on the follow-up list.`
-            : `Nothing new from Grok. Follow-up list refreshed (${sm.followups ?? '?'} orders).`;
-    } catch (e) {
-        state.syncMsg = `Sync did not work: ${e.message}`;
+// ── Held cards in a window over this page ─────────────────────────────────────
+// The Held page (held.js) draws into any container, so it opens here without leaving Incoming.
+// Closes with X, Esc, a click outside, or when something inside it sends you to another page.
+async function openHeldModal() {
+    if (document.getElementById('held-modal')) return;
+    const overlay = document.createElement('div');
+    overlay.id = 'held-modal';
+    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.65); display:flex; align-items:center; justify-content:center; z-index:900;';
+    overlay.innerHTML = `
+        <div style="background:var(--bg); border:1px solid var(--border); border-radius:10px; width:min(1200px, 96vw); height:92vh; display:flex; flex-direction:column;">
+            <div style="display:flex; align-items:center; padding:8px 14px; border-bottom:1px solid var(--border);">
+                <strong>Held</strong>
+                <button class="btn" id="held-modal-x" style="margin-left:auto;" title="Close (Esc)">✕</button>
+            </div>
+            <div id="held-modal-body" style="flex:1; overflow:auto; padding:6px 18px 18px;"></div>
+        </div>`;
+    document.body.appendChild(overlay);
+    const close = () => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+        window.removeEventListener('hashchange', close);
+        window.removeEventListener('cbm-sync-done', onSync);
+        window.__cbmRefreshHeldBadge?.();
+    };
+    // Esc closes the window only when no message window is open on top of it
+    const onKey = (e) => { if (e.key === 'Escape' && !document.querySelector('[style*="z-index:1000"], [style*="z-index: 1000"]')) close(); };
+    // a sync finished while it is open: reload the list unless something is being typed in
+    const onSync = () => { const b = overlay.querySelector('#held-modal-body'); if (b && !isEditing(b)) import(`./held.js?v=${Date.now()}`).then(m => m.renderHeld(b)); };
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('hashchange', close);
+    window.addEventListener('cbm-sync-done', onSync);
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#held-modal-x').addEventListener('click', close);
+    const { renderHeld } = await import(`./held.js?v=${Date.now()}`);
+    await renderHeld(overlay.querySelector('#held-modal-body'));
+}
+
+// ── automatic sync (auto-sync.js) ─────────────────────────────────────────────
+// The sync runs in the background; the page stays usable. When it finishes, only what changed is redrawn.
+function bindSync(container) {
+    const old = window.__cbmIncSyncHandlers;
+    if (old) { window.removeEventListener('cbm-sync-state', old.state); window.removeEventListener('cbm-sync-done', old.done); }
+    const h = {
+        state: (e) => {
+            if (!container.isConnected) return;
+            const btn = container.querySelector('#inc-sync'), msg = container.querySelector('#inc-sync-msg');
+            if (btn) { btn.disabled = !!e.detail.running; btn.textContent = e.detail.running ? 'Syncing...' : 'Sync'; }
+            if (msg) msg.textContent = e.detail.msg || '';
+        },
+        done: () => { if (container.isConnected) softRefresh(container); },
+    };
+    window.__cbmIncSyncHandlers = h;
+    window.addEventListener('cbm-sync-state', h.state);
+    window.addEventListener('cbm-sync-done', h.done);
+}
+
+// one comparable string per order: the order, its alerts, follow-up flags, messages and outbox
+function snapshot() {
+    const m = new Map();
+    for (const o of state.orders) {
+        const n = o.order_number;
+        const threads = state.threads.get(n) || [];
+        m.set(n, JSON.stringify([o, state.alerts.get(n), state.followups.get(n), state.manualFollow.get(n), state.outbox.get(n),
+            threads, threads.map(t => state.messages.get(t.thread_id))]));
     }
-    state.syncing = false;
-    try { await load(); } catch { /* keep what is on screen */ }
-    window.__cbmRefreshIncomingBadge?.();
-    draw(container);
+    return m;
+}
+
+const isEditing = (root) => !!root && root.contains(document.activeElement) && document.activeElement.matches('input, textarea, select');
+
+async function softRefresh(container) {
+    if (state.refreshing) return;
+    state.refreshing = true;
+    try {
+        const before = snapshot();
+        try { await load(); } catch { return; }                    // keep what is on screen
+        if (!container.isConnected) return;
+        const after = snapshot();
+        const changed = new Set();
+        for (const [k, v] of after) if (before.get(k) !== v) changed.add(k);
+        for (const k of before.keys()) if (!after.has(k)) changed.add(k);
+
+        // top strip, totals, "Needs a look" and the tab counts
+        const top = container.querySelector('#inc-top');
+        if (top && !isEditing(top)) { top.innerHTML = topHtml(); wireTop(container); }
+        const { counts } = derived();
+        container.querySelectorAll('.inc-filter').forEach(b => {
+            const f = FILTERS.find(x => x[0] === b.dataset.f);
+            if (f) b.textContent = `${f[1]} (${counts[f[0]]})`;
+        });
+        const fix = container.querySelector('#inc-fix');
+        if (fix) fix.textContent = `Fix card matches${state.toFix ? ` (${state.toFix} lines)` : ''}`;
+        window.__cbmRefreshIncomingBadge?.();
+        if (state.filter === 'rate' || !changed.size) return;      // the Rate sellers screen is redrawn when you open it
+
+        const wrap = container.querySelector('#inc-table');
+        if (!wrap) return;
+        const want = visible().map(o => o.order_number);
+        const have = [...wrap.querySelectorAll('tr.inc-row')].map(tr => tr.dataset.order);
+        const sameList = want.length === have.length && want.every((n, i) => n === have[i]);
+        if (!sameList) {                                            // an order arrived, left or moved: redraw the table only
+            if (!state.editTrack && !isEditing(wrap)) drawTable(container);
+            return;
+        }
+        for (const n of want) {
+            if (!changed.has(n) || state.editTrack === n) continue;
+            const old = wrap.querySelector(`tr.inc-row[data-order="${CSS.escape(n)}"]`);
+            const detail = wrap.querySelector(`#inc-detail-${CSS.escape(n)}`);
+            if (!old || old.contains(document.activeElement) || detail?.contains(document.activeElement)) continue;   // being edited: leave it
+            const tmp = document.createElement('table');
+            tmp.innerHTML = `<tbody>${rowHtml(state.orders.find(o => o.order_number === n))}</tbody>`;
+            wireRows(container, tmp);
+            detail?.remove();
+            old.replaceWith(...tmp.querySelector('tbody').children);
+            if (state.openOrder === n) showLines(container, n);
+        }
+    } finally {
+        state.refreshing = false;
+    }
 }
 
 async function setReceived(container, orderNumber, received) {

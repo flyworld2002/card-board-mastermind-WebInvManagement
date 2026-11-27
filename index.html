@@ -182,6 +182,7 @@
 
     <script type="module">
         import { requireAuth, signOut, supabase } from './shared.js';
+        import { initAutoSync } from './auto-sync.js';
 
         const app = document.getElementById('app');
 
@@ -203,7 +204,7 @@
                         <a href="#inventory" data-page="inventory">Inventory</a>
                         <a href="#purchases" data-page="purchases">Purchases</a>
                         <a href="#incoming" data-page="incoming">Incoming <span id="incoming-badge" class="badge badge-restock" style="display:none;"></span></a>
-                        <a href="#held" data-page="held">Held <span id="held-badge" class="badge badge-restock" style="display:none;"></span></a>
+                        <span style="display:none;"><span id="held-badge"></span></span><!-- Held now opens from the Incoming page; the badge element feeds its button -->
                         <a href="#sales" data-page="sales">Sales</a>
                         <a href="#issues" data-page="issues">Issues <span id="issues-badge" class="badge badge-not_found" style="display:none;"></span></a>
                         <a href="#picking" data-page="picking">Picking</a>
@@ -237,6 +238,7 @@
             refreshPriceHoldsBadge();
             refreshIncomingBadge();
             refreshHeldBadge();
+            initAutoSync();
         }
 
         // ── Held badge — TCGplayer cards currently set aside (tcg_held_cards.status = 'held').
@@ -251,12 +253,8 @@
             const refunds = await supabase.from('v_tcg_refund_review').select('refund_id', { count: 'exact', head: true });
             const missing = await supabase.from('v_tcg_short_work').select('staging_id', { count: 'exact', head: true }).eq('is_open', true);
             const n = (error ? 0 : (count || 0)) + (refunds.error ? 0 : (refunds.count || 0)) + (missing.error ? 0 : (missing.count || 0));
-            if (n > 0) {
-                badge.textContent = n;
-                badge.style.display = 'inline-block';
-            } else {
-                badge.style.display = 'none';
-            }
+            badge.textContent = n;
+            document.querySelectorAll('.held-count').forEach(el => { el.textContent = n > 0 ? ` (${n})` : ''; });
         }
         window.__cbmRefreshHeldBadge = refreshHeldBadge;
 
