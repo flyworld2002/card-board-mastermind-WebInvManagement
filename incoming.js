@@ -26,7 +26,7 @@ const ALERT_TEXT = {
     carrier_delivered: (d) => d === 0 ? 'Delivered today, not marked received yet' : `Delivered ${d} day${d === 1 ? '' : 's'} ago, not marked received yet`,
 };
 const FILTERS = [
-    ['open', 'On order'], ['followups', 'Follow-ups'], ['alerts', 'Needs a look'], ['cancelled', 'Cancelled'],
+    ['open', 'On order'], ['followups', 'Follow-ups'], ['rate', 'Rate sellers'], ['alerts', 'Needs a look'], ['cancelled', 'Cancelled'],
     ['refunds', 'Refunds'], ['received', 'Received'],
 ];
 
@@ -35,7 +35,7 @@ const REASON_LABEL = {
     active_thread: 'recent messages', awaiting_reply: 'waiting on seller', manual: 'manual',
 };
 
-const state = { outbox: new Map(), followups: new Map(), manualFollow: new Map(), threads: new Map(), messages: new Map(), toFix: 0, orders: [], alerts: new Map(), lines: new Map(), files: [], filter: 'open', openOrder: null, seller: '', editTrack: null, syncMsg: '', syncing: false };
+const state = { rateCount: 0, outbox: new Map(), followups: new Map(), manualFollow: new Map(), threads: new Map(), messages: new Map(), toFix: 0, orders: [], alerts: new Map(), lines: new Map(), files: [], filter: 'open', openOrder: null, seller: '', editTrack: null, syncMsg: '', syncing: false };
 
 const fmtDate = (d) => d ? new Date(d + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
 const money = (v) => v == null ? '—' : formatPrice(v);
@@ -116,6 +116,7 @@ async function load() {
     if (err) throw new Error(err.message);
     state.orders = orders.data || [];
     await loadMessages();
+    try { state.rateCount = await (await import(`./rate-sellers.js?v=${Date.now()}`)).countRateCandidates(); } catch { state.rateCount = 0; }
     try { state.toFix = await (await matchModule()).countLinesToFix(); } catch { state.toFix = 0; }
     state.files = files.data || [];
     state.alerts = new Map();
@@ -175,7 +176,7 @@ function draw(container) {
     const openMoney = open.reduce((a, o) => a + Number(o.total || 0), 0);
     const msgList = state.files.find(f => f.kind === 'msglist');
     const counts = {
-        open: open.length, followups: state.orders.filter(o => state.followups.has(o.order_number)).length, alerts: flagged.length,
+        open: open.length, followups: state.orders.filter(o => state.followups.has(o.order_number)).length, rate: state.rateCount, alerts: flagged.length,
         cancelled: state.orders.filter(o => o.status === 'cancelled').length,
         refunds: state.orders.filter(o => Number(o.refund_total) > 0).length,
         received: state.orders.filter(o => o.received_at && o.status !== 'cancelled').length,
@@ -253,6 +254,15 @@ function draw(container) {
 
 function drawTable(container) {
     const wrap = container.querySelector('#inc-table');
+    if (state.filter === 'rate') {
+        // the Rate sellers tab has its own screen (rate-sellers.js)
+        import(`./rate-sellers.js?v=${Date.now()}`).then(m => m.renderRateSellers(wrap, { onChange: (n) => {
+            state.rateCount = n;
+            const b = container.querySelector('.inc-filter[data-f="rate"]');
+            if (b) b.textContent = `Rate sellers (${n})`;
+        } }));
+        return;
+    }
     const rows = visible();
     if (!rows.length) { wrap.innerHTML = '<p style="color:var(--text-secondary)">Nothing here.</p>'; return; }
     wrap.innerHTML = `
