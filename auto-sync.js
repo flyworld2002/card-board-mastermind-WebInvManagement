@@ -1,12 +1,12 @@
 // auto-sync.js
 // Runs the TCGplayer "Sync" (read what Grok saved in Dropbox, hand over approved messages/ratings,
-// refresh the follow-up list) on its own, and shows a small indicator in the top corner of every page.
+// refresh the follow-up list) on its own, and shows a small indicator (with the sync log) in the top corner of the Incoming page.
 //
 // When it runs: ONLY while the Incoming page is open.
 //   - when you open the Incoming page (or load the app straight onto it), if the last sync is over 5 minutes old
 //   - every 60 s while the Incoming page stays open (same 5-minute rule)
 //   - the Sync button on Incoming and "Sync now" in the sync log run it right now
-// On every other page nothing syncs by itself. The indicator is still shown everywhere.
+// On every other page nothing syncs by itself, and the indicator and sync log are hidden there too.
 // If the PC cannot be reached it stays quiet and does not retry on its own for 10 minutes.
 //
 // Pages hear about it through window events:
@@ -153,7 +153,9 @@ export function initAutoSync() {
     document.addEventListener('click', (e) => { if (!pop.contains(e.target) && e.target !== chip) pop.style.display = 'none'; });
     paint();
 
-    window.addEventListener('hashchange', () => { if (onIncoming()) maybeSync(); });
+    const showHide = () => { chip.style.display = onIncoming() ? '' : 'none'; if (!onIncoming()) pop.style.display = 'none'; };
+    showHide();
+    window.addEventListener('hashchange', () => { showHide(); if (onIncoming()) maybeSync(); });
     setInterval(() => { if (onIncoming() && !document.hidden) maybeSync(); }, 60 * 1000);
     if (onIncoming()) maybeSync();
 }
