@@ -826,7 +826,7 @@ function wireTcgPanel(container, td, row) {
         const noteBox = form.querySelector('.tcg-hold-note');
         form.querySelectorAll('.tcg-hold-flag').forEach(cb => cb.addEventListener('change', () => {
             const wrong = form.querySelector('.tcg-hold-flag[value="wrong_item"]').checked;
-            noteBox.placeholder = wrong ? 'What arrived instead (e.g. Pikachu #25 Near Mint)' : 'Note (optional)';
+            noteBox.placeholder = wrong ? 'What arrived instead (shown to the seller), e.g. Pikachu #25 Near Mint' : 'Note (optional)';
         }));
         form.querySelector('.tcg-hold-save').addEventListener('click', () => {
             const flags = [...form.querySelectorAll('.tcg-hold-flag:checked')].map(c => c.value);

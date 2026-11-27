@@ -27,6 +27,7 @@ const fmtDate = (d) => d ? new Date(d.length === 10 ? d + 'T12:00:00' : d).toLoc
 const photoUrl = (path) => supabase.storage.from(BUCKET).getPublicUrl(path).data.publicUrl;
 
 async function purgeExpired() {
+    try { await (await import(`./order-photos.js?v=${Date.now()}`)).purgeOldOrderPhotos(); } catch { /* try again next visit */ }
     const cutoff = new Date(Date.now() - KEEP_DAYS * 86400000).toISOString();
     const { data: old } = await supabase.from('tcg_held_cards').select('id').neq('status', 'held').lt('resolved_at', cutoff).limit(500);
     const ids = (old || []).map(r => r.id);
@@ -125,6 +126,7 @@ function orderHtml(orderNumber, cards) {
                 <button class="btn btn-primary held-msg" data-order="${esc(orderNumber)}" style="font-size:12px; margin-left:auto;" title="Write a message to this seller about these cards (nothing is sent until you approve it)">Message seller</button>
                 <button class="btn held-link" data-order="${esc(orderNumber)}" style="font-size:12px;">Copy photo link for seller</button>
             </div>
+            <div class="held-order-photos" data-order="${esc(orderNumber)}"></div>
             ${cards.map(cardHtml).join('')}
         </section>`;
 }
@@ -207,6 +209,9 @@ function refundsHtml() {
 }
 
 function wire(container) {
+    container.querySelectorAll('.held-order-photos').forEach(el => {
+        import(`./order-photos.js?v=${Date.now()}`).then(m => m.renderOrderPhotos(el, el.dataset.order)).catch(() => {});
+    });
     container.querySelectorAll('.held-msg').forEach(b => b.addEventListener('click', async () => {
         const m = await import(`./message-seller.js?v=${Date.now()}`);
         await m.openMessageSeller({ orderNumber: b.dataset.order });

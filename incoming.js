@@ -376,6 +376,7 @@ async function showLines(container, orderNumber) {
         </div>
         ${outboxBlock(orderNumber)}
         ${messagesBlock(orderNumber)}
+        <div class="inc-photos"></div>
         <table style="width:100%; font-size:12px; border-collapse:collapse;">
             <thead><tr style="color:var(--text-secondary);"><th style="text-align:left;">Card</th><th style="text-align:left;">Set</th>
                 <th style="text-align:left;">Condition</th><th style="text-align:right;">Qty</th><th style="text-align:right;">Each</th></tr></thead>
@@ -391,6 +392,7 @@ async function showLines(container, orderNumber) {
         </table>
         <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">An orange dot means the line is not tied to one exact card variant yet, so it is not counted in the "On order" columns.</div>`;
     cell.querySelector('.inc-msg')?.addEventListener('click', () => openMessage(container, { orderNumber }));
+    import(`./order-photos.js?v=${Date.now()}`).then(m => m.renderOrderPhotos(cell.querySelector('.inc-photos'), orderNumber)).catch(() => {});
     cell.querySelectorAll('.inc-ob-edit').forEach(b => b.addEventListener('click', () => {
         const m = (state.outbox.get(orderNumber) || []).find(x => x.id === b.dataset.id);
         if (m) openMessage(container, { orderNumber, draft: m });

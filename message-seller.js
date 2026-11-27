@@ -81,15 +81,17 @@ export function buildBody(s) {
 // ── the window ────────────────────────────────────────────────────────────────
 
 async function loadContext(orderNumber) {
-    const [o, th, held, shortRows, photos, outbox] = await Promise.all([
+    const [o, th, held, shortRows, photos, orderPhotos, outbox] = await Promise.all([
+
         supabase.from('tcg_orders').select('*').eq('order_number', orderNumber).single(),
         supabase.from('tcg_msg_threads').select('*').eq('order_number', orderNumber).order('last_date', { ascending: false }),
         supabase.from('tcg_held_cards').select('*').eq('order_number', orderNumber).eq('status', 'held'),
         supabase.from('tcg_staged_lines').select('*').eq('order_number', orderNumber).gt('short_qty', 0),
         supabase.from('tcg_held_photos').select('id').eq('order_number', orderNumber),
+        supabase.from('tcg_order_photos').select('id').eq('order_number', orderNumber).eq('show_to_seller', true).not('public_path', 'is', null),
         supabase.from('tcg_msg_outbox').select('*').eq('order_number', orderNumber).order('created_at', { ascending: false }),
     ]);
-    const err = o.error || th.error || held.error || shortRows.error || photos.error || outbox.error;
+    const err = o.error || th.error || held.error || shortRows.error || photos.error || orderPhotos.error || outbox.error;
     if (err) throw new Error(err.message);
     let lines = [];
     const ids = (shortRows.data || []).map(r => r.line_id).filter(Boolean);
@@ -109,7 +111,7 @@ async function loadContext(orderNumber) {
         cards.push({ key: `s:${r.staging_id}`, type: 'short', name: l.card_name || 'card', number: l.card_number, qty: r.short_qty,
             paid: Number(l.unit_price || 0), note: r.short_note || '', flags: [] });
     }
-    return { order: o.data, threads: th.data || [], cards, photoCount: (photos.data || []).length, outbox: outbox.data || [] };
+    return { order: o.data, threads: th.data || [], cards, photoCount: (photos.data || []).length + (orderPhotos.data || []).length, outbox: outbox.data || [] };
 }
 
 function defaultKind(ctx) {

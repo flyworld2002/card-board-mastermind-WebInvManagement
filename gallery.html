@@ -45,14 +45,30 @@
         } else {
             document.getElementById('title').textContent = `Photos for order ${data.order_number}`;
             document.getElementById('sub').textContent = data.ordered_on ? `Ordered ${data.ordered_on}` : '';
-            out.innerHTML = data.cards.length ? data.cards.map(c => `
+            const img = (p) => `<a href="${URL}/storage/v1/object/public/tcg-held-photos/${encodeURI(p)}" target="_blank" rel="noopener"><img loading="lazy" alt="" src="${URL}/storage/v1/object/public/tcg-held-photos/${encodeURI(p)}"></a>`;
+            const KIND = { slip: 'Packing slip', contents: 'Opened contents', package: 'Package', other: 'Photo' };
+            const parts = [];
+            const missing = data.missing || [];
+            if (missing.length) parts.push(`
+                <section class="card">
+                    <h2>Missing from the package</h2>
+                    <div class="meta">These cards are on the order but were not in the package:</div>
+                    <ul style="margin:6px 0 0 18px; padding:0;">${missing.map(m => `<li>${esc(m.card_name)}${m.card_number ? ` #${esc(m.card_number)}` : ''}${m.qty > 1 ? ` x${esc(m.qty)}` : ''}</li>`).join('')}</ul>
+                </section>`);
+            const op = data.order_photos || [];
+            if (op.length) parts.push(`
+                <section class="card">
+                    <h2>Photos of the order</h2>
+                    <div class="photos">${op.map(p => `<figure style="margin:0;">${img(p.path)}<figcaption class="meta">${esc(KIND[p.kind] || 'Photo')}${p.caption ? ' · ' + esc(p.caption) : ''}</figcaption></figure>`).join('')}</div>
+                </section>`);
+            for (const c of data.cards || []) parts.push(`
                 <section class="card">
                     <h2>${esc(c.card_name)}${c.card_number ? ` #${esc(c.card_number)}` : ''}</h2>
-                    <div class="meta">${esc(c.set)}${c.condition ? ` · listed as ${esc(c.condition)}` : ''}</div>
+                    <div class="meta">${c.received ? `Ordered: ${esc(c.card_name)}${c.condition ? ` (${esc(c.condition)})` : ''} · Received: ${esc(c.received)}` : `${esc(c.set)}${c.condition ? ` · listed as ${esc(c.condition)}` : ''}`}</div>
                     <div>${(c.flags || []).map(f => `<span class="flag">${esc(LABELS[f] || f)}</span>`).join('')}</div>
-                    <div class="photos">${(c.photos || []).map(p =>
-                        `<a href="${URL}/storage/v1/object/public/tcg-held-photos/${encodeURI(p)}" target="_blank" rel="noopener"><img loading="lazy" alt="" src="${URL}/storage/v1/object/public/tcg-held-photos/${encodeURI(p)}"></a>`).join('')}</div>
-                </section>`).join('') : '<p class="msg">No photos have been added to this order yet.</p>';
+                    <div class="photos">${(c.photos || []).map(img).join('')}</div>
+                </section>`);
+            out.innerHTML = parts.length ? parts.join('') : '<p class="msg">No photos have been added to this order yet.</p>';
         }
     }
 </script>
