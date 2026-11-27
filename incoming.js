@@ -267,6 +267,7 @@ function drawTable(container) {
         if (e.key === 'Enter') saveTracking(container, i.closest('.inc-trackform').querySelector('.inc-track-save').dataset.order, i.value);
         if (e.key === 'Escape') { state.editTrack = null; drawTable(container); }
     }));
+    wrap.querySelectorAll('.inc-row-resolve').forEach(b => b.addEventListener('click', () => setFollowUp(container, b.dataset.order, false)));
     wrap.querySelectorAll('.inc-stage').forEach(b => b.addEventListener('click', () => openInStaging(container, b)));
     wrap.querySelectorAll('.inc-recv').forEach(b => b.addEventListener('click', () => setReceived(container, b.dataset.order, true)));
     wrap.querySelectorAll('.inc-undo').forEach(b => b.addEventListener('click', () => setReceived(container, b.dataset.order, false)));
@@ -314,7 +315,8 @@ function rowHtml(o) {
                 <div style="font-size:11px; color:var(--text-secondary);">${esc(o.order_number)}</div>
                 ${msgHtml(o)}
                 ${state.filter === 'followups' ? `<div style="margin-top:3px;">${(state.followups.get(o.order_number) || []).map(r =>
-                    `<span style="font-size:10px; padding:1px 7px; margin-right:3px; border-radius:9px; border:1px solid var(--border); color:var(--text-secondary);">${esc(REASON_LABEL[r] || r)}</span>`).join('')}</div>` : ''}
+                    `<span style="font-size:10px; padding:1px 7px; margin-right:3px; border-radius:9px; border:1px solid var(--border); color:var(--text-secondary);">${esc(REASON_LABEL[r] || r)}</span>`).join('')}
+                    <button class="btn inc-row-resolve" data-order="${esc(o.order_number)}" style="font-size:10px; padding:0 8px; margin-left:4px;" title="Take this order off the Follow-ups list until a seller message arrives">Resolved</button></div>` : ''}
             </td>
             <td style="padding:8px 6px;">
                 <div>${esc(STATUS_LABEL[o.status])}</div>
