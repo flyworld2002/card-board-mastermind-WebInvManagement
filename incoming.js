@@ -8,6 +8,7 @@
 // leaves the list when it reaches Staging/Purchases (marked automatically) or you mark it.
 
 import { supabase, formatPrice } from './shared.js';
+import { callDesktop } from './desktop-api.js';
 
 const esc = (s) => (s ?? '').toString()
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -34,7 +35,7 @@ const REASON_LABEL = {
     active_thread: 'recent messages', awaiting_reply: 'waiting on seller', manual: 'manual',
 };
 
-const state = { followups: new Map(), manualFollow: new Map(), threads: new Map(), messages: new Map(), toFix: 0, orders: [], alerts: new Map(), lines: new Map(), files: [], filter: 'open', openOrder: null, seller: '', editTrack: null };
+const state = { followups: new Map(), manualFollow: new Map(), threads: new Map(), messages: new Map(), toFix: 0, orders: [], alerts: new Map(), lines: new Map(), files: [], filter: 'open', openOrder: null, seller: '', editTrack: null, syncMsg: '', syncing: false };
 
 const fmtDate = (d) => d ? new Date(d + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
 const money = (v) => v == null ? '—' : formatPrice(v);
@@ -190,7 +191,9 @@ function draw(container) {
                 <span id="inc-track-msg" style="font-size:12px; color:var(--text-secondary);"></span>
             </div>
             <div style="margin-top:4px;"><strong>Seller messages read:</strong> ${msgList ? esc(ago(msgList.parsed_at)) + ` (${esc(new Date(msgList.parsed_at).toLocaleString())})` : 'never'}
-                <span style="color:var(--text-secondary); font-size:12px;"> · read by the daily run for now; the Sync button comes next</span></div>
+                <button class="btn" id="inc-sync" style="font-size:12px; margin-left:8px;" ${state.syncing ? 'disabled' : ''}
+                    title="Reads what Grok saved in Dropbox (orders and messages) and refreshes the follow-up list">${state.syncing ? 'Syncing...' : 'Sync'}</button>
+                <span id="inc-sync-msg" style="font-size:12px; color:var(--text-secondary); margin-left:6px;">${esc(state.syncMsg)}</span></div>
             ${warns.map(w => `<div style="color:var(--warning); margin-top:4px;">⚠ ${esc(w)}</div>`).join('')}
         </div>
         <div style="display:flex; gap:24px; margin-bottom:12px; font-size:13px;">
@@ -226,6 +229,7 @@ function draw(container) {
             ? 'Request copied. Paste it to Claude in Claude Code and the dates are updated from the tracking pages.'
             : `Send Claude this: "${text}"`;
     });
+    container.querySelector('#inc-sync').addEventListener('click', () => syncFromGrok(container));
     container.querySelector('#inc-fix').addEventListener('click', async () => {
         const m = await matchModule();
         await m.renderMatchFixer(container, () => renderIncoming(container));
@@ -460,6 +464,30 @@ async function saveTracking(container, orderNumber, raw) {
     if (error) { alert(`Could not save: ${error.message}`); return; }
     Object.assign(o, patch);
     state.editTrack = null;
+    draw(container);
+}
+
+// "Sync": the desktop reads whatever Grok saved in the Dropbox inbox (order pages, message pages,
+// tracking files) and rewrites follow_up.txt; then this page reloads its data.
+async function syncFromGrok(container) {
+    if (state.syncing) return;
+    state.syncing = true;
+    state.syncMsg = 'Reading Grok\'s files (can take up to a minute)...';
+    draw(container);
+    try {
+        const r = await callDesktop('/api/tcg/messages/sync');
+        const sm = r.summary || {};
+        if (sm.error) throw new Error(sm.error);
+        const kinds = Object.entries(sm.kinds || {}).map(([k, n]) => `${n} ${k.replace('_', ' ')}`).join(', ');
+        state.syncMsg = sm.files
+            ? `Read ${sm.files} file(s) (${kinds}); ${sm.new_messages || 0} new message(s). ${sm.followups ?? '?'} orders on the follow-up list.`
+            : `Nothing new from Grok. Follow-up list refreshed (${sm.followups ?? '?'} orders).`;
+    } catch (e) {
+        state.syncMsg = `Sync did not work: ${e.message}`;
+    }
+    state.syncing = false;
+    try { await load(); } catch { /* keep what is on screen */ }
+    window.__cbmRefreshIncomingBadge?.();
     draw(container);
 }
 
