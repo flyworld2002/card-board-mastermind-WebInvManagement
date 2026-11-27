@@ -31,7 +31,7 @@
     import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
     const URL = 'https://kfxukzvuufmowapjagro.supabase.co';
     const KEY = 'sb_publishable_D6suMyjdFr7vKDgGdo5DJQ_v36kiBUe';
-    const LABELS = { wrong_condition: 'Wrong condition', error: 'Error card', grading: 'Held for grading', waiting_seller: 'Waiting on seller' };
+    const LABELS = { wrong_condition: 'Wrong condition', wrong_item: 'Wrong item', error: 'Error card', grading: 'Held for grading', waiting_seller: 'Waiting on seller' };
     const esc = (s) => (s ?? '').toString().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     const out = document.getElementById('out');
     const token = new URLSearchParams(location.search).get('t');

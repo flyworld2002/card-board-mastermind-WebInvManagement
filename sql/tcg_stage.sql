@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS tcg_held_cards (
     set_label      text,
     condition_raw  text,
     unit_cost      numeric,
-    flags          text[] NOT NULL,   -- wrong_condition | error | grading | waiting_seller (can stack)
+    flags          text[] NOT NULL,   -- wrong_condition | wrong_item | error | grading | waiting_seller (can stack)
     note           text,
     status         text NOT NULL DEFAULT 'held' CHECK (status IN ('held', 'returned', 'refunded', 'released')),
     refund_amount  numeric,
@@ -89,7 +89,7 @@ DECLARE l tcg_staged_lines; s staging; ln tcg_order_lines;
 BEGIN
     IF p_qty < 1 THEN RAISE EXCEPTION 'Hold at least 1 card'; END IF;
     IF p_flags IS NULL OR cardinality(p_flags) = 0 THEN RAISE EXCEPTION 'Pick at least one reason'; END IF;
-    IF EXISTS (SELECT 1 FROM unnest(p_flags) f WHERE f NOT IN ('wrong_condition', 'error', 'grading', 'waiting_seller')) THEN
+    IF EXISTS (SELECT 1 FROM unnest(p_flags) f WHERE f NOT IN ('wrong_condition', 'wrong_item', 'error', 'grading', 'waiting_seller')) THEN
         RAISE EXCEPTION 'Unknown reason in %', p_flags;
     END IF;
     SELECT * INTO l FROM tcg_staged_lines WHERE staging_id = p_staging_id FOR UPDATE;

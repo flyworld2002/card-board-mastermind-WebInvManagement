@@ -780,7 +780,7 @@ function renderRow(container, row) {
 // ----------------------------------------------------------------
 
 const HOLD_REASONS = [
-    ['wrong_condition', 'Wrong condition'], ['error', 'Error card'],
+    ['wrong_condition', 'Wrong condition'], ['wrong_item', 'Wrong item'], ['error', 'Error card'],
     ['grading', 'Hold for grading'], ['waiting_seller', 'Waiting on seller'],
 ];
 
@@ -822,6 +822,12 @@ function wireTcgPanel(container, td, row) {
             </div>
             <input type="text" class="tcg-hold-note" placeholder="Note (optional)" style="width:300px;" />
             <button class="btn btn-primary tcg-hold-save" type="button" style="margin-left:8px;">Hold</button>`;
+        // Wrong item: the note says what actually arrived (used by the message to the seller)
+        const noteBox = form.querySelector('.tcg-hold-note');
+        form.querySelectorAll('.tcg-hold-flag').forEach(cb => cb.addEventListener('change', () => {
+            const wrong = form.querySelector('.tcg-hold-flag[value="wrong_item"]').checked;
+            noteBox.placeholder = wrong ? 'What arrived instead (e.g. Pikachu #25 Near Mint)' : 'Note (optional)';
+        }));
         form.querySelector('.tcg-hold-save').addEventListener('click', () => {
             const flags = [...form.querySelectorAll('.tcg-hold-flag:checked')].map(c => c.value);
             if (!flags.length) { alert('Pick at least one reason.'); return; }

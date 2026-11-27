@@ -14,7 +14,7 @@ const esc = (s) => (s ?? '').toString()
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 const REASONS = [
-    ['wrong_condition', 'Wrong condition'], ['error', 'Error card'],
+    ['wrong_condition', 'Wrong condition'], ['wrong_item', 'Wrong item'], ['error', 'Error card'],
     ['grading', 'Hold for grading'], ['waiting_seller', 'Waiting on seller'],
 ];
 const REASON_LABEL = Object.fromEntries(REASONS);
@@ -122,7 +122,8 @@ function orderHtml(orderNumber, cards) {
             <div style="display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; margin-bottom:6px;">
                 <strong>${esc(o.seller || '')}</strong>
                 <span style="color:var(--text-secondary); font-size:12px;">${esc(orderNumber)} · ordered ${esc(fmtDate(o.ordered_on))}</span>
-                <button class="btn held-link" data-order="${esc(orderNumber)}" style="font-size:12px; margin-left:auto;">Copy photo link for seller</button>
+                <button class="btn btn-primary held-msg" data-order="${esc(orderNumber)}" style="font-size:12px; margin-left:auto;" title="Write a message to this seller about these cards (nothing is sent until you approve it)">Message seller</button>
+                <button class="btn held-link" data-order="${esc(orderNumber)}" style="font-size:12px;">Copy photo link for seller</button>
             </div>
             ${cards.map(cardHtml).join('')}
         </section>`;
@@ -206,6 +207,10 @@ function refundsHtml() {
 }
 
 function wire(container) {
+    container.querySelectorAll('.held-msg').forEach(b => b.addEventListener('click', async () => {
+        const m = await import(`./message-seller.js?v=${Date.now()}`);
+        await m.openMessageSeller({ orderNumber: b.dataset.order });
+    }));
     container.querySelectorAll('.held-link').forEach(b => b.addEventListener('click', async () => {
         const o = state.orders.get(b.dataset.order);
         const url = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}gallery.html?t=${o.gallery_token}`;

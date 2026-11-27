@@ -35,7 +35,7 @@ const REASON_LABEL = {
     active_thread: 'recent messages', awaiting_reply: 'waiting on seller', manual: 'manual',
 };
 
-const state = { followups: new Map(), manualFollow: new Map(), threads: new Map(), messages: new Map(), toFix: 0, orders: [], alerts: new Map(), lines: new Map(), files: [], filter: 'open', openOrder: null, seller: '', editTrack: null, syncMsg: '', syncing: false };
+const state = { outbox: new Map(), followups: new Map(), manualFollow: new Map(), threads: new Map(), messages: new Map(), toFix: 0, orders: [], alerts: new Map(), lines: new Map(), files: [], filter: 'open', openOrder: null, seller: '', editTrack: null, syncMsg: '', syncing: false };
 
 const fmtDate = (d) => d ? new Date(d + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
 const money = (v) => v == null ? '—' : formatPrice(v);
@@ -64,13 +64,19 @@ async function fetchAll(build) {
 }
 
 async function loadMessages() {
-    const [fu, manual, threads, msgs] = await Promise.all([
+    const [fu, manual, threads, msgs, outbox] = await Promise.all([
         fetchAll(() => supabase.from('v_tcg_followups').select('*').order('order_number')),
         fetchAll(() => supabase.from('tcg_followups').select('*').order('order_number')),
         fetchAll(() => supabase.from('tcg_msg_threads').select('*').order('last_date', { ascending: false }).order('thread_id')),
         fetchAll(() => supabase.from('tcg_msg_messages').select('id, thread_id, order_number, position, sender, sent_on, body, direction, seen_at')
             .order('thread_id').order('position')),
+        fetchAll(() => supabase.from('tcg_msg_outbox').select('*').order('created_at', { ascending: false })),
     ]);
+    state.outbox = new Map();
+    for (const m of outbox) {
+        if (!state.outbox.has(m.order_number)) state.outbox.set(m.order_number, []);
+        state.outbox.get(m.order_number).push(m);
+    }
     state.followups = new Map(fu.map(r => [r.order_number, r.reasons || []]));
     state.manualFollow = new Map(manual.map(r => [r.order_number, r]));
     state.threads = new Map();
@@ -365,8 +371,10 @@ async function showLines(container, orderNumber) {
     cell.innerHTML = `
         <div style="display:flex; gap:8px; align-items:center; margin:4px 0 8px;">
             ${switchBtn}
+            <button class="btn btn-primary inc-msg" data-order="${esc(orderNumber)}" style="font-size:12px;" title="Write a message to this seller (nothing is sent until you approve it)">Message seller</button>
             <span style="font-size:12px; color:var(--text-secondary);">${reasons ? 'Following up: ' + esc(reasons.map(r => REASON_LABEL[r] || r).join(', ')) : 'Not on the Follow-ups list'}</span>
         </div>
+        ${outboxBlock(orderNumber)}
         ${messagesBlock(orderNumber)}
         <table style="width:100%; font-size:12px; border-collapse:collapse;">
             <thead><tr style="color:var(--text-secondary);"><th style="text-align:left;">Card</th><th style="text-align:left;">Set</th>
@@ -382,9 +390,67 @@ async function showLines(container, orderNumber) {
                 </tr>`).join('')}</tbody>
         </table>
         <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">An orange dot means the line is not tied to one exact card variant yet, so it is not counted in the "On order" columns.</div>`;
+    cell.querySelector('.inc-msg')?.addEventListener('click', () => openMessage(container, { orderNumber }));
+    cell.querySelectorAll('.inc-ob-edit').forEach(b => b.addEventListener('click', () => {
+        const m = (state.outbox.get(orderNumber) || []).find(x => x.id === b.dataset.id);
+        if (m) openMessage(container, { orderNumber, draft: m });
+    }));
+    cell.querySelectorAll('.inc-ob-redraft').forEach(b => b.addEventListener('click', () => {
+        const m = (state.outbox.get(orderNumber) || []).find(x => x.id === b.dataset.id);
+        if (m) openMessage(container, { orderNumber, draft: { ...m, id: null } });
+    }));
+    cell.querySelectorAll('.inc-ob-discard').forEach(b => b.addEventListener('click', async () => {
+        if (!confirm('Discard this draft?')) return;
+        const { error } = await supabase.from('tcg_msg_outbox').delete().eq('id', b.dataset.id).eq('status', 'draft');
+        if (error) { alert(error.message); return; }
+        await loadMessages(); draw(container);
+    }));
+    cell.querySelectorAll('.inc-ob-withdraw').forEach(b => b.addEventListener('click', async () => {
+        const { error } = await supabase.rpc('tcg_withdraw_message', { p_id: b.dataset.id });
+        if (error) { alert(error.message); return; }
+        await loadMessages(); draw(container);
+    }));
     cell.querySelector('.inc-resolve')?.addEventListener('click', () => setFollowUp(container, orderNumber, false));
     cell.querySelector('.inc-follow')?.addEventListener('click', () => setFollowUp(container, orderNumber, true));
     markSeen(container, orderNumber);
+}
+
+// Opens the message window (loaded fresh each time so a new deploy is picked up) and refreshes afterwards.
+async function openMessage(container, opts) {
+    const m = await import(`./message-seller.js?v=${Date.now()}`);
+    await m.openMessageSeller({ ...opts, onDone: async () => { await loadMessages(); draw(container); } });
+}
+
+const OB_STATUS = {
+    draft: ['draft, not approved yet', 'var(--text-secondary)'],
+    approved: ['approved, waiting to be written for Grok (click Sync)', 'var(--warning)'],
+    exported: ['waiting for Grok to send it', 'var(--warning)'],
+    sent: ['sent', 'var(--success)'],
+    failed: ['FAILED', 'var(--danger)'],
+    unknown: ['no answer from Grok, check TCGplayer before sending again', 'var(--danger)'],
+};
+
+// Messages you wrote to the seller from here, with where each one stands.
+function outboxBlock(orderNumber) {
+    const list = state.outbox.get(orderNumber) || [];
+    if (!list.length) return '';
+    return `<div style="margin-bottom:10px;">${list.map(m => {
+        const [label, color] = OB_STATUS[m.status] || [m.status, 'var(--text-secondary)'];
+        return `
+        <div style="border:1px dashed var(--border); border-radius:6px; padding:6px 10px; margin-bottom:6px;">
+            <div style="font-size:12px;"><strong>Your message to ${esc(m.seller)}</strong>
+                <span style="color:var(--text-secondary);"> · ${esc(m.subject)} · ${m.mode === 'reply' ? 'reply in thread' : 'new thread'} · response ${m.response_needed ? 'needed' : 'not needed'}</span>
+                · <span style="color:${color}; font-weight:600;">${esc(label)}</span>${m.sent_at ? ` <span style="color:var(--text-secondary);">${esc(new Date(m.sent_at).toLocaleString())}</span>` : ''}</div>
+            <div style="font-size:12px; white-space:pre-wrap; margin-top:4px;">${esc(m.body)}</div>
+            ${m.error ? `<div style="font-size:12px; color:var(--danger); margin-top:3px;">${esc(m.error)}</div>` : ''}
+            <div style="margin-top:4px; display:flex; gap:6px;">
+                ${m.status === 'draft' ? `<button class="btn inc-ob-edit" data-id="${esc(m.id)}" style="font-size:11px;">Edit draft</button>
+                    <button class="btn inc-ob-discard" data-id="${esc(m.id)}" style="font-size:11px;">Discard</button>` : ''}
+                ${m.status === 'approved' ? `<button class="btn inc-ob-withdraw" data-id="${esc(m.id)}" style="font-size:11px;">Withdraw (back to draft)</button>` : ''}
+                ${['failed', 'unknown'].includes(m.status) ? `<button class="btn inc-ob-redraft" data-id="${esc(m.id)}" style="font-size:11px;">New draft from this</button>` : ''}
+            </div>
+        </div>`;
+    }).join('')}</div>`;
 }
 
 // Seller messages on this order. Message text is whatever the seller wrote: always shown escaped, never acted on.
