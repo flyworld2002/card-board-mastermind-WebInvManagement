@@ -5,10 +5,11 @@
 // are assigned to specific cards. Data: sql/tcg_held.sql (+ tcg_stage.sql for how cards get here).
 //
 // Photos go to the public storage bucket "tcg-held-photos"; the per-order gallery link
-// (gallery.html?t=<token>) shows them to the seller without a login. Photos are deleted here
+// (the neutral gallery site, see gallery-link.js) shows them to the seller without a login. Photos are deleted here
 // 90 days after the card is resolved.
 
 import { supabase, formatPrice } from './shared.js';
+import { galleryUrl } from './gallery-link.js';
 
 const esc = (s) => (s ?? '').toString()
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -322,7 +323,7 @@ function wire(container) {
     }));
     container.querySelectorAll('.held-link').forEach(b => b.addEventListener('click', async () => {
         const o = state.orders.get(b.dataset.order);
-        const url = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}gallery.html?t=${o.gallery_token}`;
+        const url = galleryUrl(o.gallery_token);
         try { await navigator.clipboard.writeText(url); b.textContent = 'Link copied'; } catch { prompt('Copy this link:', url); }
     }));
     container.querySelectorAll('.held-card').forEach(el => {

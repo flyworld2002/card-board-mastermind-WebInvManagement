@@ -10,6 +10,7 @@
 
 import { supabase } from './shared.js';
 import { callDesktop } from './desktop-api.js';
+import { galleryUrl } from './gallery-link.js';
 
 const esc = (s) => (s ?? '').toString()
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -128,7 +129,7 @@ export async function openMessageSeller(opts) {
     let ctx;
     try { ctx = await loadContext(opts.orderNumber); } catch (e) { alert(`Could not open the message window: ${e.message}`); return; }
     const o = ctx.order;
-    const link = ctx.order.gallery_token ? `${location.origin}/gallery.html?t=${ctx.order.gallery_token}` : '';
+    const link = ctx.order.gallery_token ? galleryUrl(ctx.order.gallery_token) : '';
     const d = opts.draft || null;
     const st = {
         order: o, threads: ctx.threads, cards: ctx.cards, photoLink: link, savedId: d?.id || null,
