@@ -18,6 +18,9 @@
     .flag { display:inline-block; font-size:12px; border:1px solid var(--border); border-radius:10px; padding:1px 8px; margin-right:4px; }
     .photos { display:grid; grid-template-columns:repeat(auto-fill, minmax(160px, 1fr)); gap:8px; margin-top:10px; }
     .photos img { width:100%; aspect-ratio:3/4; object-fit:cover; border-radius:6px; border:1px solid var(--border); background:#888; }
+    /* order photos (slip, contents) are often landscape: show them whole instead of cropped */
+    .photos.wide { grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); }
+    .photos.wide img { aspect-ratio:4/3; object-fit:contain; background:var(--card); }
     .msg { color:var(--muted); }
 </style>
 </head>
@@ -59,7 +62,7 @@
             if (op.length) parts.push(`
                 <section class="card">
                     <h2>Photos of the order</h2>
-                    <div class="photos">${op.map(p => `<figure style="margin:0;">${img(p.path)}<figcaption class="meta">${esc(KIND[p.kind] || 'Photo')}${p.caption ? ' · ' + esc(p.caption) : ''}</figcaption></figure>`).join('')}</div>
+                    <div class="photos wide">${op.map(p => `<figure style="margin:0;">${img(p.path)}<figcaption class="meta">${esc(KIND[p.kind] || 'Photo')}${p.caption ? ' · ' + esc(p.caption) : ''}</figcaption></figure>`).join('')}</div>
                 </section>`);
             for (const c of data.cards || []) parts.push(`
                 <section class="card">
