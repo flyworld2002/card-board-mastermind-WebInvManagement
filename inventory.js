@@ -391,15 +391,27 @@ async function loadAndRender(container) {
         grouped.push(aggregateVariantRow(variantId, lots));
     }
 
+    // On order: every variant with cards on open TCGplayer orders (a few hundred rows), read once so
+    // the column can be sorted across ALL pages, not just the one on screen.
+    const onMap = new Map();
+    for (let from = 0; ; from += 1000) {
+        const { data: onRows } = await supabase.from('v_tcg_on_order').select('*').order('variant_id').range(from, from + 999);
+        for (const r of onRows || []) onMap.set(r.variant_id, r);
+        if (!onRows || onRows.length < 1000) break;
+    }
+    const onQty = (row) => onMap.get(row.variant_id)?.on_order_qty ?? 0;
+
     // ── Sort ──────────────────────────────────────────────────────────────────
     grouped.sort((a, b) => {
         const field = state.sort.field;
-        const av = field === 'quantity'     ? a.total_available
+        const av = field === 'on_order'     ? onQty(a)
+                 : field === 'quantity'     ? a.total_available
                  : field === 'cost_basis'   ? a.wac
                  : field === 'market_price' ? (a.market_price ?? -1)
                  : field === 'card_number'  ? (a.card_number || '')
                  : a[field] ?? '';
-        const bv = field === 'quantity'     ? b.total_available
+        const bv = field === 'on_order'     ? onQty(b)
+                 : field === 'quantity'     ? b.total_available
                  : field === 'cost_basis'   ? b.wac
                  : field === 'market_price' ? (b.market_price ?? -1)
                  : field === 'card_number'  ? (b.card_number || '')
@@ -434,12 +446,8 @@ async function loadAndRender(container) {
         }
     }
 
-    // On order: open TCGplayer orders (Incoming page) for the variants on this page.
-    if (variantIds.length > 0) {
-        const { data: onOrder } = await supabase.from('v_tcg_on_order').select('*').in('variant_id', variantIds);
-        const byVariant = new Map((onOrder || []).map(r => [r.variant_id, r]));
-        for (const row of state.rows) row._onOrder = byVariant.get(row.variant_id) || null;
-    }
+    // On order: open TCGplayer orders (Incoming page), already read above.
+    for (const row of state.rows) row._onOrder = onMap.get(row.variant_id) || null;
 
     renderTable(container);
     renderPagination(container);
@@ -896,7 +904,10 @@ function renderTable(container) {
                         style="cursor:pointer; user-select:none; text-align:center;">
                         Qty${state.sort.field === 'quantity' ? (state.sort.asc ? ' ↑' : ' ↓') : ''}
                     </th>
-                    <th style="text-align:center;">On order</th>
+                    <th class="sortable-header" data-field="on_order"
+                        style="cursor:pointer; user-select:none; text-align:center;">
+                        On order${state.sort.field === 'on_order' ? (state.sort.asc ? ' ↑' : ' ↓') : ''}
+                    </th>
                     <th class="sortable-header" data-field="cost_basis"
                         style="cursor:pointer; user-select:none;">
                         WAC${state.sort.field === 'cost_basis' ? (state.sort.asc ? ' ↑' : ' ↓') : ''}
@@ -915,7 +926,8 @@ function renderTable(container) {
     wrap.querySelectorAll('.sortable-header').forEach(th => {
         th.addEventListener('click', async () => {
             const field = th.dataset.field;
-            state.sort.asc   = state.sort.field === field ? !state.sort.asc : true;
+            // On order starts with the most on order at the top; the other columns start A-Z / low-high
+            state.sort.asc   = state.sort.field === field ? !state.sort.asc : field !== 'on_order';
             state.sort.field = field;
             state.page = 0;
             await loadAndRender(container);

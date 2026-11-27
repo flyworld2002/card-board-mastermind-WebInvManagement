@@ -59,7 +59,7 @@ LANGUAGE sql SECURITY DEFINER SET search_path = public AS $f$
                 'photos', (SELECT jsonb_agg(p.path ORDER BY p.created_at) FROM tcg_held_photos p WHERE p.held_id = h.id)
             ) ORDER BY h.created_at)
             FROM tcg_held_cards h
-            WHERE h.order_number = o.order_number AND EXISTS (SELECT 1 FROM tcg_held_photos p2 WHERE p2.held_id = h.id)
+            WHERE h.order_number = o.order_number AND h.status <> 'grading' AND EXISTS (SELECT 1 FROM tcg_held_photos p2 WHERE p2.held_id = h.id)
         ), '[]'::jsonb),
         'order_photos', COALESCE((
             SELECT jsonb_agg(jsonb_build_object('path', op.public_path, 'kind', op.kind, 'caption', op.caption) ORDER BY op.created_at)

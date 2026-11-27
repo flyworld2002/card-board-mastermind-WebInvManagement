@@ -93,8 +93,9 @@ async function reload(container, msg) {
 
 function draw(container) {
     const held = state.cards.filter(c => c.status === 'held');
-    const done = state.cards.filter(c => c.status !== 'held');
-    const list = state.tab === 'held' ? held : state.tab === 'done' ? done : [];
+    const grading = state.cards.filter(c => c.status === 'grading');      // set aside for grading: nothing to chase
+    const done = state.cards.filter(c => c.status !== 'held' && c.status !== 'grading');
+    const list = state.tab === 'held' ? held : state.tab === 'grading' ? grading : state.tab === 'done' ? done : [];
     const byOrder = new Map();
     for (const c of list) {
         if (!byOrder.has(c.order_number)) byOrder.set(c.order_number, []);
@@ -109,7 +110,7 @@ function draw(container) {
         </p>
         ${state.msg ? `<p style="color:var(--success);">${state.msg}</p>` : ''}
         <div style="display:flex; gap:8px; margin-bottom:12px;">
-            ${tabBtn('held', `On hold (${held.length})`)}${tabBtn('refunds', `Refunds to review (${state.refunds.length})`)}${tabBtn('done', `Resolved (${done.length})`)}
+            ${tabBtn('held', `On hold (${held.length})`)}${tabBtn('grading', `Grading pile (${grading.length})`)}${tabBtn('refunds', `Refunds to review (${state.refunds.length})`)}${tabBtn('done', `Resolved (${done.length})`)}
         </div>
         <div id="held-body">${state.tab === 'refunds' ? refundsHtml() : (byOrder.size ? [...byOrder].map(([o, cs]) => orderHtml(o, cs)).join('') : '<p style="color:var(--text-secondary);">Nothing here.</p>')}</div>`;
     container.querySelectorAll('.held-tab').forEach(b => b.addEventListener('click', () => { state.tab = b.dataset.t; state.edit = null; draw(container); }));
@@ -135,6 +136,8 @@ function cardHtml(c) {
     const photos = state.photos.get(c.id) || [];
     const editing = state.edit === c.id;
     const isHeld = c.status === 'held';
+    const inPile = c.status === 'grading';
+    const active = isHeld || inPile;
     return `
         <div class="held-card" data-id="${esc(c.id)}" style="border-top:1px solid var(--border); padding:8px 0;">
             <div style="display:flex; gap:12px; align-items:baseline; flex-wrap:wrap;">
@@ -145,19 +148,22 @@ function cardHtml(c) {
             </div>
             <div style="margin:4px 0;">
                 ${(c.flags || []).map(f => `<span style="font-size:11px; padding:1px 8px; margin-right:4px; border-radius:10px; border:1px solid var(--warning); color:var(--warning);">${esc(REASON_LABEL[f] || f)}</span>`).join('')}
-                ${c.status !== 'held' ? `<span style="font-size:11px; padding:1px 8px; border-radius:10px; border:1px solid var(--border);">${esc(c.status)} ${esc(fmtDate(c.resolved_at))}</span>` : ''}
+                ${inPile ? '<span style="font-size:11px; padding:1px 8px; border-radius:10px; border:1px solid var(--accent); color:var(--accent);">in the grading pile</span>'
+                    : c.status !== 'held' ? `<span style="font-size:11px; padding:1px 8px; border-radius:10px; border:1px solid var(--border);">${esc(c.status)} ${esc(fmtDate(c.resolved_at))}</span>` : ''}
                 ${c.note ? `<span style="font-size:12px; color:var(--text-secondary);">${esc(c.note)}</span>` : ''}
             </div>
             <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
                 ${photos.map(p => `<a href="${esc(photoUrl(p.path))}" target="_blank" rel="noopener"><img src="${esc(photoUrl(p.path))}" loading="lazy" style="width:56px; height:76px; object-fit:cover; border-radius:4px; border:1px solid var(--border);" /></a>`).join('')}
-                ${isHeld ? `<label class="btn" style="font-size:12px; cursor:pointer;">Add photos
+                ${active ? `<label class="btn" style="font-size:12px; cursor:pointer;">Add photos
                     <input type="file" class="held-photo-input" accept="image/*" multiple style="display:none;" /></label>` : ''}
             </div>
-            ${isHeld ? `
+            ${active ? `
             <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;">
                 <button class="btn held-edit" style="font-size:12px;">Reasons / note</button>
-                <button class="btn held-act" data-a="returned" style="font-size:12px;">Sent back</button>
+                ${isHeld ? `<button class="btn held-act" data-a="returned" style="font-size:12px;">Sent back</button>
                 <button class="btn held-act" data-a="refunded" style="font-size:12px;">Refunded</button>
+                <button class="btn held-grade" data-on="1" style="font-size:12px;" title="Set it aside for grading: nothing to chase, it stays out of the On hold list and the follow-ups">To the grading pile</button>` : ''}
+                ${inPile ? `<button class="btn held-grade" data-on="0" style="font-size:12px;">Back to on hold</button>` : ''}
                 <button class="btn held-act" data-a="release" style="font-size:12px;">Release to inventory</button>
             </div>
             <div class="held-form" style="margin-top:6px;">${editing ? editHtml(c) : ''}</div>` : ''}
@@ -235,6 +241,12 @@ function wire(container) {
             await reload(container);
         });
         el.querySelectorAll('.held-act').forEach(b => b.addEventListener('click', () => act(container, card, b.dataset.a, el)));
+        el.querySelectorAll('.held-grade').forEach(b => b.addEventListener('click', async () => {
+            const on = b.dataset.on === '1';
+            const { error } = await supabase.rpc('tcg_set_grading', { p_held_id: id, p_on: on });
+            if (error) { alert(error.message); return; }
+            await reload(container, on ? `${esc(card.card_name)} moved to the grading pile.` : `${esc(card.card_name)} is back on hold.`);
+        }));
     });
 
     // refunds

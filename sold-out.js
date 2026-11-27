@@ -86,6 +86,7 @@ const SORT_COLUMNS = [
     ['template_name', 'Listing'],
     ['last_sold_price', 'Last sold price'],
     ['last_sold_at', 'Last sold'],
+    ['on_order', 'On order'],
 ];
 
 function sortRows(rows) {
@@ -95,7 +96,10 @@ function sortRows(rows) {
     sorted.sort((a, b) => {
         let av = a[key];
         let bv = b[key];
-        if (key === 'last_sold_at') {
+        if (key === 'on_order') {
+            av = state.onOrder.get(a.variant_id)?.on_order_qty ?? 0;
+            bv = state.onOrder.get(b.variant_id)?.on_order_qty ?? 0;
+        } else if (key === 'last_sold_at') {
             av = av ? new Date(av).getTime() : -Infinity;
             bv = bv ? new Date(bv).getTime() : -Infinity;
         } else if (key === 'last_sold_price') {
@@ -287,7 +291,6 @@ function renderTable(container) {
                 ${SORT_COLUMNS.map(([key, label]) => `
                     <th class="so-sort-th" data-key="${key}" style="cursor:pointer; user-select:none;">${label}${sortArrow(key)}</th>
                 `).join('')}
-                <th>On order</th>
             </tr></thead>
             <tbody>
                 ${rows.map(r => `
@@ -320,7 +323,7 @@ function renderTable(container) {
                 // Price/date default to descending (highest/most-recent first);
                 // text columns default to ascending (A-Z) — matches how each
                 // column is actually read.
-                state.sort = { key, dir: (key === 'last_sold_price' || key === 'last_sold_at') ? 'desc' : 'asc' };
+                state.sort = { key, dir: (key === 'last_sold_price' || key === 'last_sold_at' || key === 'on_order') ? 'desc' : 'asc' };
             }
             renderTable(container);
         });

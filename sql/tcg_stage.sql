@@ -97,8 +97,9 @@ BEGIN
     IF l.ordered_qty - l.short_qty - l.held_qty < p_qty THEN RAISE EXCEPTION 'Only % card(s) left on this line', l.ordered_qty - l.short_qty - l.held_qty; END IF;
     SELECT * INTO s FROM staging WHERE id = p_staging_id;
     SELECT * INTO ln FROM tcg_order_lines WHERE id = l.line_id;
-    INSERT INTO tcg_held_cards (order_number, line_id, staging_id, card_id, card_name, card_number, set_label, condition_raw, unit_cost, flags, note)
-    SELECT l.order_number, l.line_id, p_staging_id, s.card_id, s.card_name, s.card_number, s.set_name, COALESCE(ln.condition_raw, s.condition), s.price, p_flags, p_note
+    INSERT INTO tcg_held_cards (order_number, line_id, staging_id, card_id, card_name, card_number, set_label, condition_raw, unit_cost, flags, note, status)
+    SELECT l.order_number, l.line_id, p_staging_id, s.card_id, s.card_name, s.card_number, s.set_name, COALESCE(ln.condition_raw, s.condition), s.price, p_flags, p_note,
+           CASE WHEN p_flags = ARRAY['grading']::text[] THEN 'grading' ELSE 'held' END   -- grading only => the grading pile
     FROM generate_series(1, p_qty);
     UPDATE tcg_staged_lines SET held_qty = held_qty + p_qty WHERE staging_id = p_staging_id;
     PERFORM _tcg_recompute(p_staging_id);

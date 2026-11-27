@@ -97,7 +97,7 @@ CREATE OR REPLACE FUNCTION public.tcg_release_held(p_held_id uuid, p_cost numeri
 LANGUAGE plpgsql AS $f$
 DECLARE h tcg_held_cards; s staging; v_batch text;
 BEGIN
-    SELECT * INTO h FROM tcg_held_cards WHERE id = p_held_id AND status = 'held' FOR UPDATE;
+    SELECT * INTO h FROM tcg_held_cards WHERE id = p_held_id AND status IN ('held', 'grading') FOR UPDATE;
     IF NOT FOUND THEN RAISE EXCEPTION 'That card is not on hold'; END IF;
     SELECT * INTO s FROM staging WHERE id = h.staging_id;
     v_batch := 'TCGP_HELD_' || to_char(now() AT TIME ZONE 'UTC', 'YYYYMMDD_HH24MISS');
