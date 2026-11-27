@@ -66,12 +66,13 @@ BEGIN
     RETURN jsonb_build_object('id', p_id, 'approved_today', v_today + 1, 'daily_limit', v_cap);
 END $f$;
 
--- Take an approved message back to draft before the desktop has written it for Grok.
+-- Take an approved message back to draft while Grok has not sent it yet (approved, or written to the outbox but no result back).
+-- The desktop's next export removes the file from the outbox.
 CREATE OR REPLACE FUNCTION public.tcg_withdraw_message(p_id uuid) RETURNS void
 LANGUAGE plpgsql AS $f$
 BEGIN
-    UPDATE tcg_msg_outbox SET status = 'draft', approved_at = NULL WHERE id = p_id AND status = 'approved';
-    IF NOT FOUND THEN RAISE EXCEPTION 'Only a message that is approved but not yet handed to Grok can be withdrawn'; END IF;
+    UPDATE tcg_msg_outbox SET status = 'draft', approved_at = NULL, exported_at = NULL WHERE id = p_id AND status IN ('approved', 'exported');
+    IF NOT FOUND THEN RAISE EXCEPTION 'Only a message that Grok has not sent yet can be withdrawn'; END IF;
 END $f$;
 
 REVOKE EXECUTE ON FUNCTION public.tcg_approve_message(uuid) FROM PUBLIC, anon;

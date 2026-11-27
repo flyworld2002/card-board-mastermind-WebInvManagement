@@ -155,7 +155,7 @@ function recentHtml() {
             ${r.comment ? `<span style="color:var(--text-secondary);"> · ${esc(r.comment.slice(0, 90))}</span>` : ''}
             ${r.error ? `<span style="color:var(--danger);"> · ${esc(r.error)}</span>` : ''}
             ${r.status === 'skipped' ? `<button class="btn rs-unskip" data-id="${esc(r.id)}" style="font-size:11px; margin-left:6px;">Bring back</button>` : ''}
-            ${r.status === 'approved' ? `<button class="btn rs-withdraw" data-id="${esc(r.id)}" style="font-size:11px; margin-left:6px;">Withdraw</button>` : ''}
+            ${['approved', 'exported'].includes(r.status) ? `<button class="btn rs-withdraw" data-id="${esc(r.id)}" style="font-size:11px; margin-left:6px;" title="Take it back to a draft so you can edit it. Works until Grok has submitted it.">Withdraw to edit</button>` : ''}
         </div>`).join('')}`;
 }
 
@@ -288,6 +288,7 @@ export async function renderRateSellers(el, opts = {}) {
         el.querySelectorAll('.rs-withdraw').forEach(b => b.addEventListener('click', async () => {
             const { error } = await supabase.rpc('tcg_withdraw_rating', { p_id: b.dataset.id });
             if (error) { say(error.message); return; }
+            callDesktop('/api/tcg/messages/export').catch(() => { /* the next sync removes the file */ });
             await refresh();
         }));
     };

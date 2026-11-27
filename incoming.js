@@ -447,6 +447,7 @@ async function showLines(container, orderNumber) {
     cell.querySelectorAll('.inc-ob-withdraw').forEach(b => b.addEventListener('click', async () => {
         const { error } = await supabase.rpc('tcg_withdraw_message', { p_id: b.dataset.id });
         if (error) { alert(error.message); return; }
+        callDesktop('/api/tcg/messages/export').catch(() => { /* the next sync removes the file */ });
         await loadMessages(); draw(container);
     }));
     cell.querySelector('.inc-resolve')?.addEventListener('click', () => setFollowUp(container, orderNumber, false));
@@ -485,7 +486,7 @@ function outboxBlock(orderNumber) {
             <div style="margin-top:4px; display:flex; gap:6px;">
                 ${m.status === 'draft' ? `<button class="btn inc-ob-edit" data-id="${esc(m.id)}" style="font-size:11px;">Edit draft</button>
                     <button class="btn inc-ob-discard" data-id="${esc(m.id)}" style="font-size:11px;">Discard</button>` : ''}
-                ${m.status === 'approved' ? `<button class="btn inc-ob-withdraw" data-id="${esc(m.id)}" style="font-size:11px;">Withdraw (back to draft)</button>` : ''}
+                ${['approved', 'exported'].includes(m.status) ? `<button class="btn inc-ob-withdraw" data-id="${esc(m.id)}" style="font-size:11px;" title="Take it back to a draft so you can edit it. Works until Grok has sent it.">Withdraw to edit</button>` : ''}
                 ${['failed', 'unknown'].includes(m.status) ? `<button class="btn inc-ob-redraft" data-id="${esc(m.id)}" style="font-size:11px;">New draft from this</button>` : ''}
             </div>
         </div>`;

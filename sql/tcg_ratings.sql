@@ -69,8 +69,8 @@ END $f$;
 CREATE OR REPLACE FUNCTION public.tcg_withdraw_rating(p_id uuid) RETURNS void
 LANGUAGE plpgsql AS $f$
 BEGIN
-    UPDATE tcg_rating_outbox SET status = 'draft', approved_at = NULL WHERE id = p_id AND status = 'approved';
-    IF NOT FOUND THEN RAISE EXCEPTION 'Only a rating that is approved but not yet handed to Grok can be withdrawn'; END IF;
+    UPDATE tcg_rating_outbox SET status = 'draft', approved_at = NULL, exported_at = NULL WHERE id = p_id AND status IN ('approved', 'exported');
+    IF NOT FOUND THEN RAISE EXCEPTION 'Only a rating that Grok has not submitted yet can be withdrawn'; END IF;
 END $f$;
 
 REVOKE EXECUTE ON FUNCTION public.tcg_approve_rating(uuid) FROM PUBLIC, anon;
