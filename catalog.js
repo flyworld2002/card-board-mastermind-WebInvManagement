@@ -48,8 +48,14 @@ let state = {
 };
 
 export async function renderCatalog(container) {
+    // the "TCGplayer catalogue" tab (tcg-catalogue.js); the last tab used is remembered while the app is open
+    if (window.__cbmCatalogTab === 'tcg') {
+        const m = await import(`./tcg-catalogue.js?v=${Date.now()}`);
+        return m.renderTcgCatalogue(container, () => renderCatalog(container));
+    }
     state = { rows: [], sets: [], search: '', setFilter: '', page: 0, hasMore: true, expandedCardId: null, variantsByCard: {}, sort: { column: 'name', ascending: true } };
     container.innerHTML = shellHTML();
+    container.querySelector('#cat-tab-tcg').addEventListener('click', () => { window.__cbmCatalogTab = 'tcg'; renderCatalog(container); });
     await loadAxisOptions();
     await loadSetsFilter(container);
     wireControls(container);
@@ -58,7 +64,13 @@ export async function renderCatalog(container) {
 
 function shellHTML() {
     return `
-        <h2 style="margin:0 0 16px;">Catalog</h2>
+        <div style="display:flex; align-items:center; gap:10px; margin:0 0 16px; flex-wrap:wrap;">
+            <h2 style="margin:0;">Catalog</h2>
+            <div style="display:flex; gap:6px; margin-left:12px;">
+                <button class="btn" style="background:var(--accent); color:#fff;">Our cards</button>
+                <button class="btn" id="cat-tab-tcg">TCGplayer catalogue</button>
+            </div>
+        </div>
         <div class="filters-bar">
             <input type="search" id="catalog-search" placeholder="Search by name or card number..." style="min-width:200px; flex:1;" />
             <select id="catalog-set-filter">
