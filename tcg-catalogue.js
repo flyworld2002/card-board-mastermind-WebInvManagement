@@ -4,6 +4,7 @@
 //   Cards - search TCGplayer products, see which of our exact card versions each printing is linked to, and
 //           Link / Change it (tcg_link_product: remembered as a manual link, order lines + Staging Review follow).
 //           "New version..." creates a card version (the same 7 finish fields as Catalog > Our cards) and links it.
+//           "New card..." creates the card itself (like Staging Review's Create new card) + its version, and links it.
 //   Sets  - which TCGplayer sets are tied to one of our sets; "Tie to our set" (tcg_tie_set) writes the set alias,
 //           and the desktop links that set's cards on the next sync (main.py --tcg-catalog-map).
 // SQL: sql/tcg_catalog_lookup.sql, sql/tcg_catalog_link.sql.
@@ -155,6 +156,7 @@ export async function renderTcgCatalogue(container, onOurCards) {
                         <input class="tp-name" placeholder="Type a card name..." value="${esc(baseName)}" style="width:220px;" />
                         <input class="tp-set" placeholder="Set (optional)" value="${esc(p.our_set_name || '')}" style="width:190px;" />
                         <input class="tp-num" placeholder="# (optional)" value="${esc(num)}" style="width:80px;" />
+                        <button class="btn tp-newcard" style="font-size:12px;" title="The card is not in our catalog at all: create it, its version, and link it">New card…</button>
                         <button class="btn tp-close" style="font-size:12px;">Cancel</button>
                     </div>
                     <div class="tp-note" style="font-size:11px; color:var(--text-secondary); margin-bottom:4px;"></div>
@@ -271,6 +273,68 @@ export async function renderTcgCatalogue(container, onOurCards) {
             let t = null;
             box.querySelectorAll('input').forEach(i => i.addEventListener('input', () => { clearTimeout(t); t = setTimeout(run, 300); }));
             box.querySelector('.tp-close').addEventListener('click', () => box.remove());
+            box.querySelector('.tp-newcard').addEventListener('click', async () => {
+                if (!Object.keys(AXIS_OPTIONS).length) await loadAxisOptions();
+                if (!window.__cbmOurSets) {
+                    const { data } = await supabase.from('card_sets').select('id, name, release_year').order('name');
+                    window.__cbmOurSets = data || [];
+                }
+                box.querySelector('.tp-newform')?.remove();
+                const AX = [['foil_type', 'Foil type'], ['foil_pattern', 'Foil pattern'], ['texture', 'Texture'], ['material', 'Material'],
+                            ['size', 'Size'], ['stamp_type', 'Stamp'], ['source_type', 'Source']];
+                const isPromoSet = /promo/i.test(p.set_name || '');
+                note.insertAdjacentHTML('afterend', `
+                    <div class="tp-newform" style="border:1px solid var(--accent); border-radius:6px; padding:8px 10px; margin:4px 0 8px; font-size:12px;">
+                        New card for TCGplayer's <strong>${esc(p.name)} · ${esc(printing)}</strong> (${esc(p.set_name)}). Check the cards listed below first, so you do not create a duplicate.
+                        <div style="display:flex; flex-wrap:wrap; gap:10px; margin:6px 0;">
+                            <label>Card name<br><input class="nc-name" value="${esc(baseName)}" style="width:200px;" /></label>
+                            <label>Our set<br><select class="nc-set" style="max-width:240px;"><option value="">pick a set...</option>${window.__cbmOurSets.map(o =>
+                                `<option value="${o.id}" ${o.id === p.card_set_id ? 'selected' : ''}>${esc(o.name)}${o.release_year ? ` (${o.release_year})` : ''}</option>`).join('')}</select></label>
+                            <label>Number<br><input class="nc-num" value="${esc(num)}" style="width:80px;" /></label>
+                            <label>Rarity<br><input class="nc-rarity" value="${esc(p.rarity || '')}" style="width:170px;" /></label>
+                            <label style="align-self:end;"><input type="checkbox" class="nc-promo" ${isPromoSet ? 'checked' : ''} /> Promo</label>
+                            <label style="align-self:end;"><input type="checkbox" class="nc-first" /> 1st Edition</label>
+                            <label style="align-self:end;"><input type="checkbox" class="nc-shiny" /> Shiny</label>
+                        </div>
+                        <div style="margin:2px 0;">Its version (leave a field on — for standard / none):</div>
+                        <div style="display:flex; flex-wrap:wrap; gap:10px; margin:4px 0 6px;">
+                            ${AX.map(([ax, label]) => `<label>${label}<br><select data-axis="${ax}"><option value="">—</option>${(AXIS_OPTIONS[ax] || []).map(([code, name]) =>
+                                `<option value="${esc(code)}" ${ax === 'foil_type' && code === want ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select></label>`).join('')}
+                        </div>
+                        <label style="display:block; margin-bottom:6px;"><input type="checkbox" class="nc-img" ${p.image_url ? 'checked' : ''} ${p.image_url ? '' : 'disabled'} /> Use TCGplayer's picture for the card</label>
+                        <button class="btn btn-primary nc-create" style="font-size:12px;">Create card &amp; link</button>
+                        <button class="btn nc-cancel" style="font-size:12px;">Cancel</button>
+                        <span class="nc-err" style="color:var(--danger); margin-left:8px;"></span>
+                    </div>`);
+                const f = box.querySelector('.tp-newform');
+                const err = (m) => { f.querySelector('.nc-err').textContent = m; };
+                f.querySelector('.nc-cancel').addEventListener('click', () => f.remove());
+                f.querySelector('.nc-create').addEventListener('click', async (ev) => {
+                    const name = f.querySelector('.nc-name').value.trim(), setId = f.querySelector('.nc-set').value;
+                    const number = f.querySelector('.nc-num').value.trim().replace(/^0+(?=\d)/, '');
+                    if (!name || !setId || !number) { err('Card name, set and number are needed.'); return; }
+                    ev.target.disabled = true;
+                    // same set + number + name already there? use it instead of creating a duplicate
+                    const { data: dup } = await supabase.from('card_master').select('id, name').eq('set_id', setId).eq('card_number', number);
+                    if ((dup || []).some(d => d.name.toLowerCase() === name.toLowerCase())) {
+                        ev.target.disabled = false;
+                        err('That card already exists in this set with this number: use "New version..." on it in the list below.');
+                        return;
+                    }
+                    const { data: card, error: e1 } = await supabase.from('card_master').insert({
+                        set_id: setId, name, card_number: number, rarity: f.querySelector('.nc-rarity').value.trim() || null,
+                        is_promo: f.querySelector('.nc-promo').checked, is_first_edition: f.querySelector('.nc-first').checked,
+                        is_shiny: f.querySelector('.nc-shiny').checked,
+                        image_url: f.querySelector('.nc-img').checked ? p.image_url : null,
+                    }).select('id').single();
+                    if (e1) { ev.target.disabled = false; err(`Could not create the card: ${e1.message}`); return; }
+                    const payload = { card_id: card.id };
+                    f.querySelectorAll('select[data-axis]').forEach(sel => { payload[sel.dataset.axis] = sel.value || null; });
+                    const { data: nv, error: e2 } = await supabase.from('card_variants').insert(payload).select('id').single();
+                    if (e2) { err(`The card was created, but not its version: ${e2.message}. Search for it and use "New version...".`); return; }
+                    if (!(await doLink(nv.id))) ev.target.disabled = false;
+                });
+            });
             box.querySelector('.tp-name').focus();
             run();
         };
