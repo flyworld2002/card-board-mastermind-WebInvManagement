@@ -137,49 +137,83 @@ export async function renderTcgCatalogue(container, onOurCards) {
             more.querySelector('#tcgc-load-more')?.addEventListener('click', () => { page++; load(false); });
         };
 
-        // the picker: find our exact card version for one TCGplayer product + printing
+        // The picker: find our exact card version for one TCGplayer product + printing. Works like Staging Review's
+        // card search: type a name and results appear as you type; Set and # only narrow it when they are filled.
+        // If set + number + name finds nothing it falls back to name + number, then name alone, and says so.
+        const likeName = (t) => t.replace(/[%_]/g, '').replace(/pok[eé]mon/gi, 'Pok_mon').replace(/[‘’']/g, '_');
         const openPicker = (p, printing) => {
             body.querySelectorAll('tr.tcgc-picker').forEach(x => x.remove());
             const tr = body.querySelector(`tr[data-pid="${p.product_id}"]`);
             if (!tr) return;
             const baseName = String(p.name).split(' - ')[0].split(' (')[0].trim();
-            const num = String(p.number || '').split('/')[0].trim();
+            const num = String(p.number || '').split('/')[0].trim().replace(/^0+(?=\d)/, '');
             tr.insertAdjacentHTML('afterend', `<tr class="tcgc-picker"><td></td><td colspan="6" style="padding:6px 6px 12px;">
                 <div style="border:1px solid var(--border); border-radius:6px; padding:8px 10px;">
                     <div style="font-size:12px; margin-bottom:6px;">Link <strong>${esc(p.name)}</strong> · ${esc(printing)} to one of our card versions:</div>
-                    <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px;">
-                        <input class="tp-name" placeholder="Card name" value="${esc(baseName)}" style="width:200px;" />
-                        <input class="tp-num" placeholder="Number" value="${esc(num)}" style="width:80px;" />
-                        <input class="tp-set" placeholder="Our set" value="${esc(p.our_set_name || '')}" style="width:200px;" />
-                        <button class="btn tp-go" style="font-size:12px;">Search</button>
+                    <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px; align-items:center;">
+                        <input class="tp-name" placeholder="Type a card name..." value="${esc(baseName)}" style="width:220px;" />
+                        <input class="tp-set" placeholder="Set (optional)" value="${esc(p.our_set_name || '')}" style="width:190px;" />
+                        <input class="tp-num" placeholder="# (optional)" value="${esc(num)}" style="width:80px;" />
                         <button class="btn tp-close" style="font-size:12px;">Cancel</button>
                     </div>
-                    <div class="tp-results" style="font-size:12px;"></div>
+                    <div class="tp-note" style="font-size:11px; color:var(--text-secondary); margin-bottom:4px;"></div>
+                    <div class="tp-results" style="font-size:12px; max-height:320px; overflow-y:auto;"></div>
                 </div></td></tr>`);
             const box = tr.nextElementSibling;
-            const results = box.querySelector('.tp-results');
+            const results = box.querySelector('.tp-results'), note = box.querySelector('.tp-note');
             const want = FINISH[printing];
+            const COLS = 'card_id, variant_id, card_name, set_name, display_number, card_number, rarity, foil_type, foil_pattern, texture, foil_label, pattern_label, texture_label, material_label, size_label, stamp_label, source_label';
+            const variants = (name, set, n) => {
+                let q = supabase.from('v_card_variants').select(COLS).order('card_name').order('set_name').order('foil_type').limit(40);
+                if (name) q = q.ilike('card_name', `%${likeName(name)}%`);
+                if (set) q = q.ilike('set_name', `%${likeName(set)}%`);
+                if (n) q = q.eq('card_number', n);
+                return q;
+            };
+            let seqP = 0;
             const run = async () => {
+                const my = ++seqP;
+                const name = box.querySelector('.tp-name').value.trim(), set = box.querySelector('.tp-set').value.trim(), n = box.querySelector('.tp-num').value.trim().replace(/^0+(?=\d)/, '');
+                if (!name && !(set && n)) { results.innerHTML = ''; note.textContent = 'Type a card name (or fill both Set and #).'; return; }
                 results.textContent = 'Searching...';
-                const name = box.querySelector('.tp-name').value.trim(), n = box.querySelector('.tp-num').value.trim(), set = box.querySelector('.tp-set').value.trim();
-                let q = supabase.from('v_card_variants')
-                    .select('card_id, variant_id, card_name, set_name, card_number, rarity, foil_type, foil_pattern, texture, foil_label, pattern_label, texture_label, material_label, size_label, stamp_label, source_label')
-                    .order('card_name').order('foil_type').limit(40);
-                if (name) q = q.ilike('card_name', `%${name.replace(/[%_]/g, '')}%`);
-                if (n) { const bare = n.replace(/^0+/, '') || '0'; q = q.or(`card_number.eq.${bare},card_number.eq.${n.replace(/[,()]/g, '')}`); }
-                if (set) q = q.ilike('set_name', `%${set.replace(/[%_]/g, '')}%`);
-                const { data, error } = await q;
-                if (error) { results.innerHTML = `<span style="color:var(--danger)">${esc(error.message)}</span>`; return; }
-                if (!data.length) { results.textContent = 'No card versions found. Try fewer words, or clear the number or set.'; return; }
+                // tiers: everything filled, then drop the set, then drop the number
+                const tiers = [[name, set, n, '']];
+                if (set) tiers.push([name, '', n, `Nothing in "${set}" with that name/number; showing matches from every set.`]);
+                if (n && name) tiers.push([name, '', '', `Nothing with #${n}; showing every number.`]);
+                let data = [], used = '';
+                for (const [a, b, c, msg] of tiers) {
+                    const { data: d, error } = await variants(a, b, c);
+                    if (my !== seqP) return;
+                    if (error) { results.innerHTML = `<span style="color:var(--danger)">${esc(error.message)}</span>`; return; }
+                    if (d.length) { data = d; used = msg; break; }
+                }
+                // cards we have with no card version yet (they cannot be linked until a version exists)
+                let bare = [];
+                if (name) {
+                    let cq = supabase.from('card_master').select('id, name, card_number, rarity, card_sets(name)').ilike('name', `%${likeName(name)}%`).limit(15);
+                    if (n) cq = cq.eq('card_number', n);
+                    const { data: cm } = await cq;
+                    if (my !== seqP) return;
+                    const seen = new Set(data.map(r => r.card_id));
+                    bare = (cm || []).filter(c => !seen.has(c.id));
+                }
+                note.textContent = used;
+                if (!data.length && !bare.length) { results.textContent = 'No cards found. Try a shorter name, or clear Set and #.'; return; }
                 const same = (r) => (r.foil_type || 'non_holo') === want;
                 data.sort((a, b) => Number(same(b)) - Number(same(a)));
                 results.innerHTML = data.map(r => `
-                    <div style="display:flex; gap:10px; align-items:center; padding:3px 0; flex-wrap:wrap; ${same(r) ? '' : 'opacity:0.7;'}">
-                        <span style="min-width:200px;">${esc(r.card_name)} <span style="color:var(--text-secondary);">#${esc(r.card_number)}</span></span>
+                    <div style="display:flex; gap:10px; align-items:center; padding:4px 6px; border:1px solid var(--border); border-radius:4px; margin-bottom:3px; flex-wrap:wrap; ${same(r) ? '' : 'opacity:0.7;'}">
+                        <span style="min-width:200px;"><strong>${esc(r.card_name)}</strong> <span style="color:var(--text-secondary);">#${esc(r.display_number || r.card_number)}</span></span>
                         <span style="min-width:170px; color:var(--text-secondary);">${esc(r.set_name)}</span>
                         <span style="min-width:110px;">${esc(r.rarity || '')}</span>
                         <span style="min-width:150px;">${esc(pickerLabel(r))}${same(r) ? ' <span style="color:var(--success);">✓ same finish</span>' : ''}</span>
-                        <button class="btn tp-link" data-v="${esc(r.variant_id)}" style="font-size:12px;">Link</button>
+                        <button class="btn tp-link" data-v="${esc(r.variant_id)}" style="font-size:12px; margin-left:auto;">Link</button>
+                    </div>`).join('') + bare.map(c => `
+                    <div style="display:flex; gap:10px; align-items:center; padding:4px 6px; border:1px dashed var(--border); border-radius:4px; margin-bottom:3px; flex-wrap:wrap; opacity:0.7;">
+                        <span style="min-width:200px;"><strong>${esc(c.name)}</strong> <span style="color:var(--text-secondary);">#${esc(c.card_number)}</span></span>
+                        <span style="min-width:170px; color:var(--text-secondary);">${esc(c.card_sets?.name || '')}</span>
+                        <span style="min-width:110px;">${esc(c.rarity || '')}</span>
+                        <span style="color:var(--text-secondary);" title="This card has no finish/version row yet. Add the version (Catalog > Our cards) or buy it through Staging Review first.">no version of this card yet, cannot link</span>
                     </div>`).join('');
                 results.querySelectorAll('.tp-link').forEach(b => b.addEventListener('click', async () => {
                     b.disabled = true;
@@ -193,9 +227,10 @@ export async function renderTcgCatalogue(container, onOurCards) {
                     window.__cbmRefreshIncomingBadge?.();
                 }));
             };
-            box.querySelector('.tp-go').addEventListener('click', run);
+            let t = null;
+            box.querySelectorAll('input').forEach(i => i.addEventListener('input', () => { clearTimeout(t); t = setTimeout(run, 300); }));
             box.querySelector('.tp-close').addEventListener('click', () => box.remove());
-            box.querySelectorAll('input').forEach(i => i.addEventListener('keydown', (e) => { if (e.key === 'Enter') run(); }));
+            box.querySelector('.tp-name').focus();
             run();
         };
         body.querySelector('#tcgc-results').addEventListener('click', (e) => {
