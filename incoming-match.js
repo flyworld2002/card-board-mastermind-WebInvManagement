@@ -2,7 +2,8 @@
 // "Fix card matches": TCGplayer order lines that are not tied to one exact card variant of ours.
 // You pick the right card; the link is remembered per TCGplayer product + finish (tcg_products), so
 // the same product matches by itself on every later order (sql/tcg_match.sql). Opened from the
-// Incoming page.
+// Incoming page. The card picker (search, Link, New version, New card) is card-link-picker.js, the same one
+// the Catalog page's TCGplayer catalogue tab uses.
 
 import { supabase } from './shared.js';
 
@@ -77,7 +78,7 @@ function draw(container, onBack) {
     container.querySelectorAll('.mf-tab').forEach(b => b.addEventListener('click', () => { st.tab = b.dataset.t; st.open = null; draw(container, onBack); }));
     container.querySelector('#mf-all').addEventListener('change', async (e) => { st.allOrders = e.target.checked; await renderMatchFixer(container, onBack); });
     container.querySelectorAll('.mf-row').forEach(r => r.addEventListener('click', (e) => {
-        if (e.target.closest('a, button, input')) return;
+        if (e.target.closest('a, button, input, select, .mf-picker')) return;
         st.open = st.open === r.dataset.key ? null : r.dataset.key;
         draw(container, onBack);
     }));
@@ -109,62 +110,36 @@ function groupHtml(g) {
             <div style="font-size:12px; margin-top:2px;">${status}
                 <span style="color:var(--text-secondary);"> · ${esc([...g.orders].slice(0, 3).join(', '))}${g.orders.size > 3 ? '…' : ''}</span>
                 ${st.tab === 'linked' ? `<button class="btn mf-clear" data-line="${esc(l.id)}" style="font-size:11px; margin-left:8px;">Undo link</button>` : ''}</div>
-            ${open && st.tab === 'fix' ? `
-                <div class="mf-search" style="margin-top:8px; border-top:1px solid var(--border); padding-top:8px;">
-                    <input type="text" class="mf-name" value="${esc(l.card_name)}" placeholder="Card name" style="width:200px;" />
-                    <input type="text" class="mf-num" value="${esc((l.card_number || '').replace(/^0+/, ''))}" placeholder="#" style="width:70px;" />
-                    <input type="text" class="mf-set" value="" placeholder="Set (optional)" style="width:170px;" />
-                    <button class="btn btn-primary mf-go" type="button">Search</button>
-                    <div class="mf-results" style="margin-top:8px; font-size:13px;"></div>
-                </div>` : ''}
+            ${open && st.tab === 'fix' ? `<div class="mf-picker" style="margin-top:8px; border-top:1px solid var(--border); padding-top:8px; cursor:default;"><p style="font-size:12px;">Loading...</p></div>` : ''}
         </div>`;
 }
 
-function variantLabel(r) {
-    return [r.foil_label, r.pattern_label, r.texture_label, r.material_label, r.size_label, r.stamp_label, r.source_label].filter(Boolean).join(' · ') || 'Non-Holo';
-}
-
-function wireSearch(container, onBack, g) {
-    const box = container.querySelector(`.mf-row[data-key="${CSS.escape(st.open)}"] .mf-search`);
-    if (!box || !g) return;
+async function wireSearch(container, onBack, g) {
+    const host = container.querySelector(`.mf-row[data-key="${CSS.escape(st.open)}"] .mf-picker`);
+    if (!host || !g) return;
     const line = g.lines[0];
-    const results = box.querySelector('.mf-results');
-    const run = async () => {
-        results.textContent = 'Searching...';
-        const name = box.querySelector('.mf-name').value.trim();
-        const num = box.querySelector('.mf-num').value.trim();
-        const set = box.querySelector('.mf-set').value.trim();
-        let q = supabase.from('v_card_variants')
-            .select('card_id, variant_id, card_name, set_name, card_number, rarity, foil_type, foil_pattern, texture, foil_label, pattern_label, texture_label, material_label, size_label, stamp_label, source_label')
-            .order('card_name').order('foil_type').limit(40);
-        if (name) q = q.ilike('card_name', `%${name}%`);
-        if (num) q = q.eq('card_number', num);
-        if (set) q = q.ilike('set_name', `%${set}%`);
-        const { data, error } = await q;
-        if (error) { results.innerHTML = `<span style="color:var(--danger)">${esc(error.message)}</span>`; return; }
-        if (!data.length) { results.textContent = 'No cards found. Try fewer words, or clear the number or set.'; return; }
-        // same finish as the TCGplayer line first
-        const same = (r) => (r.foil_type || null) === (line.foil_type || null) && (r.foil_pattern || null) === (line.foil_pattern || null) && (r.texture || null) === (line.texture || null);
-        data.sort((a, b) => Number(same(b)) - Number(same(a)));
-        results.innerHTML = data.map(r => `
-            <div style="display:flex; gap:10px; align-items:center; padding:3px 0; ${same(r) ? '' : 'opacity:0.75;'}">
-                <span style="min-width:220px;">${esc(r.card_name)} <span style="color:var(--text-secondary);">#${esc(r.card_number)}</span></span>
-                <span style="min-width:170px; color:var(--text-secondary);">${esc(r.set_name)}</span>
-                <span style="min-width:120px; font-size:12px;">${esc(r.rarity)}</span>
-                <span style="min-width:150px; font-size:12px;">${esc(variantLabel(r))}${same(r) ? ' <span style="color:var(--success);">✓ same finish</span>' : ''}</span>
-                <button class="btn mf-link" data-v="${esc(r.variant_id)}" style="font-size:12px;">Link</button>
-            </div>`).join('');
-        results.querySelectorAll('.mf-link').forEach(b => b.addEventListener('click', async () => {
-            b.disabled = true;
-            const { data: res, error: e2 } = await supabase.rpc('tcg_link_line', { p_line_id: line.id, p_variant_id: b.dataset.v });
-            if (e2) { b.disabled = false; alert(e2.message); return; }
+    // what the TCGplayer catalogue knows about this product: our tied set, its picture
+    let cat = null;
+    if (line.product_id) {
+        const { data } = await supabase.from('v_tcg_catalog_lookup').select('set_name, card_set_id, our_set_name, image_url, rarity, number').eq('product_id', line.product_id).maybeSingle();
+        cat = data;
+    }
+    const { mountCardPicker, FINISH } = await import(`./card-link-picker.js?v=${Date.now()}`);
+    mountCardPicker(host, {
+        what: `${line.card_name}${line.card_number ? ` #${line.card_number}` : ''} · ${line.printing || line.condition_raw || ''}`,
+        name: line.card_name, number: line.card_number || cat?.number,
+        ourSetName: cat?.our_set_name || '', ourSetId: cat?.card_set_id || null,
+        tcgSetName: cat?.set_name || line.set_label, rarity: line.rarity || cat?.rarity, imageUrl: cat?.image_url || null,
+        want: { foil_type: line.foil_type || FINISH[line.printing] || 'non_holo', foil_pattern: line.foil_pattern, texture: line.texture },
+        onClose: () => { st.open = null; draw(container, onBack); },
+        onLink: async (variantId) => {
+            const { data: res, error } = await supabase.rpc('tcg_link_line', { p_line_id: line.id, p_variant_id: variantId });
+            if (error) return error.message;
             st.open = null;
             await renderMatchFixer(container, onBack);
             window.__cbmRefreshIncomingBadge?.();
             container.insertAdjacentHTML('afterbegin', `<p style="color:var(--success);">Linked: ${res.lines} order line${res.lines === 1 ? '' : 's'} fixed${res.staging_rows ? `, ${res.staging_rows} already in Staging Review updated` : ''}.</p>`);
-        }));
-    };
-    box.querySelector('.mf-go').addEventListener('click', run);
-    box.querySelectorAll('input').forEach(i => i.addEventListener('keydown', (e) => { if (e.key === 'Enter') run(); }));
-    run();
+            return true;
+        },
+    });
 }
