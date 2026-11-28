@@ -3,11 +3,12 @@
 // importer/tcg_catalog.py), with linking. Two views:
 //   Cards - search TCGplayer products, see which of our exact card versions each printing is linked to, and
 //           Link / Change it (tcg_link_product: remembered as a manual link, order lines + Staging Review follow).
+//           "New version..." creates a card version (the same 7 finish fields as Catalog > Our cards) and links it.
 //   Sets  - which TCGplayer sets are tied to one of our sets; "Tie to our set" (tcg_tie_set) writes the set alias,
 //           and the desktop links that set's cards on the next sync (main.py --tcg-catalog-map).
 // SQL: sql/tcg_catalog_lookup.sql, sql/tcg_catalog_link.sql.
 
-import { supabase } from './shared.js';
+import { supabase, loadAxisOptions, AXIS_OPTIONS } from './shared.js';
 
 const esc = (s) => (s ?? '').toString()
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -162,6 +163,17 @@ export async function renderTcgCatalogue(container, onOurCards) {
             const box = tr.nextElementSibling;
             const results = box.querySelector('.tp-results'), note = box.querySelector('.tp-note');
             const want = FINISH[printing];
+            const doLink = async (variantId) => {
+                const { data: rr, error: e2 } = await supabase.rpc('tcg_link_product', { p_product_id: p.product_id, p_printing: printing, p_variant_id: variantId });
+                if (e2) { results.insertAdjacentHTML('afterbegin', `<div style="color:var(--danger);">${esc(e2.message)}</div>`); return false; }
+                // redraw just this product's row
+                const { data: fresh } = await supabase.from('v_tcg_catalog_lookup').select('*').eq('product_id', p.product_id).single();
+                box.remove();
+                if (fresh) { byId.set(String(p.product_id), fresh); tr.outerHTML = rowHtml(fresh); }
+                body.querySelector('#tcgc-msg').innerHTML = `<span style="color:var(--success);">Linked ${esc(p.name)} · ${esc(printing)}.${rr.lines ? ` ${rr.lines} order line${rr.lines === 1 ? '' : 's'} now matched` : ''}${rr.staging_rows ? `, ${rr.staging_rows} in Staging Review updated` : ''}.</span>`;
+                window.__cbmRefreshIncomingBadge?.();
+                return true;
+            };
             const COLS = 'card_id, variant_id, card_name, set_name, display_number, card_number, rarity, foil_type, foil_pattern, texture, foil_label, pattern_label, texture_label, material_label, size_label, stamp_label, source_label';
             const variants = (name, set, n) => {
                 let q = supabase.from('v_card_variants').select(COLS).order('card_name').order('set_name').order('foil_type').limit(40);
@@ -207,24 +219,53 @@ export async function renderTcgCatalogue(container, onOurCards) {
                         <span style="min-width:170px; color:var(--text-secondary);">${esc(r.set_name)}</span>
                         <span style="min-width:110px;">${esc(r.rarity || '')}</span>
                         <span style="min-width:150px;">${esc(pickerLabel(r))}${same(r) ? ' <span style="color:var(--success);">✓ same finish</span>' : ''}</span>
-                        <button class="btn tp-link" data-v="${esc(r.variant_id)}" style="font-size:12px; margin-left:auto;">Link</button>
+                        <button class="btn tp-new" data-card="${esc(r.card_id)}" data-label="${esc(`${r.card_name} #${r.display_number || r.card_number} · ${r.set_name}`)}" style="font-size:11px; margin-left:auto;" title="Create another version of this card (different finish, stamp, pattern...) and link it">New version…</button>
+                        <button class="btn tp-link" data-v="${esc(r.variant_id)}" style="font-size:12px;">Link</button>
                     </div>`).join('') + bare.map(c => `
                     <div style="display:flex; gap:10px; align-items:center; padding:4px 6px; border:1px dashed var(--border); border-radius:4px; margin-bottom:3px; flex-wrap:wrap; opacity:0.7;">
                         <span style="min-width:200px;"><strong>${esc(c.name)}</strong> <span style="color:var(--text-secondary);">#${esc(c.card_number)}</span></span>
                         <span style="min-width:170px; color:var(--text-secondary);">${esc(c.card_sets?.name || '')}</span>
                         <span style="min-width:110px;">${esc(c.rarity || '')}</span>
-                        <span style="color:var(--text-secondary);" title="This card has no finish/version row yet. Add the version (Catalog > Our cards) or buy it through Staging Review first.">no version of this card yet, cannot link</span>
+                        <span style="color:var(--text-secondary);">no version of this card yet</span>
+                        <button class="btn tp-new" data-card="${esc(c.id)}" data-label="${esc(`${c.name} #${c.card_number} · ${c.card_sets?.name || ''}`)}" style="font-size:11px; margin-left:auto;">New version…</button>
                     </div>`).join('');
                 results.querySelectorAll('.tp-link').forEach(b => b.addEventListener('click', async () => {
                     b.disabled = true;
-                    const { data: rr, error: e2 } = await supabase.rpc('tcg_link_product', { p_product_id: p.product_id, p_printing: printing, p_variant_id: b.dataset.v });
-                    if (e2) { b.disabled = false; results.insertAdjacentHTML('afterbegin', `<div style="color:var(--danger);">${esc(e2.message)}</div>`); return; }
-                    // redraw just this product's row
-                    const { data: fresh } = await supabase.from('v_tcg_catalog_lookup').select('*').eq('product_id', p.product_id).single();
-                    box.remove();
-                    if (fresh) { byId.set(String(p.product_id), fresh); tr.outerHTML = rowHtml(fresh); }
-                    body.querySelector('#tcgc-msg').innerHTML = `<span style="color:var(--success);">Linked ${esc(p.name)} · ${esc(printing)}.${rr.lines ? ` ${rr.lines} order line${rr.lines === 1 ? '' : 's'} now matched` : ''}${rr.staging_rows ? `, ${rr.staging_rows} in Staging Review updated` : ''}.</span>`;
-                    window.__cbmRefreshIncomingBadge?.();
+                    if (!(await doLink(b.dataset.v))) b.disabled = false;
+                }));
+                results.querySelectorAll('.tp-new').forEach(b => b.addEventListener('click', async () => {
+                    if (!Object.keys(AXIS_OPTIONS).length) await loadAxisOptions();
+                    box.querySelector('.tp-newform')?.remove();
+                    const AX = [['foil_type', 'Foil type'], ['foil_pattern', 'Foil pattern'], ['texture', 'Texture'], ['material', 'Material'],
+                                ['size', 'Size'], ['stamp_type', 'Stamp'], ['source_type', 'Source']];
+                    note.insertAdjacentHTML('afterend', `
+                        <div class="tp-newform" style="border:1px solid var(--accent); border-radius:6px; padding:8px 10px; margin:4px 0 8px; font-size:12px;">
+                            New version of <strong>${esc(b.dataset.label)}</strong>, linked to TCGplayer's <strong>${esc(p.name)} · ${esc(printing)}</strong>.
+                            Leave a field on — for standard / none.
+                            <div style="display:flex; flex-wrap:wrap; gap:10px; margin:6px 0;">
+                                ${AX.map(([ax, label]) => `<label>${label}<br><select data-axis="${ax}"><option value="">—</option>${(AXIS_OPTIONS[ax] || []).map(([code, name]) =>
+                                    `<option value="${esc(code)}" ${ax === 'foil_type' && code === want ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select></label>`).join('')}
+                            </div>
+                            <button class="btn btn-primary tp-create" style="font-size:12px;">Create &amp; link</button>
+                            <button class="btn tp-newcancel" style="font-size:12px;">Cancel</button>
+                            <span class="tp-newerr" style="color:var(--danger); margin-left:8px;"></span>
+                        </div>`);
+                    const f = box.querySelector('.tp-newform');
+                    f.querySelector('.tp-newcancel').addEventListener('click', () => f.remove());
+                    f.querySelector('.tp-create').addEventListener('click', async (ev) => {
+                        ev.target.disabled = true;
+                        const payload = { card_id: b.dataset.card };
+                        f.querySelectorAll('select[data-axis]').forEach(sel => { payload[sel.dataset.axis] = sel.value || null; });
+                        const { data: nv, error } = await supabase.from('card_variants').insert(payload).select('id').single();
+                        if (error) {
+                            ev.target.disabled = false;
+                            f.querySelector('.tp-newerr').textContent = (error.code === '23505' || /duplicate|unique/i.test(error.message || ''))
+                                ? 'This card already has a version with exactly these fields: pick it in the list below and click Link.'
+                                : error.message;
+                            return;
+                        }
+                        if (!(await doLink(nv.id))) ev.target.disabled = false;
+                    });
                 }));
             };
             let t = null;
